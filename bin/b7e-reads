@@ -1,0 +1,111 @@
+#!/usr/bin/env node
+/**
+ * `b7e-reads` — which `test/*.mjs` suites `readFileSync` a `lib/` or `bin/` file's
+ * source and assert a regex or literal against the text, and what shape each
+ * assertion demands of it — before an edit trips one rather than after.
+ *
+ *     b7e-reads lib/advocate.js                  every suite that reads it as text
+ *     b7e-reads lib/advocate.js heldByWorker      narrowed to patterns that identifier trips
+ *     b7e-reads lib/advocate.js --json            one object instead of the printed report
+ *     b7e-reads --dir <root> lib/x.js             a different checkout, not this cwd
+ *
+ * bc-dgx7.114 is the audit: five sessions (bc-7qo.9, bc-arj0.23, bc-2uj4.9, bc-dgx7.16,
+ * bc-dgx7.15) each guessed which static-read suites a `lib/`/`bin/` edit would trip,
+ * and each guessed a different subset. `bc-2uj4.9` guessed wrong and found out from a
+ * red `test/surveybrief.mjs` in the full gate. This is the read that would have told
+ * it first — see `lib/reads.js` for the algorithm and its stated limits.
+ *
+ * Four shapes a finding can be flagged with: `IDENTIFIER-FAMILY` (a regex collecting a
+ * family of names sharing a prefix, `/heldBy\w+/`-style), `IMPORT-ORDER` (two
+ * `.indexOf(...)` calls on the same holder compared with `<`/`>` — which of two things
+ * comes first, not either one's exact words), `HAS-COUNT` (the pinned text itself
+ * carries a digit or a spelled-out count), `WHOLE-EXPRESSION` (the default — an exact
+ * literal or regex pinned as itself).
+ *
+ * Exit codes: `0` — ran fine, whether or not anything was found (a report, not a
+ * gate). `2` — no file at the given path.
+ *
+ * The grant argument, as it was made when this tool was added — moved here verbatim from
+ * lib/tooldecl.js by bc-fmk4v, so the reason sits beside the declaration it argues for and
+ * adding a tool appends to no shared file. "This list" is DEFAULT_TOOL_LIST; "above",
+ * "below" and "beside" name the order lib/tooldecl.js kept these in, which
+ * `git show 7c47d7d77:lib/tooldecl.js` still reads whole.
+ *
+ * which suites read a lib/bin file as text and what shape they demand of it. See bin/b7e-reads.
+ *
+ * @grant read
+ */
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { readsOf } from '../lib/reads.js';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const ROOT = path.join(HERE, '..');
+
+const argv = process.argv.slice(2);
+const has = (f) => argv.includes(f);
+const value = (f, fallback) => {
+  const at = argv.indexOf(f);
+  return at === -1 ? fallback : (argv[at + 1] ?? fallback);
+};
+
+if (has('--help') || has('-h')) {
+  console.log(
+    [
+      'b7e-reads <file> [name]         every test/*.mjs suite that readFileSyncs <file> and',
+      '                                 asserts a pattern against it (or, named, only the',
+      '                                 patterns that identifier would trip)',
+      'b7e-reads <file> --json          one object instead of the printed report',
+      "b7e-reads --dir <root> <file>    a different checkout, not this process's cwd",
+    ].join('\n'),
+  );
+  process.exit(0);
+}
+
+const DIR = path.resolve(value('--dir', ROOT));
+const JSON_MODE = has('--json');
+const positional = argv.filter((a, i) => !a.startsWith('-') && argv[i - 1] !== '--dir');
+const fileArg = positional[0];
+const name = positional[1] || null;
+
+if (!fileArg) {
+  console.error('usage: b7e-reads <file> [name]');
+  process.exit(2);
+}
+
+const targetAbs = path.isAbsolute(fileArg) ? fileArg : path.join(DIR, fileArg);
+if (!fs.existsSync(targetAbs) || !fs.statSync(targetAbs).isFile()) {
+  console.error(`no file at ${targetAbs}`);
+  process.exit(2);
+}
+const targetRel = path.relative(DIR, targetAbs).split(path.sep).join('/');
+
+const suites = readsOf(DIR, targetRel, { name });
+
+if (JSON_MODE) {
+  console.log(JSON.stringify({ file: targetRel, name, suites }, null, 2));
+  process.exit(0);
+}
+
+if (suites.length === 0) process.exit(0);
+
+const dim = (s) => `\x1b[2m${s}\x1b[0m`;
+const cyan = (s) => `\x1b[36m${s}\x1b[0m`;
+
+const totalFindings = suites.reduce((n, s) => n + s.findings.length, 0);
+console.log(
+  `${targetRel}${name ? ` (${name})` : ''} — read as text by ${suites.length} suite(s), ${totalFindings} pattern(s) applied\n`,
+);
+for (const suite of suites) {
+  console.log(suite.file);
+  for (const r of suite.reads) {
+    console.log(`  ${dim(`${String(r.line).padStart(5, ' ')}  readFileSync -> ${r.local}`)}`);
+  }
+  for (const f of suite.findings) {
+    const line = String(f.line).padStart(5, ' ');
+    console.log(`  ${line}  ${f.raw}  ${cyan(f.shape)}`);
+  }
+  console.log('');
+}
+process.exit(0);

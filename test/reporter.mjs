@@ -1,0 +1,819 @@
+#!/usr/bin/env node
+/**
+ * The browser's error reporter — what it files, and the six things it must not.
+ *
+ *     npm test
+ *     node test/reporter.mjs
+ *
+ * `POST /api/error` and its dedupe are covered by test/apperrors.mjs; this is the other
+ * end of the wire. It loads the real `public/report.js` in a vm with a hand-made
+ * `window`, the way test/dictate.mjs and test/queue.mjs load the real modules they cover,
+ * so a rewrite of the logic as a test-only copy cannot pass this while the phone ships
+ * something else.
+ *
+ * The acceptance criteria first, directly: an uncaught exception, a rejected promise and
+ * a failed fetch each arrive at the endpoint; the toast still appears when the report
+ * cannot be sent; and no token reaches the body of a report.
+ *
+ * Then the false positives, which are the whole reason this file is long. Every one of
+ * these is a **P0 bead** filed on a page that was working perfectly, and a tracker that
+ * files those has been made useless by the feature meant to help it:
+ *
+ * 1. **A fetch abandoned on navigation.** A tap on the tab bar rejects every request in
+ *    flight — one "Failed to fetch" per open poll, from a page whose only crime was
+ *    being left.
+ * 2. **An `AbortError`.** The long poll being torn down on purpose.
+ * 3. **A 4xx.** The daemon declining on purpose: a 409 close gate, a 403 for a feature
+ *    switched off in the config, a 401 that means sign in again.
+ * 4. **The report's own request.** A report that reports the failure of reporting is a
+ *    loop with no floor.
+ * 5. **A refusal.** `toast(msg, 'refused')` is red because the app declined what you
+ *    typed. "Give it a name" is not a bug.
+ * 6. **A loop.** A render that throws on every frame, capped rather than uncapped.
+ * 7. **A moment's failure of the long poll.** `/api/poll` (and `/api/console/poll`, the
+ *    same park for a chat — bc-i9lhr) is parked almost all of the time, so every
+ *    momentary loss of the connection lands on it and nothing else — and the app
+ *    recovers on its own while the staleness banner says so. That is bc-y8wf. A
+ *    poll that has been failing for half a minute with nothing answering in between is
+ *    still filed, because that one never came back. The span and not the count: one blip
+ *    fails every mount on the page at once, standbys included.
+ *
+ * The last two checks are static reads of the pages, because the wiring is not something
+ * a stub can see: that every page loads the file at all, and that each of the four copied
+ * `toast` functions reports *after* it has drawn — a report before the DOM writes could
+ * take the toast down with it, which is the one thing the reporter is not allowed to do.
+ */
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import vm from 'node:vm';
+import { fileURLToPath } from 'node:url';
+
+import { fingerprint, titleFor } from '../lib/errors.js';
+import { TIMEOUT_HEADER } from '../lib/bd.js';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const ROOT = path.join(HERE, '..');
+const PUBLIC = (f) => path.join(ROOT, 'public', f);
+const SOURCE = fs.readFileSync(PUBLIC('report.js'), 'utf8');
+
+/** The token on the URL and in storage. If either reaches a bead, that is bc-sqab again. */
+const TOKEN = 'sekrit-daemon-token-9f2c';
+
+/* --------------------------------------------------------------------- harness */
+
+let failures = 0;
+let ran = 0;
+/**
+ * One check. `await`ed at every call site, and that is not a style choice: half of these
+ * drive the fetch wrapper, which is asynchronous, and a `check` that only *started* an
+ * async body would report a pass for a promise nobody looked at.
+ */
+async function check(name, fn) {
+  ran += 1;
+  try {
+    await fn();
+    console.log(`  \x1b[32m✓\x1b[0m ${name}`);
+  } catch (err) {
+    failures += 1;
+    console.log(`  \x1b[31m✗\x1b[0m ${name}`);
+    console.log(`      ${String(err.message).split('\n')[0]}`);
+  }
+}
+
+/**
+ * The real file, in a room with nothing in it.
+ *
+ * `fetch` is a stub that records what it was called with and answers whatever the test
+ * queued — the reporter binds it at load as `nativeFetch`, so this is both the transport
+ * the reports leave by *and* the function the wrapper wraps. One stub is deliberately
+ * both: it is the only way to prove the report's own request does not go back through
+ * the wrapper.
+ */
+function load({ pathname = '/', respond = null, throwOnFetch = false, now = null } = {}) {
+  const listeners = new Map();
+  const calls = [];
+  const window = {
+    location: {
+      // Everything sensitive about a page URL, all in one: the daemon token, and a
+      // deep-link id that would file a bead per bead you opened.
+      href: `http://127.0.0.1:4317${pathname}?t=${TOKEN}&id=bc-4f2#frag`,
+      pathname,
+      origin: 'http://127.0.0.1:4317',
+    },
+    navigator: { userAgent: 'test-agent/1' },
+    localStorage: {
+      getItem: (k) => (k === 'beadcause.token' ? TOKEN : null),
+    },
+    addEventListener: (type, fn) => listeners.set(type, fn),
+    fetch: (input, init) => {
+      calls.push({ input, init });
+      if (throwOnFetch) throw new Error('fetch itself is broken');
+      return respond ? respond(input, init) : Promise.resolve({ status: 200, ok: true });
+    },
+  };
+  const ctx = vm.createContext({ window, URL, setTimeout, clearTimeout, console });
+  // A clock the check can move, for the one rule in the file that is about a span of time
+  // rather than a sequence of events. Patched as a static in the context — the same line
+  // test/freshness.mjs uses against this shape — rather than shadowing the constructor,
+  // because report.js's one `Date.parse` is on a real ISO string from the daemon and has
+  // to keep parsing it.
+  if (now) vm.runInContext('Date.now = () => __now();', Object.assign(ctx, { __now: now }));
+  vm.runInContext(SOURCE, ctx, { filename: 'report.js' });
+  const fire = (type, event) => {
+    const fn = listeners.get(type);
+    assert.ok(fn, `nothing listens for ${type}`);
+    return fn(event);
+  };
+  /** Only the reports. The wrapper's own traffic is in `calls` beside them. */
+  const reports = () =>
+    calls
+      .filter((c) => c.input === '/api/error')
+      .map((c) => ({ headers: c.init.headers, body: JSON.parse(c.init.body), init: c.init }));
+  return { window, ctx, calls, reports, fire, report: ctx.window.beadcause.report };
+}
+
+/** An Error made in this realm — which is not the vm's, and that is the point. */
+const err = (message, stack) => Object.assign(new Error(message), stack ? { stack } : {});
+
+/* -------------------------------------------------- the acceptance criteria */
+
+await check('an uncaught exception arrives at the endpoint', () => {
+  const app = load();
+  app.fire('error', {
+    message: 'Cannot read properties of undefined (reading id)',
+    filename: 'http://127.0.0.1:4317/app.js?v=32',
+    lineno: 3315,
+    colno: 9,
+    error: err('Cannot read properties of undefined (reading id)', 'TypeError: x\n    at render (http://127.0.0.1:4317/app.js:3315:9)'),
+  });
+  const [r] = app.reports();
+  assert.ok(r, 'nothing was posted');
+  assert.equal(r.body.kind, 'error');
+  assert.match(r.body.message, /Cannot read properties/);
+  assert.equal(r.body.source, 'http://127.0.0.1:4317/app.js?v=32');
+  assert.equal(r.body.line, 3315);
+  assert.equal(r.body.column, 9);
+  assert.match(r.body.stack, /at render/);
+  assert.match(r.body.at, /^\d{4}-\d\d-\d\dT/);
+  assert.equal(r.body.userAgent, 'test-agent/1');
+});
+
+await check('a rethrow trampoline is not attributed as the origin — bc-jjdar.2', () => {
+  // public/viewhost.js and public/panestage.js both catch a view's build() throwing and
+  // rethrow it out of a setTimeout, on purpose. `Error.stack` is captured where the error
+  // was actually constructed and does not move — so a rethrown error's stack names the
+  // real site while event.filename/event.lineno name only the trampoline that rethrew it.
+  // Every repo view that fails to draw, in every workspace, used to collapse onto that one
+  // trampoline location: errat:a96ab0d6aa08.
+  const app = load();
+  app.fire('error', {
+    message: "Cannot access 'section' before initialization",
+    filename: 'http://127.0.0.1:4317/viewhost.js',
+    lineno: 427,
+    colno: 11,
+    error: err(
+      "Cannot access 'section' before initialization",
+      'ReferenceError: x\n    at build (http://127.0.0.1:4317/v/loremia/x/asset/briefs.js:306:5)'
+    ),
+  });
+  const [r] = app.reports();
+  assert.ok(r, 'nothing was posted');
+  assert.equal(r.body.source, undefined, 'the rethrow site was attributed as the origin');
+  assert.equal(r.body.line, undefined, 'the rethrow site was attributed as the origin');
+  assert.equal(r.body.column, undefined, 'the rethrow site was attributed as the origin');
+  assert.match(r.body.stack, /at build/, 'the real site is still on the stack for frameFromStack to find');
+});
+
+await check('a cache-busted script URL still confirms an ordinary throw', () => {
+  // The query string is part of the loaded URL but does not always survive into a stack
+  // frame — the bare path must still be enough to confirm filename/lineno are real.
+  const app = load();
+  app.fire('error', {
+    message: 'boom',
+    filename: 'http://127.0.0.1:4317/app.js?v=9',
+    lineno: 100,
+    error: err('boom', 'TypeError: boom\n    at go (http://127.0.0.1:4317/app.js:100:4)'),
+  });
+  const [r] = app.reports();
+  assert.equal(r.body.source, 'http://127.0.0.1:4317/app.js?v=9');
+  assert.equal(r.body.line, 100);
+});
+
+await check('a rejected promise arrives at the endpoint', () => {
+  const app = load();
+  app.fire('unhandledrejection', { reason: err('bd is locked', 'Error: bd is locked\n    at sweep (http://127.0.0.1:4317/app.js:900:3)') });
+  const [r] = app.reports();
+  assert.ok(r, 'nothing was posted');
+  assert.equal(r.body.kind, 'rejection');
+  assert.match(r.body.message, /unhandled rejection — bd is locked/);
+  assert.match(r.body.stack, /at sweep/);
+});
+
+await check('a rejection of something that is not an Error still says what it was', () => {
+  const app = load();
+  app.fire('unhandledrejection', { reason: { status: 500, why: 'no' } });
+  const [r] = app.reports();
+  assert.ok(r, 'nothing was posted');
+  assert.match(r.body.message, /"status":500/);
+});
+
+await check('a failed fetch arrives at the endpoint, named by its path', async () => {
+  const app = load({ respond: () => Promise.reject(err('Failed to fetch')) });
+  await app.window.fetch('/api/questions?scope=human&t=' + TOKEN).then(
+    () => assert.fail('the wrapper swallowed the rejection'),
+    () => {}
+  );
+  const [r] = app.reports();
+  assert.ok(r, 'nothing was posted');
+  assert.equal(r.body.kind, 'fetch');
+  // The path, never the query: `?id=bc-4f2` would file a bead per bead you opened, and
+  // the query is also the one place the token rides.
+  assert.equal(r.body.message, 'GET /api/questions failed — Failed to fetch');
+  assert.equal(r.body.source, '/api/questions');
+});
+
+await check('a 500 is reported and the response still reaches the caller', async () => {
+  const app = load({ respond: () => Promise.resolve({ status: 500, ok: false }) });
+  const res = await app.window.fetch('/api/answer', { method: 'post' });
+  assert.equal(res.status, 500, 'the wrapper must be transparent');
+  const [r] = app.reports();
+  assert.ok(r, 'nothing was posted');
+  assert.equal(r.body.message, 'POST /api/answer failed — HTTP 500');
+});
+
+await check('the toast still happens when the report cannot be sent', () => {
+  // Every shape of broken transport at once: `fetch` throwing where it should reject.
+  // Reporting a toast must come back false rather than throwing into the toast function,
+  // which has already drawn and has no catch.
+  const app = load({ throwOnFetch: true });
+  assert.equal(app.report.toast('could not save that'), true, 'a broken transport must not look like a refused report');
+  const worse = load({ respond: () => Promise.reject(err('nope')) });
+  assert.doesNotThrow(() => worse.report.toast('could not save that'));
+  assert.doesNotThrow(() => worse.fire('error', { message: 'boom' }));
+});
+
+await check('no token reaches the body of a report', () => {
+  const app = load({ pathname: '/console' });
+  app.fire('error', {
+    // Both leaks in one: a message quoting a URL, and a stack frame inside the document,
+    // which is the one frame that carries the page's own query string.
+    message: `GET http://127.0.0.1:4317/api/bead?id=bc-4f2&t=${TOKEN} failed`,
+    filename: `http://127.0.0.1:4317/console?t=${TOKEN}`,
+    lineno: 12,
+    error: err('x', `Error: x\n    at onclick (http://127.0.0.1:4317/console?t=${TOKEN}:12:5)`),
+  });
+  const [r] = app.reports();
+  assert.ok(r, 'nothing was posted');
+  const body = JSON.stringify(r.body);
+  assert.ok(!body.includes(TOKEN), `the token is in the report: ${body}`);
+  assert.match(body, /REDACTED/);
+  // The page is its path and nothing else — not `location.href`, which is a credential.
+  assert.equal(r.body.url, '/console');
+  assert.ok(!body.includes('#frag'), 'the fragment travelled with the report');
+  // The token still goes as a header. That is how the daemon knows the report is yours;
+  // what must never happen is it going in the body, which is what becomes a bead.
+  assert.equal(r.headers['x-beadcause-token'], TOKEN);
+});
+
+/* ------------------------------------------------------- the false positives */
+
+await check('a fetch abandoned by a navigation is not reported', async () => {
+  const app = load({ respond: () => Promise.reject(err('Failed to fetch')) });
+  app.fire('pagehide', {});
+  // An ordinary path on purpose. `/api/poll` would be silent here whether or not the
+  // shutter worked, because the parked rule below swallows a first failure of it — and a
+  // check that passes for a reason other than the one it names is no check at all.
+  await app.window.fetch('/api/questions').catch(() => {});
+  assert.deepEqual(app.reports(), [], 'a tab tap filed a bead');
+  // And nothing else gets through either, for as long as the page is leaving.
+  app.fire('error', { message: 'boom on the way out' });
+  assert.deepEqual(app.reports(), []);
+});
+
+await check('an aborted fetch is not reported', async () => {
+  const app = load({ respond: () => Promise.reject(Object.assign(err('The operation was aborted'), { name: 'AbortError' })) });
+  // Twice, because a first failure of the long poll is dropped by the parked rule too —
+  // and once the second one would file, only the abort guard can still be keeping this
+  // quiet. Same reason in the check below.
+  await app.window.fetch('/api/poll').catch(() => {});
+  await app.window.fetch('/api/poll').catch(() => {});
+  assert.deepEqual(app.reports(), [], 'tearing down the long poll filed a bead');
+});
+
+await check('an aborted fetch is not reported when the error forgot to say so', async () => {
+  const controller = { aborted: true };
+  const app = load({ respond: () => Promise.reject(err('Failed to fetch')) });
+  await app.window.fetch('/api/poll', { signal: controller }).catch(() => {});
+  await app.window.fetch('/api/poll', { signal: controller }).catch(() => {});
+  assert.deepEqual(app.reports(), []);
+});
+
+await check('a 4xx is not reported', async () => {
+  for (const status of [400, 401, 403, 404, 409, 428]) {
+    const app = load({ respond: () => Promise.resolve({ status, ok: false }) });
+    await app.window.fetch('/api/answer', { method: 'POST' });
+    assert.deepEqual(app.reports(), [], `HTTP ${status} filed a bead`);
+  }
+});
+
+await check('a 503 the router marks as a swap-drain kill is not reported — bc-xl7n.134', async () => {
+  // bin/router.js answers this way when the socket it lost belonged to a backend it had
+  // already retired for a swap: a new backend was already serving, so this was never the
+  // daemon failing, and the plain 502 it used to send was exactly what filed the P0. The
+  // header is what tells the two apart — see the `headers` fake below, which is the
+  // minimum a Fetch `Response` promises and more than every other stub in this file
+  // bothers to build, because this is the one case that has to read one.
+  const app = load({
+    respond: () => Promise.resolve({ status: 503, ok: false, headers: { get: (k) => (k === 'x-beadcause-swap-drain' ? '1' : null) } }),
+  });
+  const res = await app.window.fetch('/api/queues');
+  assert.equal(res.status, 503, 'the wrapper must be transparent');
+  assert.deepEqual(app.reports(), [], 'a swap-drain 503 filed a bead');
+});
+
+await check('a 502 the daemon marks as a view generator failure is not reported — bc-3wf1r', async () => {
+  // lib/server.js answers this way for `/api/views/<ws>/<id>/data` when the repo's own
+  // generator failed and there is nothing held to fall back on. What failed is a script
+  // spawned on another repo's behalf, public/viewhost.js has already drawn the reason in
+  // the pane, and the sev2 P0 it used to file said a function of the daemon had stopped
+  // working when nothing of the sort had happened.
+  const app = load({
+    respond: () =>
+      Promise.resolve({
+        status: 502,
+        ok: false,
+        headers: { get: (k) => (k === 'x-beadcause-view-generator' ? '1' : null) },
+      }),
+  });
+  const res = await app.window.fetch('/api/views/loremia/studio/data');
+  assert.equal(res.status, 502, 'the wrapper must be transparent');
+  assert.deepEqual(app.reports(), [], 'a view-generator 502 filed a bead');
+});
+
+await check('an ordinary 502 on the same path with no such header is still reported', async () => {
+  // The header is the whole of the exemption. A 502 from the router — the backend really
+  // is unreachable — arrives on this same path and must still file.
+  const app = load({ respond: () => Promise.resolve({ status: 502, ok: false, headers: { get: () => null } }) });
+  await app.window.fetch('/api/views/loremia/studio/data');
+  const [r] = app.reports();
+  assert.ok(r, 'a bare 502 did not file a bead');
+  assert.equal(r.body.message, 'GET /api/views/loremia/studio/data failed — HTTP 502');
+});
+
+await check('a 504 the daemon marks as a tracker timeout is not reported — bc-v6024', async () => {
+  // lib/server.js answers this way on `/api/respond` when a `bd` was killed at its ceiling
+  // or refused while its workspace sat one out. loremia's Dolt going unreadable under an
+  // answer filed a sev2 P0 saying the daemon had stopped answering questions, twice, while
+  // it answered every other workspace — and the card already says so where it happened.
+  const app = load({
+    respond: () =>
+      Promise.resolve({
+        status: 504,
+        ok: false,
+        headers: { get: (k) => (k === 'x-beadcause-tracker-timeout' ? '1' : null) },
+      }),
+  });
+  const res = await app.window.fetch('/api/respond', { method: 'POST' });
+  assert.equal(res.status, 504, 'the wrapper must be transparent');
+  assert.deepEqual(app.reports(), [], 'a tracker-timeout 504 filed a bead');
+});
+
+await check('an ordinary 504 on the same path with no such header is still reported', async () => {
+  // The header is the whole of the exemption: any other 5xx on the answer route is still
+  // the daemon failing, and still files.
+  const app = load({ respond: () => Promise.resolve({ status: 504, ok: false, headers: { get: () => null } }) });
+  await app.window.fetch('/api/respond', { method: 'POST' });
+  const [r] = app.reports();
+  assert.ok(r, 'a bare 504 did not file a bead');
+  assert.equal(r.body.message, 'POST /api/respond failed — HTTP 504');
+});
+
+await check('the tracker-timeout literal in report.js is the one lib/bd.js exports', async () => {
+  // public/ has no import bridge to lib/, so the header is written out twice. A rename on
+  // one side only would silently turn every tracker timeout back into a P0.
+  assert.ok(SOURCE.includes(`'${TIMEOUT_HEADER}'`), `public/report.js does not excuse ${TIMEOUT_HEADER}`);
+});
+
+await check('an ordinary 503 with no swap-drain header is reported', async () => {
+  // The header is the whole of what makes the case above safe to skip — a 503 with none
+  // is an ordinary failure (the app has nothing behind the port, say) and must still file.
+  const app = load({ respond: () => Promise.resolve({ status: 503, ok: false, headers: { get: () => null } }) });
+  await app.window.fetch('/api/queues');
+  const [r] = app.reports();
+  assert.ok(r, 'a bare 503 did not file a bead');
+  assert.equal(r.body.message, 'GET /api/queues failed — HTTP 503');
+});
+
+await check('the report request does not go back through the wrapper', async () => {
+  // The endpoint answering 500 is the case that would loop: the wrapper would see a 5xx,
+  // report it, see that report fail, and so on with nothing to stop it.
+  const app = load({ respond: () => Promise.resolve({ status: 500, ok: false }) });
+  app.fire('error', { message: 'the first error' });
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(app.reports().length, 1, 'the reporter reported its own reporting');
+});
+
+await check('a cross-origin fetch is not reported', async () => {
+  const app = load({ respond: () => Promise.reject(err('Failed to fetch')) });
+  await app.window.fetch('https://api.github.com/repos/x/y').catch(() => {});
+  assert.deepEqual(app.reports(), [], "somebody else's URL reached a bead");
+});
+
+/* ------------------------------------------------- the poll, which is always out */
+
+/**
+ * A stub whose long poll is broken and whose every other endpoint — the report endpoint
+ * included — answers. `down` is read per call so a check can bring the poll back, and the
+ * clock is the check's own, because what the parked rule counts is a *span* of failure
+ * and a suite that cannot move time can only ever pin the sequence.
+ */
+const polling = () => {
+  const state = { down: true, now: 0 };
+  const app = load({
+    now: () => state.now,
+    respond: (input) => {
+      if (!String(input).startsWith('/api/poll')) return Promise.resolve({ status: 200, ok: true });
+      return state.down ? Promise.reject(err('Failed to fetch')) : Promise.resolve({ status: 200, ok: true });
+    },
+  });
+  return {
+    app,
+    state,
+    poll: () => app.window.fetch('/api/poll?since=12&wait=25').catch(() => {}),
+    /** Move the clock to this many milliseconds after the first failure. */
+    at: (ms) => {
+      state.now = ms;
+    },
+  };
+};
+
+await check('one failure of the long poll is a blip, and files nothing', async () => {
+  const { app, poll } = polling();
+  await poll();
+  assert.deepEqual(app.reports(), [], 'bc-y8wf: a phone waking up filed a P0');
+});
+
+await check('one blip failing two mounts at once is still one blip', async () => {
+  // The case the reviewer of #688 found, and the reason this rule counts a span rather
+  // than occurrences. A failing ordinary mount runs `arbitrate` in public/stream.js's
+  // `finally`; nothing is following by then, so every standby is started on the spot and
+  // issues its own /api/poll into the same dead connection milliseconds later.
+  // public/index.html is such a page — public/panestage.js mounts the standby — and it is
+  // the page bc-y8wf was filed from.
+  const { app, poll, at } = polling();
+  await poll();
+  at(3);
+  await poll();
+  assert.deepEqual(app.reports(), [], 'the standby mount landing in the same blip filed the bead');
+});
+
+await check('a long poll still failing half a minute later is reported', async () => {
+  const { app, poll, at } = polling();
+  await poll();
+  at(30 * 1000);
+  await poll();
+  const [r] = app.reports();
+  assert.ok(r, 'a poll that never came back must still file');
+  assert.equal(r.body.kind, 'fetch');
+  assert.equal(r.body.message, 'GET /api/poll failed — Failed to fetch');
+  assert.equal(r.body.source, '/api/poll');
+});
+
+await check('a long poll that has not been failing that long yet is not reported', async () => {
+  // The other side of the same bound. Without this, half a minute could be any number at
+  // all and nothing in the suite would notice.
+  const { app, poll, at } = polling();
+  await poll();
+  at(30 * 1000 - 1);
+  await poll();
+  assert.deepEqual(app.reports(), [], 'a stretch shorter than the bound was reported');
+});
+
+await check('an answered poll between two failures is two blips, not an incident', async () => {
+  // The clock is moved well past the bound on purpose: with the failures a moment apart
+  // this check would pass whether or not an answer clears anything.
+  const { app, state, poll, at } = polling();
+  await poll();
+  at(20 * 1000);
+  state.down = false;
+  await poll();
+  at(45 * 1000);
+  state.down = true;
+  await poll();
+  assert.deepEqual(app.reports(), [], 'the connection came back in between, so neither failure stood');
+});
+
+await check('a 500 from the poll is an answer, and is filed at once', async () => {
+  // The parked rule counts reachability, not health: a 500 is the daemon failing and is
+  // worth a bead the first time, and it also proves the connection is there.
+  const app = load({ respond: (input) => Promise.resolve(String(input).startsWith('/api/poll') ? { status: 500, ok: false } : { status: 200, ok: true }) });
+  await app.window.fetch('/api/poll?since=12');
+  const [r] = app.reports();
+  assert.ok(r, 'a 500 on the poll was swallowed');
+  assert.equal(r.body.message, 'GET /api/poll failed — HTTP 500');
+});
+
+await check('a 500 in the middle of a stretch clears it, because something answered', async () => {
+  // The half of "any response at all" that the check above cannot see: it starts from
+  // nothing standing, so it proves the 500 is not swallowed and nothing more. Here the
+  // 500 has to *clear* a failure already standing, which is what pins `answered` to its
+  // side of the `res.status >= 500` branch.
+  const state = { down: true, now: 0 };
+  const app = load({
+    now: () => state.now,
+    respond: (input) => {
+      if (!String(input).startsWith('/api/poll')) return Promise.resolve({ status: 200, ok: true });
+      return state.down ? Promise.reject(err('Failed to fetch')) : Promise.resolve({ status: 500, ok: false });
+    },
+  });
+  const poll = () => app.window.fetch('/api/poll?since=12&wait=25').catch(() => {});
+  await poll();
+  state.now = 10 * 1000;
+  state.down = false;
+  await poll();
+  state.now = 45 * 1000;
+  state.down = true;
+  await poll();
+  assert.deepEqual(
+    app.reports().map((r) => r.body.message),
+    ['GET /api/poll failed — HTTP 500'],
+    'the 500 was the only thing worth a bead here',
+  );
+});
+
+await check('a failure long after the last one starts the stretch again', async () => {
+  // A poll that is not being made cannot be answered, so a failure from before a
+  // stood-down mount or a tab left alone would otherwise still be standing when the next
+  // one lands, and "failing for half an hour" would be true of the clock rather than of
+  // the connection.
+  const { app, poll, at } = polling();
+  await poll();
+  at(4 * 60 * 1000);
+  await poll();
+  assert.deepEqual(app.reports(), [], 'a gap that long was counted as one stretch');
+  // …and the one that lands half a minute after *that* is a stretch of its own.
+  at(4 * 60 * 1000 + 30 * 1000);
+  await poll();
+  assert.equal(app.reports().length, 1, 'the clock did not start again');
+});
+
+await check('a stretch does not survive the page being hidden', async () => {
+  // The phone in a pocket, by name: the poll is not running while the screen is off, so
+  // nothing can answer, so nothing would otherwise clear what was standing when it went
+  // dark. Both edges of the event clear, because both mean the same thing.
+  const { app, poll, at } = polling();
+  await poll();
+  app.fire('visibilitychange', {});
+  at(40 * 1000);
+  await poll();
+  assert.deepEqual(app.reports(), [], 'a failure from before the screen went off was still standing');
+});
+
+/** The chat's long poll, down or up at will, with the clock in the suite's hands. */
+const chatPolling = () => {
+  const state = { down: true, now: 0 };
+  const app = load({
+    pathname: '/console',
+    now: () => state.now,
+    respond: (input) => {
+      if (!/^\/api\/(console\/)?poll/.test(String(input))) return Promise.resolve({ status: 200, ok: true });
+      return state.down ? Promise.reject(err('Failed to fetch')) : Promise.resolve({ status: 200, ok: true });
+    },
+  });
+  return {
+    app,
+    state,
+    chat: () => app.window.fetch('/api/console/poll?id=c-1&since=4&wait=25').catch(() => {}),
+    inbox: () => app.window.fetch('/api/poll?since=12&wait=25').catch(() => {}),
+    at: (ms) => {
+      state.now = ms;
+    },
+  };
+};
+
+await check("one failure of the console's long poll is a blip too, and files nothing", async () => {
+  const { app, chat } = chatPolling();
+  await chat();
+  assert.deepEqual(app.reports(), [], 'bc-i9lhr: one dropped park on /console filed a P0');
+});
+
+await check("the console's long poll still failing half a minute later is reported", async () => {
+  const { app, chat, at } = chatPolling();
+  await chat();
+  at(30 * 1000);
+  await chat();
+  const [r] = app.reports();
+  assert.ok(r, 'a chat poll that never came back must still file');
+  assert.equal(r.body.message, 'GET /api/console/poll failed — Failed to fetch');
+  assert.equal(r.body.source, '/api/console/poll');
+});
+
+await check('the two long polls keep separate clocks', async () => {
+  // A blip on one and a blip on the other half a minute later are two blips. One shared
+  // clock would read them as one stretch nobody had.
+  const { app, chat, inbox, at } = chatPolling();
+  await inbox();
+  at(30 * 1000);
+  await chat();
+  assert.deepEqual(app.reports(), [], "the inbox poll's failure started the chat poll's clock");
+});
+
+await check('an ordinary path still files the first time it fails', async () => {
+  const app = load({ respond: (input) => (String(input) === '/api/error' ? Promise.resolve({ status: 200, ok: true }) : Promise.reject(err('Failed to fetch'))) });
+  await app.window.fetch('/api/questions').catch(() => {});
+  assert.equal(app.reports().length, 1, 'the parked rule widened past the poll');
+});
+
+await check('the same error twice in a row is reported once', () => {
+  const app = load();
+  app.fire('error', { message: 'the same boom', filename: '/app.js', lineno: 7 });
+  app.fire('error', { message: 'the same boom', filename: '/app.js', lineno: 7 });
+  app.fire('error', { message: 'the same boom', filename: '/app.js', lineno: 7 });
+  assert.equal(app.reports().length, 1);
+});
+
+await check('a loop that throws every frame is capped', () => {
+  const app = load();
+  assert.equal(app.report.capacity(), 8, 'the cap moved — this suite and README say 8');
+  for (let i = 0; i < 40; i += 1) {
+    app.fire('error', { message: `a distinct failure ${String.fromCharCode(97 + (i % 26))}${i}`, filename: '/app.js', lineno: i });
+  }
+  assert.equal(app.reports().length, 8, 'the per-minute ceiling did not hold');
+  assert.equal(app.report.capacity(), 0);
+});
+
+await check('a toast repeating a fetch failure is not a second bead', async () => {
+  const app = load({ respond: (input) => (input === '/api/error' ? Promise.resolve({ status: 200, ok: true }) : Promise.reject(err('Failed to fetch'))) });
+  await app.window.fetch('/api/questions').catch(() => {});
+  assert.equal(app.reports().length, 1);
+  // What `api()` does next: throws, and the caller toasts the error's own message.
+  app.report.toast('Failed to fetch');
+  assert.equal(app.reports().length, 1, 'one incident became two beads');
+});
+
+/* -------------------------------------------------------------------- toasts */
+
+await check('a toast reports from the line that decided to show it, not from the toast', () => {
+  const app = load();
+  // Both dialects, because the phone is the reporter this exists for and the phone runs
+  // Safari. If the filter misses, the fingerprint lands on the toast function itself —
+  // the same line for every failure on the page — and collapses every red toast on the
+  // inbox into one bead.
+  app.report.toast('could not save: bd is locked');
+  const [r] = app.reports();
+  assert.ok(r, 'nothing was posted');
+  assert.equal(r.body.kind, 'toast');
+  assert.equal(r.body.message, 'could not save: bd is locked');
+  if (r.body.stack) {
+    assert.ok(!/report\.js/.test(r.body.stack), `report.js is still in the stack:\n${r.body.stack}`);
+    assert.ok(!/\bat (?:Object\.)?(?:toast|fromToast)\b/.test(r.body.stack), 'the toast frame is still on top');
+  }
+});
+
+await check('the frame filter drops both stack dialects', () => {
+  // The filter itself, against real stacks from both engines, since a vm stack has
+  // neither shape. This is the regex the check above cannot reach.
+  const v8 = [
+    'Error: report',
+    '    at fromToast (http://127.0.0.1:4317/report.js:300:20)',
+    '    at toast (http://127.0.0.1:4317/app.js:3823:41)',
+    '    at submit (http://127.0.0.1:4317/app.js:4234:9)',
+  ].join('\n');
+  const webkit = ['fromToast@http://127.0.0.1:4317/report.js:300:20', 'toast@http://127.0.0.1:4317/app.js:3823:41', 'submit@http://127.0.0.1:4317/app.js:4234:9'].join('\n');
+  const filter = (raw) =>
+    String(raw)
+      .split('\n')
+      .filter((line) => {
+        if (/^\s*[A-Za-z]*Error\b/.test(line)) return false;
+        if (/\breport\.js\b/.test(line)) return false;
+        if (/^\s*at\s+(?:Object\.)?(?:toast|fromToast)\b/.test(line)) return false;
+        if (/^\s*(?:toast|fromToast)@/.test(line)) return false;
+        return true;
+      })
+      .join('\n')
+      .trim();
+  // Kept honest against the real thing: the predicate above is copied out of report.js,
+  // so a change there that this does not see is a change this asserts about nothing.
+  const live = SOURCE.slice(SOURCE.indexOf('function callerStack()'));
+  for (const rule of ['\\breport\\.js\\b', '(?:toast|fromToast)@']) {
+    assert.ok(live.includes(rule), `callerStack no longer filters on ${rule} — update this check`);
+  }
+  // `.trim()` takes the indent off the first surviving frame, which is why this is not
+  // the line as V8 wrote it. The daemon's frameFromStack anchors on the tail, not the
+  // indent, so the trim costs nothing (lib/errors.js).
+  assert.equal(filter(v8), 'at submit (http://127.0.0.1:4317/app.js:4234:9)');
+  assert.equal(filter(webkit), 'submit@http://127.0.0.1:4317/app.js:4234:9');
+});
+
+/* ------------------------------------------------------ the seam to the daemon */
+
+/**
+ * What the daemon makes of exactly what the reporter sends.
+ *
+ * The two halves landed as two beads a day apart, and the payload between them is a bare
+ * JSON object with no schema anywhere — so the failure to guard against is not either
+ * half being wrong, it is them drifting apart while both stay green. This runs the real
+ * `fingerprint` and `titleFor` from lib/errors.js over the real bodies the real reporter
+ * built above, which is the only place the two shapes meet.
+ *
+ * The fingerprint is what matters, not the title: it is what decides between a new P0 and
+ * a comment on the one that already covers it. A payload the fingerprinter cannot read
+ * comes out with an empty `at`, every report falls back to the message key, and two bugs
+ * that happen to say "Failed to fetch" become one bead. Nothing would look wrong.
+ */
+await check('the daemon can fingerprint every payload the reporter builds', () => {
+  const app = load();
+  app.fire('error', {
+    message: 'Cannot read properties of undefined (reading id)',
+    filename: 'http://127.0.0.1:4317/app.js?v=32',
+    lineno: 3315,
+    colno: 9,
+  });
+  app.fire('unhandledrejection', {
+    reason: err('bd is locked', 'Error: bd is locked\n    at sweep (http://127.0.0.1:4317/console.js:900:3)'),
+  });
+  const [exception, rejection] = app.reports().map((r) => r.body);
+
+  // An exception knows its own file and line, because the browser hands both over.
+  const one = fingerprint(exception);
+  assert.equal(one.at, 'app.js:3315');
+  assert.ok(one.atLabel && one.msgLabel, 'both keys are needed for the either-label lookup');
+  assert.match(titleFor(exception, one), /^Cannot read properties.*— app\.js:3315$/);
+
+  // A rejection carries only a stack, and the daemon reads the frame out of it. This is
+  // the payload that would silently lose its primary key if the reporter ever stopped
+  // sending a stack, or sent a filtered one with no frames left.
+  const two = fingerprint(rejection);
+  assert.equal(two.at, 'console.js:900');
+
+  // And a fetch failure names the endpoint, from `source` rather than from any frame:
+  // "Failed to fetch" thrown inside api() has a stack that points at api(), the same
+  // line for every endpoint in the app.
+  const fetchReport = { message: 'GET /api/questions failed — Failed to fetch', source: '/api/questions' };
+  assert.equal(fingerprint(fetchReport).at, 'api/questions');
+});
+
+/* --------------------------------------------------------- the wiring, on disk */
+
+const PAGES = fs
+  .readdirSync(path.join(ROOT, 'public'))
+  .filter((f) => f.endsWith('.html'))
+  .sort();
+
+await check('every page loads the reporter, ahead of every other script', () => {
+  assert.ok(PAGES.length >= 12, `only found ${PAGES.length} pages`);
+  for (const page of PAGES) {
+    const html = fs.readFileSync(PUBLIC(page), 'utf8');
+    const mine = html.indexOf('<script src="/report.js">');
+    assert.ok(mine > 0, `${page} does not load /report.js — its errors are still lost`);
+    const first = html.indexOf('<script');
+    assert.equal(mine, first, `${page} loads something before /report.js, which cannot catch what loaded first`);
+  }
+});
+
+/** The four copies of `toast`, which is the whole of why the reporter is one file. */
+const TOASTERS = ['app.js', 'console.js', 'foundations.js', 'term.js'];
+
+await check('each of the four toasts reports, and reports last', () => {
+  for (const file of TOASTERS) {
+    const src = fs.readFileSync(PUBLIC(file), 'utf8');
+    const call = src.indexOf('window.beadcause?.report?.toast?.(msg)');
+    assert.ok(call > 0, `${file}'s toast does not report — a red toast there is still lost`);
+    // After the toast is on screen. A report built before the DOM writes could, if this
+    // file is ever wrong about never throwing, take the toast down with it.
+    const shown = src.indexOf('hidden = false');
+    assert.ok(shown > 0 && shown < call, `${file} reports before it draws the toast`);
+    assert.ok(src.includes('bad === true'), `${file} reports every red toast, including a refusal`);
+  }
+});
+
+await check('no refusal is filed as a failure', () => {
+  // `toast('some literal', true)` is the shape of a validation message — "Give it a
+  // name", "Write something first" — and `true` files it as a P0 bug. Those pass
+  // `'refused'`, which is red and files nothing.
+  const literal = /\btoast\(\s*(?:'[^']*'|"[^"]*"|`[^`$]*`)\s*,\s*true\s*\)/g;
+  for (const file of TOASTERS) {
+    const src = fs.readFileSync(PUBLIC(file), 'utf8');
+    const hits = src.match(literal) || [];
+    assert.deepEqual(hits, [], `${file}: a fixed message filed as a failure — ${hits.join(', ')}`);
+  }
+});
+
+await check('a refusal is still red', () => {
+  // `classList.toggle('bad', …)` has to see a boolean, or a third state that is truthy
+  // would be relying on the DOM's coercion to stay red.
+  for (const file of TOASTERS) {
+    const src = fs.readFileSync(PUBLIC(file), 'utf8');
+    assert.match(src, /classList\.toggle\('bad', Boolean\(bad\)\)/, `${file} does not coerce bad`);
+  }
+});
+
+/* ------------------------------------------------------------------------ done */
+
+console.log('');
+if (failures) {
+  console.log(`\x1b[31m${failures} of ${ran} checks failed\x1b[0m`);
+  process.exit(1);
+}
+console.log(`\x1b[32mall ${ran} checks passed\x1b[0m`);

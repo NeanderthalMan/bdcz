@@ -1,0 +1,100 @@
+#!/usr/bin/env node
+/**
+ * `b7e-sessions` — every Claude Code session this Mac knows about, and what the last boot did to it.
+ *
+ *     b7e-sessions            the table: name, where, bead, status, last transcript write
+ *     b7e-sessions --json     the same rows as one object
+ *     b7e-sessions --watch    the live view — `beadcause-top`, redrawn every few seconds until q
+ *
+ * bc-5to5r.3. After a reboot the daemon brings back the windows the machine took
+ * (lib/rebootresume.js) and writes down what it decided about each one — reopened, parked
+ * for its advocate, skipped and why, failed and why — as `rebootReport` in the app state.
+ * This prints that beside the live session list and the register lib/sessionregister.js keeps
+ * while the Mac is up, so one table answers "which windows do I have, which came back, and
+ * which did not and why". The daemon opens a window on it after a boot; by hand it answers
+ * the same question at any hour.
+ *
+ * Statuses, in the order they are printed:
+ *
+ *   live                                  a process is answering right now
+ *   reopened                              the boot pass brought it back with `claude --resume`
+ *   parked for its advocate               a daemon window; its advocate resumes it
+ *   alive at shutdown, not yet brought back   in the register from before the boot, no pass yet
+ *   skipped — <why>                       the pass declined: already back, directory gone, over the cap…
+ *   could not reopen — <why>              the pass tried and iTerm or the shell said no
+ *
+ * Reads the session records under `~/.claude/sessions`, `sessions.json` and `state.json`
+ * under the config directory, and `stat`s one transcript per row. It writes nothing, opens
+ * nothing and needs no token or daemon.
+ *
+ * @grant read
+ */
+import fs from 'node:fs';
+import { loadConfig, loadState } from '../lib/config.js';
+import { liveSessions, workspaceFor } from '../lib/claude.js';
+import { bootAt } from '../lib/rebootresume.js';
+import { loadRegister, renderSessions, sessionRows } from '../lib/sessionregister.js';
+import { transcriptFile } from '../lib/transcript.js';
+
+const argv = process.argv.slice(2);
+
+const USAGE = `usage: b7e-sessions [--json | --watch]
+
+Prints every Claude Code session this Mac knows about — live now, written in the register
+while the Mac was up, or decided about by the last reboot pass — with its name, directory,
+bead, status and the age of its last transcript write. Read-only: no token, no daemon.
+
+  --json    the rows as one object instead of the table
+  --watch   the live view instead (beadcause-top): busy/idle, context, cpu, memory, redrawn until q`;
+
+if (argv.includes('--help') || argv.includes('-h')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+const unknown = argv.filter((a) => a !== '--json' && a !== '--watch');
+if (unknown.length) {
+  console.error(`b7e-sessions: unknown argument ${unknown[0]}\n\n${USAGE}`);
+  process.exit(2);
+}
+
+const cfg = loadConfig();
+
+if (argv.includes('--watch')) {
+  // The same view `beadcause-top` is — bc-5to5r.7 — reached from here because this is the
+  // name a session already knows. One frame when piped, the loop on a terminal.
+  const { collectTop, runTop } = await import('../lib/top.js');
+  process.exit(await runTop({ collect: () => collectTop({ cfg }), once: !process.stdout.isTTY }));
+}
+const now = Date.now();
+const boot = bootAt();
+const state = loadState();
+const register = loadRegister();
+const live = liveSessions(cfg);
+const report = state.rebootReport && typeof state.rebootReport === 'object' ? state.rebootReport : null;
+
+const transcriptAt = (row) => {
+  const file = transcriptFile(cfg, { cwd: row.dir, sessionId: row.sessionId });
+  if (!file) return null;
+  try {
+    return fs.statSync(file).mtimeMs;
+  } catch {
+    return null;
+  }
+};
+
+const rows = sessionRows({ register, report, live, opened: state.opened, boot, now, transcriptAt }).map((r) => ({
+  ...r,
+  workspace: r.workspace || workspaceFor(cfg, r.dir),
+}));
+
+if (argv.includes('--json')) {
+  console.log(
+    JSON.stringify(
+      { boot: new Date(boot).toISOString(), report: report ? { boot: report.boot, at: report.at } : null, polledAt: register.polledAt, rows },
+      null,
+      2
+    )
+  );
+} else {
+  console.log(renderSessions({ rows, report, register, boot, now }).join('\n'));
+}

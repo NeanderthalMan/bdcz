@@ -1,0 +1,246 @@
+#!/usr/bin/env node
+/**
+ * Run one sweep against the live checkout and tracker, with every write recorded instead of
+ * performed.
+ *
+ *   b7e-dryrun <module>#<export> [--ws <workspace>] [--repo <dir>] [--args '<json>']
+ *              [--allow <binary>] [--json]
+ *
+ * bc-dgx7.168, filed by the session audit against four sessions (bc-iaju1.12, .8, .4, .11)
+ * that each wrote a daemon sweep and each wanted the same proof before delivering: what will
+ * this do to the real tracker tonight? None could ask. All four wrote a throwaway — a live
+ * `Bd` with `close` and `comment` replaced by "WOULD close …" — and no two were alike. The
+ * proof paid off every time: bc-iaju1.11's run surfaced bc-2g8s, the real orphaned card the
+ * whole bead was about; bc-iaju1.8's showed a new module spawning ~1200 subprocesses.
+ *
+ * This is next to b7e-call and is not it. `--json` there passes arguments as data, so a live
+ * `Bd` cannot cross it; `--over` calls the export once per row, not `sweep(bd, ws, …)` once.
+ * Here the export is called ONCE, with a real `Bd` built from loadConfig() handed in.
+ *
+ * The leading arguments are filled BY PARAMETER NAME, read off the export's own source:
+ * `bd`, `ws`/`workspace`, `dir`/`repo`/`cwd`/`checkout`/`root` and `cfg`/`config`, as a
+ * contiguous run at the front. `reconcileLanded(bd, ws, dir, opts)` gets three; `sweepWorktrees(dir,
+ * opts)` gets one; whatever follows comes from `--args`, in order. Reads go to the live
+ * tracker and the live checkout. Writes are recorded (see lib/dryrun.js): a `bd` write is
+ * answered with success so the sweep carries on and reports all of them; a write through
+ * anything else — git, gh, a file, a POST, a kill, an unlisted program — is REFUSED with an
+ * error and printed as such, and the run says it is incomplete rather than pretending.
+ *
+ * Reads after a write see the world as it is now, not as the write would have left it: a
+ * sweep that closes a bead and then lists open beads will still see it open.
+ *
+ * b7e-dryrun is deliberately NOT on DEFAULT_TOOL_LIST, for the b7e-call reason: it imports and
+ * runs whatever export its argument names, and its guarantee is a runtime one (patched
+ * built-ins), not an argv shape that could be checked before the call. An agent that wants a
+ * dry run asks for it.
+ *
+ * @grant excluded
+ */
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { inspect } from 'node:util';
+// lib/dryrun.js imports only built-ins, so it is safe to load before the guards are up.
+import { buildCall, createRecorder, dryBd, installGuards, renderWrite, serialise } from '../lib/dryrun.js';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const ROOT = path.join(HERE, '..');
+
+const USAGE = `usage:
+  b7e-dryrun <module>#<export> [--ws <workspace>] [--repo <dir>] [--args '<json-array>']
+             [--allow <binary>] [--json]
+
+  <module>#<export>  a path inside this checkout and the exported function to call, once.
+  --ws <name>        the workspace; its tracker is read live and \`bd\`/\`ws\` params are filled.
+  --repo <dir>       the checkout for a \`dir\`/\`repo\`/\`cwd\` param. Defaults to the workspace's
+                     own, or this checkout when there is no --ws.
+  --args '[...]'     a JSON array: the arguments AFTER the ones filled by name, in order.
+  --allow <binary>   run this program for real even where it cannot be shown to be a read
+                     (repeatable, or comma-separated). Named in the output; it is on you.
+  --json             the same report as one JSON object.
+
+  Leading parameters are filled by name from the export's own signature: bd, ws|workspace,
+  dir|repo|cwd|checkout|root, cfg|config. Every bd write is recorded and answered with
+  success; a write through git, gh, a file, a POST, a kill or an unlisted program is refused
+  with an error and reported as REFUSED — and the run says it is incomplete.`;
+
+function fail(msg, code = 1) {
+  console.error(`b7e-dryrun: ${msg}`);
+  process.exit(code);
+}
+
+const argv = process.argv.slice(2);
+if (argv.includes('--help') || argv.includes('-h') || argv.length === 0) {
+  console.log(USAGE);
+  process.exit(argv.length === 0 ? 1 : 0);
+}
+
+const target = argv[0];
+if (!target || target.startsWith('-')) fail(`missing <module>#<export>\n${USAGE}`);
+
+let wsName = null;
+let repoArg = null;
+let argsRaw = null;
+let asJson = false;
+const allow = [];
+for (let i = 1; i < argv.length; i += 1) {
+  const a = argv[i];
+  const next = () => {
+    i += 1;
+    if (argv[i] === undefined) fail(`${a} needs a value`);
+    return argv[i];
+  };
+  switch (a) {
+    case '--ws':
+      wsName = next();
+      break;
+    case '--repo':
+      repoArg = next();
+      break;
+    case '--args':
+      argsRaw = next();
+      break;
+    case '--allow':
+      allow.push(...next().split(',').map((s) => s.trim()).filter(Boolean));
+      break;
+    case '--json':
+      asJson = true;
+      break;
+    default:
+      fail(`unrecognised argument "${a}"\n${USAGE}`);
+  }
+}
+
+/* --------------------------------------------------------- module#export, and the refusal */
+
+const hashAt = target.indexOf('#');
+if (hashAt < 0) fail(`"${target}" is not <module>#<export> — missing "#"`);
+const modArg = target.slice(0, hashAt);
+const exportName = target.slice(hashAt + 1);
+if (!modArg || !exportName) fail(`"${target}" is not <module>#<export> — both sides required`);
+
+const rootAbs = path.resolve(ROOT);
+const resolvedModule = path.resolve(process.cwd(), modArg);
+if (resolvedModule !== rootAbs && !resolvedModule.startsWith(rootAbs + path.sep)) {
+  fail(`refusing module path outside the worktree: ${modArg}`);
+}
+if (!fs.existsSync(resolvedModule)) fail(`no such module: ${modArg}`);
+
+let extra = [];
+if (argsRaw != null) {
+  try {
+    const parsed = JSON.parse(argsRaw);
+    if (!Array.isArray(parsed)) throw new Error('--args must be a JSON array');
+    extra = parsed;
+  } catch (err) {
+    fail(`--args is not valid JSON: ${err.message}`);
+  }
+}
+
+/* ------------------------------------------------------------------- the guards go up */
+
+// Installed FIRST and disarmed, then armed once this command's own setup is done. Every
+// module has to load under the patch: the first version of this imported config.js and bd.js
+// ahead of it, and something they pull in (lib/gitref.js) did `promisify(execFile)` at load
+// and kept the real one — so `reconcileLanded`'s `git fetch` and `git merge --ff-only` RAN
+// while this said it refused everything not bd. Disarmed only long enough for loadConfig()
+// to make the config directory when there is none, which is setup and not the sweep.
+const rec = createRecorder();
+const guards = installGuards(rec, { allow, armed: false });
+
+const { loadConfig } = await import('../lib/config.js');
+const { Bd } = await import('../lib/bd.js');
+const cfg = loadConfig();
+guards.arm();
+
+let mod;
+try {
+  mod = await import(pathToFileURL(resolvedModule).href);
+} catch (err) {
+  fail(`${modArg} failed to import: ${String(err.message || err).split('\n')[0]}`);
+}
+const fn = mod[exportName];
+if (typeof fn !== 'function') {
+  fail(`${modArg} has no exported function "${exportName}" (found: ${Object.keys(mod).join(', ') || 'nothing'})`);
+}
+
+let ws = null;
+if (wsName) {
+  ws = cfg.workspaces.find((w) => w.name === wsName);
+  if (!ws) {
+    fail(`no workspace named "${wsName}"\nconfigured workspaces: ${cfg.workspaces.map((w) => w.name).join(', ') || 'none'}`);
+  }
+}
+
+let dir = repoArg ? path.resolve(repoArg) : null;
+if (!dir && ws) {
+  try {
+    const { resolveSessionDir } = await import('../lib/session.js');
+    dir = resolveSessionDir(cfg, ws);
+  } catch (err) {
+    fail(`cannot tell which checkout "${ws.name}" is (${String(err.message || err).split('\n')[0]}) — pass --repo <dir>`);
+  }
+}
+if (!dir) dir = rootAbs;
+if (!fs.existsSync(dir)) fail(`no such directory: ${dir}`);
+
+const realBd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me });
+const bd = dryBd(realBd, rec);
+
+const call = buildCall(fn, { bd, ws, dir, cfg, args: extra });
+if (call.missing.length) {
+  fail(`${exportName} takes ${call.missing.join(', ')} as a leading parameter and none was given — pass --ws or --repo`);
+}
+
+/* --------------------------------------------------------------------------- the run */
+
+const started = Date.now();
+let returned;
+let threw = null;
+try {
+  returned = await fn(...call.args);
+} catch (err) {
+  threw = String((err && err.message) || err).split('\n')[0];
+}
+const elapsedMs = Date.now() - started;
+
+const tally = rec.tally();
+const incomplete = tally.outside > 0;
+const filled = call.lead.length ? call.lead.join(', ') : 'nothing by name';
+
+if (asJson) {
+  console.log(
+    JSON.stringify({
+      target: `${modArg}#${exportName}`,
+      ws: ws?.name ?? null,
+      dir,
+      filled: call.lead,
+      allowed: allow,
+      writes: rec.writes,
+      returned: threw ? undefined : JSON.parse(serialise(returned ?? null)),
+      threw,
+      tally,
+      incomplete,
+      elapsedMs,
+    })
+  );
+} else {
+  console.log(`b7e-dryrun ${modArg}#${exportName}   ws=${ws?.name ?? '-'}   dir=${dir}   (filled: ${filled}; then ${extra.length} from --args)`);
+  console.log(
+    `nothing below was performed: bd writes are captured, every other write is refused${allow.length ? `; RUN FOR REAL, unguarded: ${allow.join(', ')}` : ''}`
+  );
+  console.log('');
+  for (const w of rec.writes) console.log(renderWrite(w));
+  if (rec.writes.length) console.log('');
+  if (threw) console.log(`THREW: ${threw}`);
+  else console.log(`→ ${typeof returned === 'string' ? returned : inspect(returned, { depth: 5, breakLength: 110, maxArrayLength: 40 })}`);
+  console.log('');
+  const parts = Object.entries(tally.byVerb).map(([verb, n]) => `${verb} ${n}`);
+  console.log(`${tally.total} write${tally.total === 1 ? '' : 's'} would have been made${parts.length ? ` — ${parts.join(', ')}` : ''}   (${elapsedMs}ms)`);
+  if (incomplete) {
+    console.log(
+      `INCOMPLETE: ${tally.outside} of them went through something other than bd and were refused, not captured — the sweep was handed an error at each, so what it did after may differ from a real run.`
+    );
+  }
+}
+process.exitCode = threw ? 1 : 0;

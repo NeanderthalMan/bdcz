@@ -1,0 +1,147 @@
+#!/usr/bin/env node
+/**
+ * `b7e-emits` — which line of code printed this, for a log line assembled from a
+ * template.
+ *
+ *     b7e-emits "[advocate] beadcause: parked worker bc-x — quiet for 20m"
+ *     tail -1 ~/Library/Logs/beadcause.log | b7e-emits
+ *     b7e-emits "exited without closing"          a fragment is enough
+ *     b7e-emits -w loremia "..."                  another workspace's checkout
+ *     b7e-emits --dir <root> "..."                a directory, not a workspace name
+ *     b7e-emits --json "..."
+ *
+ * bc-dgx7.131 is the session audit: three sessions (`bc-xl7n.149`, `bc-xl7n.146`,
+ * `bc-xl7n.150`) each needed the same fact — given a sentence observed in the daemon
+ * log or on a console, which template literal in `lib/` produced it — and none of
+ * their eleven combined greps got there directly; see `lib/emits.js` for the algorithm
+ * and what it deliberately does not do.
+ *
+ * For each candidate: the file and line, the template exactly as written, whether the
+ * whole observed line matched (every hole resolved) or only a fragment of it did, the
+ * observed text with each resolved hole marked `[value=${expr}]`, and "pinned by" —
+ * every `test/*.mjs` or `public/*.js` file that already asserts on one of the
+ * template's own literal segments (bc-xl7n.146's four hand-run greps, in one call).
+ *
+ * Exit codes: `0` — at least one candidate matched. `1` — no template in the tree
+ * could have produced the given text (a report, not a crash: the honest answer to "is
+ * this line even generated here"). `2` — bad usage, or `-w` named a workspace this Mac
+ * has no config for.
+ *
+ * @grant read
+ */
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { loadConfig } from '../lib/config.js';
+import { resolveSessionDir } from '../lib/session.js';
+import { emitsReport } from '../lib/emits.js';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const ROOT = path.join(HERE, '..');
+
+const USAGE = `usage: b7e-emits [-w <workspace> | --dir <path>] [--json] [<observed-line>]
+
+  -w, --workspace <name>   look in this workspace's checkout (default: this repo's own)
+  --dir <path>             look in this directory instead of a workspace — how this is
+                            tested; mutually exclusive with -w
+  --json                   one JSON object instead of the printed report
+
+Takes the observed line as an argument, or on stdin if none is given — a fragment is
+enough. Prints one block per matching template: file:line, the source expression
+verbatim, and the observed text with each resolved hole marked [value=\${expr}], plus
+which test/*.mjs or public/*.js files already assert on that template's own words.`;
+
+const argv = process.argv.slice(2);
+if (argv.includes('--help') || argv.includes('-h')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+
+let wsName = null;
+let dirGiven = null;
+let jsonMode = false;
+const positional = [];
+for (let i = 0; i < argv.length; i += 1) {
+  const a = argv[i];
+  switch (a) {
+    case '-w':
+    case '--workspace':
+      i += 1;
+      wsName = argv[i];
+      break;
+    case '--dir':
+      i += 1;
+      dirGiven = argv[i];
+      break;
+    case '--json':
+      jsonMode = true;
+      break;
+    default:
+      positional.push(a);
+  }
+}
+
+if (wsName && dirGiven) {
+  console.error('-w/--workspace and --dir are mutually exclusive — pick one.');
+  process.exit(2);
+}
+
+let dir;
+if (wsName) {
+  const cfg = loadConfig();
+  const ws = cfg.workspaces.find((w) => w.name === wsName);
+  if (!ws) {
+    console.error(`no workspace named ${wsName} — have: ${cfg.workspaces.map((w) => w.name).join(', ')}`);
+    process.exit(2);
+  }
+  try {
+    dir = resolveSessionDir(cfg, ws);
+  } catch (err) {
+    console.error(err.message);
+    process.exit(2);
+  }
+} else if (dirGiven) {
+  dir = path.resolve(dirGiven);
+} else {
+  dir = ROOT;
+}
+
+async function readStdin() {
+  if (process.stdin.isTTY) return '';
+  const chunks = [];
+  for await (const chunk of process.stdin) chunks.push(chunk);
+  return Buffer.concat(chunks).toString('utf8');
+}
+
+const observed = positional.length ? positional.join(' ') : (await readStdin()).trim();
+if (!observed) {
+  console.error('need the observed line, as an argument or on stdin.\n');
+  console.error(USAGE);
+  process.exit(2);
+}
+
+const found = emitsReport(dir, observed);
+
+if (jsonMode) {
+  console.log(JSON.stringify({ observed, found }, null, 2));
+  process.exit(found.length ? 0 : 1);
+}
+
+if (!found.length) {
+  console.log(`no template under ${path.relative(process.cwd(), path.join(dir, 'lib')) || 'lib'} could have produced this.`);
+  process.exit(1);
+}
+
+const dim = (s) => `\x1b[2m${s}\x1b[0m`;
+const green = (s) => `\x1b[32m${s}\x1b[0m`;
+const yellow = (s) => `\x1b[33m${s}\x1b[0m`;
+
+console.log(`${observed}\n${dim(`${found.length} candidate emitter(s)`)}\n`);
+for (const f of found) {
+  console.log(`${f.file}:${f.line}${f.mode === 'fragment' ? dim(' (fragment)') : ''}`);
+  console.log(`  ${f.raw}`);
+  console.log(`  ${f.mode === 'line' ? green(f.annotated) : yellow(f.annotated)}`);
+  console.log(`  pinned by: ${f.pinnedBy.length ? f.pinnedBy.join(', ') : dim('(none)')}`);
+  console.log('');
+}
+process.exit(0);

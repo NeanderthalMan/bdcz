@@ -1,0 +1,18 @@
+{
+  "name": "beadcause-temporal-mq-spike",
+  "private": true,
+  "type": "module",
+  "description": "bc-x0mhc: shadow the merge queue as a Temporal workflow. Never acts on a PR.",
+  "scripts": {
+    "worker": "node worker.mjs",
+    "shadow": "node shadow.mjs",
+    "test": "node test.mjs"
+  },
+  "dependencies": {
+    "@temporalio/activity": "^1.24.0",
+    "@temporalio/client": "^1.24.0",
+    "@temporalio/testing": "^1.24.0",
+    "@temporalio/worker": "^1.24.0",
+    "@temporalio/workflow": "^1.24.0"
+  }
+}

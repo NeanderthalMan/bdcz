@@ -1,0 +1,139 @@
+#!/usr/bin/env node
+/**
+ * `b7e-prbranch` — which copy of a pull request's branch is newest, and would
+ * `origin/main` merge into it.
+ *
+ *     b7e-prbranch -w beadcause 38
+ *     b7e-prbranch -w beadcause -b bc-khoe.47
+ *     b7e-prbranch -w beadcause 38 --json
+ *
+ * bc-dgx7.188: five revives of existing pull requests each worked out by hand where the
+ * newest copy of the branch was before merging main into it, and two merged into a stale
+ * copy first. See lib/prbranch.js for the design; this file is argv parsing, resolving
+ * the pull request, and printing.
+ *
+ * Takes a PR number (`38` or `#38`) or a bead id, which is resolved to its pull request
+ * the way `b7e-prior` does — the most recent open one, else the most recent of any state.
+ * Fetches `origin/<branch>` and `origin/<base>` first (the only write: remote-tracking
+ * refs), then prints one line per copy and the commands that follow, each with an
+ * absolute `git -C`. It runs none of them.
+ *
+ * Exit codes: `0` one copy is newest. `1` the copies have diverged — no newest, and
+ * picking one would lose work. `2` bad usage. `4` the workspace, bead or pull request is
+ * not there.
+ *
+ * The grant argument, as it was made when this tool was added: read-only in the same
+ * construction sense as b7e-prior — `bd show`, `gh pr view`/`list`, and git reads. The
+ * one write is `git fetch` into refs/remotes, which nothing else depends on being stale,
+ * and the commands it prints are text. bc-dgx7.188 is the argument: five sessions
+ * hand-built this answer from several git/gh calls each, and two acted on a stale copy.
+ *
+ * @grant read
+ */
+import { loadConfig } from '../lib/config.js';
+import { Bd } from '../lib/bd.js';
+import { resolveSessionDir } from '../lib/session.js';
+import { mainCheckout } from '../lib/gitref.js';
+import { branchesFor, pullRequestsFor } from '../lib/prior.js';
+import * as pr from '../lib/pr.js';
+import { prBranch, describePrBranch } from '../lib/prbranch.js';
+
+const argv = process.argv.slice(2);
+const has = (f) => argv.includes(f);
+const value = (...names) => {
+  for (const f of names) {
+    const inline = argv.find((a) => a.startsWith(`${f}=`));
+    if (inline) return inline.slice(f.length + 1);
+    const at = argv.indexOf(f);
+    if (at > -1) return argv[at + 1];
+  }
+  return undefined;
+};
+
+const USAGE = `usage: b7e-prbranch -w <workspace> (<pr-number> | -b <bead>) [--no-fetch] [--json]
+
+Which copy of this pull request's branch is newest, and would main merge into it?
+One line per copy — the PR's head on GitHub, origin/<branch> after a fetch, the local
+branch, and every worktree with it checked out — each with its sha, how far behind the
+newest it is, dirty or clean, MERGE_HEAD, and whether its lock's pid is live. Then a
+dry-run merge of origin/main into the newest copy (git merge-tree: lists the files a
+real merge would conflict on, touches nothing) and the commands that follow.
+
+  -w, --workspace <name>   which tracker (required; one of the configured workspaces)
+  <pr-number>              the pull request, as 38 or #38
+  -b, --bead <id>          or a bead, resolved to its pull request as b7e-prior does
+  --no-fetch               do not fetch origin first (offline; origin may be stale)
+  --json                   the machine-readable form
+
+Exit 0: one copy is newest. Exit 1: the copies have diverged. Exit 4: not found.`;
+
+if (has('--help') || has('-h')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+
+function fail(msg, code = 2) {
+  console.error(`b7e-prbranch: ${msg}`);
+  process.exit(code);
+}
+
+const wsName = value('-w', '--workspace');
+const beadId = value('-b', '--bead');
+const flagValues = new Set([value('-w', '--workspace'), value('-b', '--bead')]);
+const positional = argv.filter((a) => !a.startsWith('-') && !flagValues.has(a));
+const prArg = positional.find((a) => /^#?\d+$/.test(a));
+
+if (!wsName) fail(`-w/--workspace is required\n${USAGE}`);
+if (!prArg && !beadId) fail(`a pull request number or -b <bead> is required\n${USAGE}`);
+
+const cfg = loadConfig();
+const ws = cfg.workspaces.find((w) => w.name === wsName);
+if (!ws) {
+  fail(`no workspace named "${wsName}"\nconfigured workspaces: ${cfg.workspaces.map((w) => w.name).join(', ') || 'none'}`, 4);
+}
+
+let row = null;
+if (beadId) {
+  const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me });
+  try {
+    row = await bd.show(ws, beadId);
+  } catch (err) {
+    fail(`${ws.name} has no bead ${beadId}: ${String(err?.message || err).split('\n')[0]}`, 4);
+  }
+  if (!row) fail(`${ws.name} has no bead ${beadId}`, 4);
+}
+
+let dir;
+try {
+  dir = resolveSessionDir(cfg, ws, row);
+} catch (err) {
+  fail(`could not resolve a checkout for ${ws.name}: ${String(err?.message || err).split('\n')[0]}`, 4);
+}
+
+let found;
+try {
+  if (prArg) {
+    found = await pr.view(dir, prArg.replace('#', ''));
+  } else {
+    const main = await mainCheckout(dir);
+    const branches = (await branchesFor(main, beadId)).map((b) => b.branch);
+    const prs = await pullRequestsFor(main, beadId, branches);
+    if (!prs.ok) fail(`cannot read pull requests: ${prs.reason}`, 4);
+    // rows come newest-number first; an open one is the live copy of the work
+    found = prs.rows.find((r) => r.state === 'OPEN') || prs.rows[0];
+  }
+} catch (err) {
+  fail(`no such pull request: ${String(err?.message || err).split('\n')[0]}`, 4);
+}
+if (!found) fail(`${beadId} has no pull request`, 4);
+
+const result = await prBranch(dir, { branch: found.branch, prSha: found.headSha || null, base: found.base || 'main', fetch: !has('--no-fetch') });
+const out = { workspace: ws.name, pr: { number: found.number, url: found.url, state: found.state }, ...result };
+
+// `process.exitCode`, not `process.exit()`: a pipe can still hold unwritten output.
+if (has('--json')) console.log(JSON.stringify(out, null, 2));
+else {
+  console.log(`b7e-prbranch #${found.number} · ${found.branch} · ${found.state}\n`);
+  for (const line of describePrBranch(result)) console.log(line);
+}
+process.exitCode = result.diverged ? 1 : 0;

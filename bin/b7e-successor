@@ -1,0 +1,156 @@
+#!/usr/bin/env node
+/**
+ * `b7e-successor` — hand a relay round's remainder to the next round: file it, chain it,
+ * move the downstream blocker, in one call.
+ *
+ *   b7e-successor -w acme -b ac-r3 --title "Panels round 4: the 6 candidates after R3" --body round4.md
+ *   b7e-successor -w acme -b ac-r3 --title "..." --body - <<'EOF'
+ *   The body, however many semicolons and quotes it carries.
+ *   EOF
+ *   b7e-successor -w acme -b ac-r3 --title "..." --body f.md --assignee designer
+ *   b7e-successor -w acme -b ac-r3 --title "..." --body f.md --move-blocker ac-gate ac-other
+ *   b7e-successor -w acme -b ac-r3 --title "..." --body f.md --json
+ *
+ * **bc-dgx7.196**, re-filed from another workspace's tracker. Eight sessions closed a round
+ * of a multi-round job by hand: `bd create ... --parent --no-inherit-labels --body-file`,
+ * then `dep add new old`, `dep remove blocker old`, `dep add blocker new`, then a `bd show`
+ * readback. They differed in what they forgot — one never drew the new→old chain edge,
+ * two had the first create refused by the worktree guard and went grepping `--help` for
+ * `--body-file`, one copied labels off the previous round with `bd show --json | python3`.
+ *
+ * Creates exactly one child of the finished bead's parent, born with its own labels only;
+ * adds new→old; moves each blocker from old to new (by default every open bead that
+ * depends on the finished one, or exactly the ids named by `--move-blocker`); then reads
+ * each moved blocker's edges back. Exit non-zero if a readback disagrees. The body is a
+ * file or stdin and never an argv token, so semicolons and backticks arrive intact (the
+ * `b7e-say` rule, bc-gdub.2). A rerun with the same title under the same parent is refused
+ * before anything is written — `lib/successor.js` holds the logic.
+ *
+ * Exit codes: `0` filed, chained, moved, and every readback agreed. `1` something
+ * landed but a readback disagrees — the printed report says which. `2` bad usage. `3`
+ * the finished bead has no parent. `4` `-w` or `-b` names something the tracker does not
+ * have. `5` a round with this title already exists. `6` create produced no id.
+ *
+ * b7e-successor is deliberately NOT on DEFAULT_TOOL_LIST, for the reason `b7e-write` is
+ * not: it is a write door. It files a bead and rewrites dependency edges in any configured
+ * tracker, which is strictly more capability than the one restricted `dispatch` agent that
+ * list governs has from any single command lib/grants.js classifies as a write. A worker
+ * session already carries an unrestricted Bash and needs no grant to run it.
+ *
+ * @grant excluded
+ */
+import fs from 'node:fs';
+import { loadConfig } from '../lib/config.js';
+import { Bd } from '../lib/bd.js';
+import { makeSuccessor, SuccessorError } from '../lib/successor.js';
+
+const USAGE = `usage: b7e-successor -w <workspace> -b <finished bead> --title <text> [--body <file|->]
+                     [--assignee <role>] [--move-blocker <id>...] [--json]
+
+  -w, --workspace <name>   the tracker (required)
+  -b, --bead <id>          the round that just finished; the new round is its sibling (required)
+  --title <text>           the next round's title (required)
+  --body <file|->          its description, from a file or stdin ("-"); never an argv token
+  --assignee <role>        who the new round is assigned to
+  --move-blocker <id>...   move exactly these beads from the old round to the new one
+                            (default: every open bead that depends on the finished one)
+  --json                   print one object instead of the report
+
+Exit 0 only when the chain edge and every moved blocker read back as asked.`;
+
+const argv = process.argv.slice(2);
+if (argv.includes('--help') || argv.includes('-h')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+
+const FLAGS_WITH_VALUE = new Set(['-w', '--workspace', '-b', '--bead', '--title', '--body', '--assignee']);
+const opts = { moveBlockers: [] };
+let json = false;
+for (let i = 0; i < argv.length; i += 1) {
+  const a = argv[i];
+  const eq = a.startsWith('--') ? a.indexOf('=') : -1;
+  const name = eq > -1 ? a.slice(0, eq) : a;
+  const inline = eq > -1 ? a.slice(eq + 1) : undefined;
+  const take = () => {
+    if (inline !== undefined) return inline;
+    i += 1;
+    return argv[i];
+  };
+  if (name === '--json') json = true;
+  else if (name === '--move-blocker') {
+    // Greedy: every following token that is not itself a flag is another blocker.
+    if (inline !== undefined) opts.moveBlockers.push(inline);
+    while (argv[i + 1] !== undefined && !argv[i + 1].startsWith('-')) {
+      i += 1;
+      opts.moveBlockers.push(argv[i]);
+    }
+  } else if (FLAGS_WITH_VALUE.has(name)) {
+    const v = take();
+    if (name === '-w' || name === '--workspace') opts.workspace = v;
+    else if (name === '-b' || name === '--bead') opts.finished = v;
+    else if (name === '--title') opts.title = v;
+    else if (name === '--body') opts.body = v;
+    else if (name === '--assignee') opts.assignee = v;
+  } else {
+    console.error(`b7e-successor: unknown argument ${a}`);
+    console.error(USAGE);
+    process.exit(2);
+  }
+}
+
+const die = (code, msg) => {
+  console.error(`b7e-successor: ${msg}`);
+  process.exit(code);
+};
+
+if (!opts.workspace || !opts.finished || !opts.title) {
+  console.error(USAGE);
+  process.exit(2);
+}
+const cfg = loadConfig();
+const ws = cfg.workspaces.find((w) => w.name === opts.workspace);
+if (!ws) {
+  console.error(`configured workspaces: ${cfg.workspaces.map((w) => w.name).join(', ') || 'none'}`);
+  die(4, `no workspace named "${opts.workspace}"`);
+}
+
+let body = '';
+if (opts.body) {
+  try {
+    body = (opts.body === '-' ? fs.readFileSync(0, 'utf8') : fs.readFileSync(opts.body, 'utf8')).trim();
+  } catch (err) {
+    die(2, `cannot read --body ${opts.body}: ${err.message}`);
+  }
+}
+
+const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me });
+
+let result;
+try {
+  result = await makeSuccessor(bd, ws, {
+    finished: opts.finished,
+    title: opts.title,
+    body,
+    assignee: opts.assignee || '',
+    moveBlockers: opts.moveBlockers,
+  });
+} catch (err) {
+  if (err instanceof SuccessorError) die(err.code, err.message);
+  die(1, err.message);
+}
+
+if (json) {
+  console.log(JSON.stringify(result, null, 2));
+} else {
+  console.log(`new round: ${result.id} (child of ${result.parent})`);
+  console.log(`  ${result.id} depends on ${opts.finished}: ${result.chained ? 'read back' : 'NOT READ BACK'}`);
+  for (const m of result.moved) {
+    console.log(`  ${m.blocker}: ${m.ok ? 'now waits on' : 'DISAGREES, waits on'} ${m.dependsOn.join(', ') || '(nothing)'}`);
+  }
+  if (!result.moved.length) console.log('  no blocker moved (nothing open depended on the finished round)');
+}
+if (!result.ok) {
+  console.error('b7e-successor: a readback disagrees with what was written — check the beads above by hand');
+  process.exit(1);
+}

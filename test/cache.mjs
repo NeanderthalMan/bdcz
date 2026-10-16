@@ -1,0 +1,640 @@
+#!/usr/bin/env node
+/**
+ * The shared cache — what it hands back, and how many times it asks.
+ *
+ *     npm test
+ *     node test/cache.mjs
+ *
+ * lib/cache.js is bc-1kwl.2, and the P0's acceptance is three sentences: a cold-entry
+ * request returns without a `bd` or `gh` call in its critical path, concurrent requests
+ * on one expired key produce one refresh, and an invalidated key is refetched on the
+ * next read rather than at TTL expiry. Two of those three are about **how often the
+ * producer ran**, which is why almost every check here counts producer calls rather than
+ * inspecting state: a cache that returns the right value and asks twice for it has
+ * failed at the only thing it was built for.
+ *
+ * Everything runs on a fake clock. The windows this thing exists to manage are ten
+ * seconds to two minutes long, and a suite that waited them out would be the slowest
+ * file in the repo for no gain — the only real timers here are the ceiling checks, where
+ * the point *is* elapsed time and the numbers are shrunk to milliseconds.
+ *
+ * The one shape worth naming before you read the checks: a producer that never settles.
+ * It is not a hypothetical — `gh` over a dropped tailnet does exactly that — and it is
+ * the failure that would be invisible without a check, because the symptom is not an
+ * error, it is a key that is never refreshed again for the life of the process.
+ */
+import assert from 'node:assert/strict';
+
+const cache = await import('../lib/cache.js');
+
+let failures = 0;
+let ran = 0;
+const ok = (name) => {
+  ran += 1;
+  console.log(`  \x1b[32m✓\x1b[0m ${name}`);
+};
+const bad = (name, detail) => {
+  ran += 1;
+  failures += 1;
+  console.log(`  \x1b[31m✗\x1b[0m ${name}`);
+  if (detail) console.log(`      ${detail}`);
+};
+const check = async (fn, name) => {
+  try {
+    await fn();
+    ok(name);
+  } catch (err) {
+    bad(name, err.message);
+  }
+};
+
+/** A clock the checks move by hand. Every window below is measured against this. */
+let t = 1_000_000;
+const now = () => t;
+const tick = (ms) => {
+  t += ms;
+};
+
+/** A producer that counts its calls and can be told what to do next. */
+function producer(value = 'v1') {
+  const p = {
+    calls: 0,
+    value,
+    fail: null,
+    hang: false,
+    async run() {
+      p.calls += 1;
+      if (p.hang) return new Promise(() => {});
+      if (p.fail) throw new Error(p.fail);
+      return p.value;
+    },
+  };
+  return p;
+}
+
+/** Let every already-resolved promise chain settle, without moving the clock. */
+const settle = async (n = 4) => {
+  for (let i = 0; i < n; i += 1) await Promise.resolve();
+};
+
+const quiet = async (fn) => {
+  const said = [];
+  const was = console.error;
+  console.error = (line) => said.push(String(line));
+  try {
+    await fn(said);
+  } finally {
+    console.error = was;
+  }
+  return said;
+};
+
+const FRESH = { freshMs: 10_000, now };
+
+/* ------------------------------------------------------------------ the window */
+
+console.log('\nthe freshness window\n');
+
+cache.clear();
+{
+  const p = producer('rows');
+  const cold = await cache.read('ledger:a', p.run, FRESH);
+  await check(() => assert.equal(cold.value, 'rows'), 'a cold key produces, and hands back what the producer returned');
+  await check(() => assert.equal(cold.stale, false), 'and says it is not stale');
+
+  tick(9_999);
+  const warm = await cache.read('ledger:a', p.run, FRESH);
+  await check(() => assert.equal(p.calls, 1), 'a read inside the window does not call the producer at all');
+  await check(() => assert.equal(warm.ageMs, 9_999), 'and reports how old what it handed back is');
+}
+
+/* ------------------------------------------------------- stale-while-revalidate */
+
+console.log('\npast the window: answer now, refresh behind\n');
+
+cache.clear();
+{
+  const p = producer('old');
+  await cache.read('ledger:b', p.run, FRESH);
+  tick(10_001);
+  p.value = 'new';
+  p.hang = true;
+
+  // The producer for this refresh never settles. If the read waits on it, this line
+  // never returns — which is the whole property, stated as a check that can hang.
+  const stale = await cache.read('ledger:b', p.run, FRESH);
+  await check(() => assert.equal(stale.value, 'old'), 'a stale key answers from memory without waiting on the producer');
+  await check(() => assert.equal(stale.stale, true), 'and says outright that it is a kept answer');
+  await check(() => assert.equal(stale.refreshing, true), 'and that a fresh one is on its way');
+  await check(() => assert.equal(p.calls, 2), 'the refresh did start — behind the response, not in front of it');
+}
+
+cache.clear();
+{
+  const p = producer('old');
+  await cache.read('ledger:c', p.run, FRESH);
+  tick(10_001);
+  p.value = 'new';
+  await cache.read('ledger:c', p.run, FRESH);
+  await settle();
+  const after = await cache.read('ledger:c', p.run, FRESH);
+  await check(() => assert.equal(after.value, 'new'), 'and the next read has the refreshed value');
+  await check(() => assert.equal(p.calls, 2), 'having asked exactly twice in the whole exchange');
+}
+
+/* ---------------------------------------------------------------- single-flight */
+
+console.log('\none refresh, however many callers\n');
+
+cache.clear();
+{
+  const p = producer('v');
+  p.hang = true;
+  const readers = [1, 2, 3, 4, 5].map(() => cache.read('prs:/repo', p.run, { freshMs: 10_000, now, ceilingMs: 40 }));
+  await settle();
+  await check(() => assert.equal(p.calls, 1), 'five cold readers of one key produce one producer call');
+  await Promise.allSettled(readers);
+}
+
+cache.clear();
+{
+  const p = producer('v1');
+  await cache.read('prs:/repo', p.run, FRESH);
+  tick(10_001);
+  p.hang = true;
+  await Promise.all([1, 2, 3].map(() => cache.read('prs:/repo', p.run, FRESH)));
+  await check(() => assert.equal(p.calls, 2), 'and three phones on an expired key cause one refresh, not three');
+}
+
+/* ------------------------------------------------------------- last good beats empty */
+
+console.log('\na producer that throws\n');
+
+cache.clear();
+{
+  const p = producer('good');
+  await cache.read('ledger:d', p.run, FRESH);
+  tick(10_001);
+  p.fail = 'bd: database is locked';
+
+  const said = await quiet(async () => {
+    await cache.read('ledger:d', p.run, FRESH);
+    await settle();
+    tick(1);
+    await cache.read('ledger:d', p.run, FRESH);
+    await settle();
+  });
+
+  const over = await cache.read('ledger:d', p.run, FRESH);
+  await check(() => assert.equal(over.value, 'good'), 'the last good value is still readable over a failing producer');
+  await check(() => assert.match(over.error, /database is locked/), 'and the failure rides on the envelope, for the screen to say so');
+  await check(() => assert.equal(said.length, 1), 'logged once on the way into failure, not once per read');
+
+  p.fail = null;
+  p.value = 'better';
+  await cache.read('ledger:d', p.run, { ...FRESH, refresh: true });
+  const healed = await cache.read('ledger:d', p.run, FRESH);
+  await check(() => assert.equal(healed.value, 'better'), 'and a producer that recovers is believed again');
+  await check(() => assert.equal(healed.error, null), 'with the failure cleared off the envelope');
+}
+
+/* A failure that lands on an entry still INSIDE its window stays there, and a read will not
+   shift it — the warm path answers from memory without producing, so only a `refresh`, a
+   `drop` or the window running out can clear it. That is a property of a cache and not a
+   bug, but it is a trap for any caller that treats `error` as "report this and move on":
+   lib/prboard.js does, because a red PR card must not outlive the `gh` outage that caused
+   it, which is why it drops the key on the way out rather than only rethrowing. Written
+   down here because this is where somebody will look for it. */
+cache.clear();
+{
+  const p = producer('good');
+  await cache.read('prs:/repo', p.run, FRESH);
+  p.fail = 'gh: could not connect to github.com';
+  await quiet(async () => {
+    await cache.read('prs:/repo', p.run, { ...FRESH, refresh: true });
+  });
+
+  p.fail = null;
+  p.value = 'healed';
+  const warm = await cache.read('prs:/repo', p.run, FRESH);
+  await check(() => assert.match(warm.error || '', /could not connect/), 'a failure on a still-fresh entry is not shifted by a read');
+  await check(() => assert.equal(p.calls, 2), 'because a warm read produces nothing — nothing is asking whether it healed');
+
+  cache.drop('prs:/repo');
+  const after = await cache.read('prs:/repo', p.run, FRESH);
+  await check(() => assert.equal(after.error, null), 'dropping it is what makes the next read find out');
+  await check(() => assert.equal(after.value, 'healed'), 'and the answer is the one from after the outage');
+}
+
+cache.clear();
+{
+  const p = producer('never');
+  p.fail = 'bd: no such workspace';
+  let threw = null;
+  try {
+    await cache.read('ledger:e', p.run, FRESH);
+  } catch (err) {
+    threw = err;
+  }
+  await check(() => assert.match(String(threw?.message), /no such workspace/), 'but a failure with nothing kept is a throw — the caller has an error path and it must be reachable');
+  // The other half of bc-19vt's distinction: a producer that fell over is not a ceiling,
+  // and a caller keying off `timedOut` must not soften a real failure into "not yet".
+  await check(() => assert.equal(cache.timedOut(threw), false), 'and it is not flagged as a ceiling — the producer failed, which is a different answer');
+}
+
+/* -------------------------------------------------------------------- the ceiling */
+
+console.log('\na producer that never settles\n');
+
+cache.clear();
+{
+  const p = producer('v');
+  p.hang = true;
+  const said = await quiet(async () => {
+    let threw = null;
+    try {
+      await cache.read('queue:', p.run, { freshMs: 10_000, now, ceilingMs: 30 });
+    } catch (err) {
+      threw = err;
+    }
+    await check(() => assert.match(String(threw?.message), /did not answer within/), 'a cold read on a hung producer is bounded, not parked forever');
+    // bc-19vt. The board's route answers `unavailable` for this one and 500s for every
+    // other throw, and the difference has to be visible without matching on prose.
+    await check(() => assert.equal(cache.timedOut(threw), true), 'and the ceiling error says it is the ceiling, so a caller can answer "not yet" instead of "broken"');
+    await check(() => assert.equal(threw?.ceilingMs, 30), 'carrying the ceiling it ran out of, so the caller can say how long it waited');
+    await new Promise((r) => setTimeout(r, 20));
+    p.hang = false;
+    p.value = 'landed';
+    const second = await cache.read('queue:', p.run, { freshMs: 10_000, now, ceilingMs: 200 });
+    await check(() => assert.equal(p.calls, 2), 'and the slot it was holding was released, so the next read starts a fresh refresh');
+    await check(() => assert.equal(second.value, 'landed'), 'which answers');
+  });
+  await check(() => assert.ok(said.some((l) => /gave up its refresh slot/.test(l))), 'and the abandoned slot is said out loud');
+}
+
+/* -------------------------------------------------------- the wait, split from the slot */
+
+/**
+ * bc-19vt.1. `ceilingMs` above governs two different questions at once, and the test just
+ * above set them both by setting one number: how long the *slot* may hold a refresh, and
+ * how long *this call's own* `Promise.race` will wait on it. A phone arriving on a cold
+ * `board:` key inherited the slot's whole 150 seconds for no reason of its own — it gains
+ * nothing by waiting, because the abandoned sweep is still out there and lands into the
+ * keep either way. `waitMs` is the second, smaller number, and it bounds only the caller.
+ */
+
+console.log('\na request that gives up before the slot does\n');
+
+cache.clear();
+{
+  let release;
+  const slow = () => new Promise((resolve) => (release = resolve));
+  const said = await quiet(async () => {
+    let threw = null;
+    try {
+      // The slot may hold for 200ms (standing in for the real 150s); this call is only
+      // willing to wait 20ms of it (standing in for the "a few seconds" the bead asks for).
+      await cache.read('queue:', slow, { freshMs: 10_000, now, ceilingMs: 200, waitMs: 20 });
+    } catch (err) {
+      threw = err;
+    }
+    await check(() => assert.match(String(threw?.message), /did not answer within 20ms/), "a cold read gives up on its OWN wait, not the slot's ceiling");
+    await check(() => assert.equal(cache.timedOut(threw), true), 'still flagged as a ceiling rather than a producer failure');
+    await check(() => assert.equal(threw?.waitMs, 20), 'carrying the wait it ran out of');
+    await check(() => assert.equal(threw?.ceilingMs, 200), 'and the slot ceiling it did NOT run out of, for a caller that wants to say both');
+  });
+  await check(() => assert.ok(!said.some((l) => /gave up its refresh slot/.test(l))), 'and the slot itself was never abandoned — only this one caller stopped waiting on it');
+
+  // The abandoned producer is still out there, well inside its 200ms ceiling. Let it land,
+  // standing for the sweep landing a few seconds after the phone that started it gave up.
+  release('landed after the caller gave up');
+  await settle(8);
+  await check(() => assert.equal(cache.peek('queue:')?.value, 'landed after the caller gave up'), 'and it still writes into the keep — the caller giving up did not cancel it');
+}
+
+/* ------------------------------------------------------- a late refresh may not go backwards */
+
+console.log('\nan abandoned refresh that lands anyway\n');
+
+cache.clear();
+{
+  let release;
+  const slow = () => new Promise((resolve) => (release = resolve));
+  const first = cache.read('ledger:f', slow, { freshMs: 10_000, now, ceilingMs: 20 });
+  await first.catch(() => {});
+  await new Promise((r) => setTimeout(r, 30));
+
+  // A second, faster answer lands while the first is still out there.
+  tick(1);
+  await cache.read('ledger:f', async () => 'fast', { freshMs: 10_000, now, ceilingMs: 200 });
+  tick(1);
+  release('slow — and stale before it arrived');
+  await settle(8);
+
+  const after = await cache.read('ledger:f', async () => 'unused', FRESH);
+  await check(() => assert.equal(after.value, 'fast'), 'the newer answer stands — a three-minute sweep may not overwrite a three-second one');
+}
+
+/* ------------------------------------------------------------------ invalidation */
+
+console.log('\ndropping a key by name\n');
+
+cache.clear();
+{
+  const p = producer('v1');
+  await cache.read('ledger:sorrel', p.run, FRESH);
+  await cache.read('ledger:loremia', () => 'other', FRESH);
+  p.value = 'v2';
+
+  cache.drop('ledger:sorrel');
+  const after = await cache.read('ledger:sorrel', p.run, FRESH);
+  await check(() => assert.equal(after.value, 'v2'), 'a dropped key refetches on the next read, not at expiry');
+  await check(() => assert.equal(cache.peek('ledger:loremia').value, 'other'), 'and nothing else is touched');
+}
+
+cache.clear();
+{
+  await cache.read('ledger:a', () => 'a', FRESH);
+  await cache.read('ledger:b', () => 'b', FRESH);
+  await cache.read('prs:/repo', () => 'p', FRESH);
+  const n = cache.dropPrefix('ledger:');
+  await check(() => assert.equal(n, 2), 'a prefix drop takes every scope of one kind');
+  await check(() => assert.equal(cache.peek('ledger:a'), null), 'and leaves nothing kept under it');
+  await check(() => assert.ok(cache.peek('prs:/repo')), 'while another kind is untouched — which is what the key convention buys');
+}
+
+/* A drop takes the *in-flight* refresh with it, and this is the half that has a caller.
+   lib/prboard.js drops `board:` before a forced sweep rather than only asking for
+   `refresh`, because its producer is the only one in the app that reads another cache —
+   joining a background refresh would hand a merge two-minute-old `gh` rows while the code
+   around it believed it had re-swept. That is only true if a drop really does release the
+   single-flight slot, so: a sweep in flight, a drop, and the next read must start a *second*
+   producer and answer with the second one's value. The first is still allowed to land; what
+   it may not do is become the answer. See `generation` in lib/cache.js. */
+cache.clear();
+{
+  let release;
+  let calls = 0;
+  const slow = () => {
+    calls += 1;
+    const mine = calls;
+    return new Promise((resolve) => {
+      if (mine === 1) release = () => resolve('in flight when the drop happened');
+      else resolve('swept after the drop');
+    });
+  };
+
+  const joined = cache.read('board:', slow, FRESH);
+  cache.drop('board:');
+  const forced = await cache.read('board:', slow, FRESH);
+  await check(() => assert.equal(calls, 2), 'a read after a drop starts its own sweep rather than joining the doomed one');
+  await check(() => assert.equal(forced.value, 'swept after the drop'), 'and answers with the new sweep');
+
+  release();
+  const stranded = await joined;
+  await check(() => assert.ok(stranded), 'the caller stranded on the dropped sweep is still answered rather than left hanging');
+  await check(
+    () => assert.equal(cache.peek('board:').value, 'swept after the drop'),
+    'and the sweep the drop was about may not write itself back in — a merge would have re-read stale rows'
+  );
+}
+
+/* ------------------------------------------------------------------- the ⟳ button */
+
+console.log('\nrefresh: the user asked\n');
+
+cache.clear();
+{
+  const p = producer('v1');
+  await cache.read('ledger:g', p.run, FRESH);
+  p.value = 'v2';
+  const forced = await cache.read('ledger:g', p.run, { ...FRESH, refresh: true });
+  await check(() => assert.equal(forced.value, 'v2'), 'refresh skips a value that is still inside its window and pays the cost');
+  await check(() => assert.equal(p.calls, 2), 'by asking the producer');
+
+  p.hang = true;
+  const forced2 = { freshMs: 10_000, now, refresh: true, ceilingMs: 30 };
+  const joined = [cache.read('ledger:g', p.run, forced2), cache.read('ledger:g', p.run, forced2)];
+  await settle();
+  await check(() => assert.equal(p.calls, 3), 'and two refreshes at once join one sweep rather than starting two');
+  const out = await Promise.all(joined.map((j) => j.catch((err) => err)));
+  await check(
+    () => assert.equal(out.filter((r) => r?.value === 'v2').length, 2),
+    'and when that sweep will not answer, both of them fall back to the kept value rather than to an error'
+  );
+}
+
+/* ---------------------------------------------------------------- what it refuses */
+
+console.log('\nwhat it will not accept\n');
+
+await check(() => assert.rejects(() => cache.read('', () => 1, FRESH)), 'a key must be a non-empty string');
+await check(() => assert.rejects(() => cache.read('k', null, FRESH)), 'a producer must be a function');
+await check(() => assert.rejects(() => cache.read('k', () => 1, { now })), 'and a freshness window is not optional — a cache with no window is a variable');
+
+/* ------------------------------------------------- what a fan-out is filed under */
+
+/**
+ * bc-1kwl.22 — a request that reads many keys, against the real layer.
+ *
+ * test/timing.mjs checks the escalation by calling `timing.cache()` by hand. That is the
+ * unit, and it would still pass if this file's three call sites reported in an order the
+ * scalar could not survive — so the pair worth having is this one: the actual
+ * `cache.read` path, over the actual fan-out shape, inside one request.
+ *
+ * The shape is `/api/questions`: about thirty reads in one request (`questions:`,
+ * `foundation:` and `agentbeads:`, once each per workspace) whose keys are at whatever
+ * temperature that workspace left them. On the live daemon on 2026-08-17 that produced
+ * `slow GET /api/questions 47842ms stale` — impossible, since a stale hit's refresh is
+ * `detached` and cannot spend the request's own wall clock. It had paid for a cold
+ * producer and been renamed by a warmer read that finished later.
+ *
+ * **Deliberately last in the file.** `timing.begin` sets its record with
+ * `enterWith`, which persists for the rest of this async context — so a request opened
+ * in the middle here would quietly charge every later check's producer to it.
+ */
+console.log('\nwhat a request that reads many keys is filed under\n');
+
+const timing = await import('../lib/timing.js');
+
+{
+  cache.clear();
+  timing.reset();
+
+  // One key left to go stale, one primed and still inside its window, one never read.
+  await cache.read('questions:stale-ws', producer('a').run, FRESH);
+  tick(20_000);
+  await cache.read('questions:warm-ws', producer('b').run, FRESH);
+
+  const rec = timing.begin('GET /api/questions');
+  await cache.read('questions:cold-ws', producer('c').run, FRESH); // nothing kept — pays the producer
+  await cache.read('questions:stale-ws', producer('a2').run, FRESH); // memory now, refresh behind
+  await cache.read('questions:warm-ws', producer('b2').run, FRESH); // inside the window
+  await check(
+    () => assert.equal(timing.header(rec).match(/cache;desc=(\w+)/)[1], 'cold'),
+    'a request that reads a cold key and then a warmer one is filed cold — the later read does not rename it'
+  );
+  timing.end(rec, 200);
+  const row = timing.snapshot().routes.find((r) => r.route === 'GET /api/questions');
+  await check(() => assert.ok(row.cold && !row.stale && !row.warm), 'and it lands in the cold bucket, which is the one the budget is judged on');
+}
+
+{
+  // No cold key at all: one stale read among warm ones is still a refresh somebody's
+  // tracker queued behind, so `stale` is the honest word and `warm` would hide the cost.
+  cache.clear();
+  timing.reset();
+  await cache.read('foundation:a', producer('a').run, FRESH);
+  tick(20_000);
+  await cache.read('foundation:b', producer('b').run, FRESH);
+
+  const rec = timing.begin('GET /api/foundation');
+  await cache.read('foundation:a', producer('a2').run, FRESH);
+  await cache.read('foundation:b', producer('b2').run, FRESH);
+  timing.end(rec, 200);
+  const row = timing.snapshot().routes.find((r) => r.route === 'GET /api/foundation');
+  await check(() => assert.ok(row.stale && !row.warm && !row.cold), 'one stale key among warm ones still costs a refresh, so the request is stale rather than warm');
+}
+
+{
+  // And it only ever lowers: a request whose every key was inside its window is warm,
+  // however many of them it read.
+  cache.clear();
+  timing.reset();
+  await cache.read('work:a', producer('a').run, FRESH);
+  await cache.read('work:b', producer('b').run, FRESH);
+
+  const rec = timing.begin('GET /api/work');
+  await cache.read('work:a', producer('a2').run, FRESH);
+  await cache.read('work:b', producer('b2').run, FRESH);
+  timing.end(rec, 200);
+  const row = timing.snapshot().routes.find((r) => r.route === 'GET /api/work');
+  await check(() => assert.ok(row.warm && !row.cold && !row.stale), 'a request whose every key was fresh is not dragged colder by having read more than one');
+}
+
+/* ------------------------------------------- who paid, and who merely waited */
+
+/**
+ * bc-1kwl.33 — two readers on one cold key, and what each of their records says.
+ *
+ * The coalescing above is checked by counting producer calls, which is the right check
+ * for "one refresh, however many callers" and says nothing at all about the *second*
+ * caller's bill. That caller spawned nothing, so it came back `no subprocess, all ours`
+ * — indistinguishable in the log from a handler that really had run for a minute, and on
+ * 2026-08-21 that is exactly what the two worst samples in the daemon log were: a
+ * `/api/prs` at 62.6s and a `/api/queues` at 64.3s, both waiting on the 73.7s board
+ * sweep with 102 children that a third request was paying for.
+ *
+ * So this is the pair: one reader starts the producer, one joins it, and the assertions
+ * are that the starter keeps the children and the joiner names the wait. **Neither the
+ * coalescing nor the charge moved** — that the joiner's `children` is still zero is one
+ * of the checks here rather than an omission.
+ *
+ * Real elapsed time rather than the fake clock, because the wait is measured off
+ * `hrtime` the way a child process is: `now` moves the freshness windows and cannot move
+ * an interval.
+ */
+console.log('\nwhat the request that joined a sweep is filed as\n');
+
+/**
+ * One request, in an async context of its own.
+ *
+ * `timing.begin` uses `enterWith`, which persists for the remainder of the async
+ * resource it is called on — so two records opened side by side in this file's top-level
+ * context would be one record, the second silently overwriting the first, and every
+ * figure below would be about the same request twice. A `setImmediate` callback is a
+ * fresh resource, so the store it enters is its own and does not leak back out here.
+ * test/timing.mjs buys the same isolation with a real HTTP server, which is the right
+ * shape there and more than this needs.
+ */
+const inRequest = (key, fn) =>
+  new Promise((resolve, reject) => {
+    setImmediate(() => {
+      const rec = timing.begin(key);
+      Promise.resolve()
+        .then(fn)
+        .then(
+          (value) => {
+            // The header before the close, because that is the order a response goes out
+            // in and the only order in which what it says is a fact about the request.
+            const head = timing.header(rec);
+            resolve({ head, closed: timing.end(rec, 200), value });
+          },
+          (err) => {
+            timing.end(rec, 500);
+            reject(err);
+          }
+        );
+    });
+  });
+
+{
+  cache.clear();
+  timing.reset();
+  const lines = [];
+  timing.configure({ slowMs: 1, write: (l) => lines.push(l) });
+
+  let calls = 0;
+  let release = null;
+  /** The board sweep: one `bd` child, held open until the checks let it finish. */
+  const sweep = () => {
+    calls += 1;
+    return timing.measure('bd', () => new Promise((resolve) => (release = () => resolve('board'))));
+  };
+  const opts = { freshMs: 10_000, now, ceilingMs: 5_000 };
+
+  const starter = inRequest('GET /api/prs', () => cache.read('board:', sweep, opts));
+  // Long enough for the `setImmediate` and the microtask inside it: the slot has to exist
+  // before the second reader arrives, or this is two cold reads and not a join at all.
+  await new Promise((r) => setTimeout(r, 10));
+  const joiner = inRequest('GET /api/queues', () => cache.read('board:', sweep, opts));
+  await new Promise((r) => setTimeout(r, 40));
+  release();
+  const first = await starter;
+  const second = await joiner;
+
+  await check(() => assert.equal(calls, 1), 'two cold readers of one key still produce one sweep — the coalescing is untouched');
+  await check(() => assert.equal(second.value.value, 'board'), 'and the one that joined gets the answer the sweep produced');
+
+  await check(() => assert.ok(first.closed.wallMs > 30, `wallMs ${first.closed.wallMs}`), 'the reader that started the sweep is charged its child process');
+  await check(() => assert.equal(first.closed.joinedMs, 0), 'and nothing as a wait, because it was not waiting on anybody');
+
+  await check(() => assert.equal(second.closed.wallMs, 0), 'the reader that joined is charged no child process — the sweep was not its fan-out');
+  await check(
+    () => assert.ok(second.closed.joinedMs > 30, `joinedMs ${second.closed.joinedMs}`),
+    'and the wait is recorded as its own figure, which is the fact that was missing'
+  );
+  await check(
+    () => assert.ok(second.closed.oursMs < second.closed.ms / 2, `ours ${second.closed.oursMs} of ${second.closed.ms}`),
+    'so `ours` no longer absorbs it — a joined wait is not this handler running'
+  );
+  await check(() => assert.equal(second.closed.temperature, 'cold'), 'it is still filed cold: it did wait for a producer, and that is what cold means');
+
+  await check(() => assert.match(second.head, /joined;dur=\d/), 'the Server-Timing header carries the field');
+  await check(() => assert.doesNotMatch(second.head, /children;dur=/), 'and not a children field, which would claim a fan-out it never had');
+  await check(() => assert.match(first.head, /children;dur=\d/), 'while the starter carries children');
+  await check(() => assert.doesNotMatch(first.head, /joined;dur=/), 'and no joined field at all');
+
+  const line = lines.find((l) => l.includes('/api/queues')) || '';
+  await check(() => assert.match(line, /waiting on a sweep already running/), 'the slow line says what it waited on');
+  await check(() => assert.doesNotMatch(line, /no subprocess, all ours/), 'instead of the sentence that reads as a hung handler');
+  await check(
+    () => assert.match(lines.find((l) => l.includes('/api/prs')) || '', /waiting on 1 child process/),
+    "and the sweep's own request still reads as the sweep it was"
+  );
+
+  const rows = timing.snapshot().routes;
+  await check(() => assert.equal(rows.find((r) => r.route === 'GET /api/queues')?.joins, 1), 'the route counts the join, which is what keeps it out of `starved`');
+  await check(() => assert.equal(rows.find((r) => r.route === 'GET /api/prs')?.joins, 0), 'and the one that started the sweep has none');
+
+  timing.configure({ slowMs: 1000 });
+}
+
+/* ---------------------------------------------------------------------- verdict */
+
+console.log('');
+if (failures) {
+  console.log(`\x1b[31m${failures} of ${ran} checks failed\x1b[0m`);
+  process.exit(1);
+}
+console.log(`\x1b[32mall ${ran} checks passed\x1b[0m`);

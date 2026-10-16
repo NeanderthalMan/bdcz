@@ -1,0 +1,138 @@
+#!/usr/bin/env node
+/**
+ * `b7e-ownfile` — move a pre-split tool branch's doc section and grant paragraph into the
+ * tool's own files, in one call.
+ *
+ *     b7e-ownfile b7e-peek                 move it, from HEAD (or HEAD^1 if HEAD is a merge)
+ *     b7e-ownfile b7e-peek --from <ref>    take the old text from that ref instead
+ *     b7e-ownfile b7e-peek --dry-run       print the patch and write nothing
+ *
+ * bc-dgx7.189 is the audit. Four sessions (bc-dgx7.43, bc-7qo.24, bc-dgx7.85, bc-dgx7.44)
+ * each revived a `b7e-*` pull request written before bc-fmk4v, ran `git merge origin/main`,
+ * took main's side of README.md and lib/tooldecl.js, and then moved the tool's own text
+ * to its new home by hand — four methods, including a `sed -i '' '80,$d'` that ate the
+ * section's trailing diff text twice. About 22 pull requests (#14-38) still carry the
+ * in-between layout.
+ *
+ * Run it after taking main's side. It does three things and says each on a line:
+ *
+ *   the section        the `### … b7e-x` section as it stood at the ref, in README.md,
+ *                      docs/advocates.md, docs/b7e-tools.md or any other spec document,
+ *                      goes byte-for-byte to docs/b7e/b7e-x.md, with links rewritten so
+ *                      each still lands where it did
+ *   the leftovers      a copy of that section still in a shared document is removed
+ *                      (bc-iaju1.1's stale move into docs/b7e-tools.md is the usual one)
+ *   the paragraph      the comment block lib/tooldecl.js carried for the tool at the ref
+ *                      goes into bin/b7e-x's header directly above its @grant line; the
+ *                      generated `→ Bash(…)` line under it is dropped
+ *
+ * Re-running is safe: a destination that already has its section, and a header that
+ * already has the paragraph, are left alone.
+ *
+ * b7e-ownfile is deliberately NOT on DEFAULT_TOOL_LIST. It rewrites tracked files in the
+ * checkout it runs in, with no branch of its own and no path to commit or review the
+ * result — the argument b7e-register is excluded under — and its whole occasion is a
+ * worker reviving an old branch, which dispatch never does.
+ *
+ * @grant excluded
+ */
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import { applyEdits, deriveName, problemsFor, loadContext, derivedGrants, repoRoot, unifiedDiff } from '../lib/enroll.js';
+import { docFiles } from '../lib/docset.js';
+import { planMove } from '../lib/ownfile.js';
+
+const USAGE = 'b7e-ownfile <tool-name> [--from <ref>] [--dir <path>] [--dry-run]';
+
+function parseArgs(argv) {
+  const o = { name: null, from: null, dir: null, dryRun: false, help: false };
+  for (let i = 0; i < argv.length; i += 1) {
+    const a = argv[i];
+    const next = () => {
+      if (argv[i + 1] === undefined) throw new Error(`${a} needs a value`);
+      i += 1;
+      return argv[i];
+    };
+    if (a === '--from') o.from = next();
+    else if (a === '--dir') o.dir = next();
+    else if (a === '--dry-run' || a === '-n') o.dryRun = true;
+    else if (a === '--help' || a === '-h') o.help = true;
+    else if (a.startsWith('-')) throw new Error(`unknown flag ${a}`);
+    else if (o.name === null) o.name = deriveName(a);
+    else throw new Error(`unexpected argument ${a} — one tool at a time`);
+  }
+  return o;
+}
+
+/** HEAD, or its first parent when HEAD is the merge of main into the branch. */
+function defaultRef(git) {
+  try {
+    git(['rev-parse', '--verify', '-q', 'HEAD^2']);
+    return 'HEAD^1';
+  } catch {
+    return 'HEAD';
+  }
+}
+
+function main() {
+  let o;
+  try {
+    o = parseArgs(process.argv.slice(2));
+  } catch (err) {
+    console.error(`${err.message}\n${USAGE}`);
+    process.exit(2);
+  }
+  if (o.help || !o.name) {
+    console.log(USAGE);
+    process.exit(o.help ? 0 : 2);
+  }
+  const root = o.dir ? path.resolve(o.dir) : repoRoot();
+  const git = (args) =>
+    execFileSync('git', args, { cwd: root, encoding: 'utf8', maxBuffer: 1 << 28, stdio: ['ignore', 'pipe', 'ignore'] });
+  const ref = o.from || defaultRef(git);
+  try {
+    git(['rev-parse', '--verify', '-q', `${ref}^{commit}`]);
+  } catch {
+    console.error(`${ref} is not a commit here`);
+    process.exit(2);
+  }
+  const read = (rel) => {
+    try {
+      return fs.readFileSync(path.join(root, rel), 'utf8');
+    } catch {
+      return '';
+    }
+  };
+  // The spec at the ref: the same set docFiles names, read from git rather than the disk.
+  const oldFiles = git(['ls-tree', '-r', '--name-only', ref, '--', 'README.md', 'docs'])
+    .split('\n')
+    .filter((f) => /^(README\.md|docs\/[^/]+\.md)$/.test(f));
+  if (!read(`bin/${o.name}`)) {
+    console.error(`bin/${o.name} is not in this checkout — write the tool first, this moves its text`);
+    process.exit(2);
+  }
+
+  const plan = planMove({ name: o.name, ref, git, read, files: docFiles(root), oldFiles });
+  console.log(`${o.name} (old text from ${ref})`);
+  for (const l of plan.report) console.log(`  ${l}`);
+  if (o.dryRun) {
+    process.stdout.write(plan.edits.map((e) => unifiedDiff(e.rel, e.before, e.after)).join(''));
+    process.exit(0);
+  }
+  for (const e of plan.edits) fs.mkdirSync(path.dirname(path.join(root, e.rel)), { recursive: true });
+  applyEdits(root, plan.edits);
+
+  const owed = problemsFor(o.name, loadContext(root, derivedGrants(root)));
+  if (owed.length) {
+    console.log(`\n${o.name}: still owed —`);
+    for (const p of owed) console.log(`  ${p}`);
+    process.exit(1);
+  }
+  console.log(`${o.name}: nothing owed`);
+}
+
+const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) main();

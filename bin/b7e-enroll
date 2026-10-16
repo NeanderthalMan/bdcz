@@ -1,0 +1,152 @@
+#!/usr/bin/env node
+/**
+ * What a new bin/ command still owes before an agent can call it.
+ *
+ *   b7e-enroll                    every command in bin/ against every registry, right now
+ *   b7e-enroll b7e-x               just that one command's seven registrations
+ *   b7e-enroll bin/b7e-x.js        the command a brand-new file in bin/ WOULD be named,
+ *                                  checked the same way, before it is registered anywhere
+ *
+ * bc-khoe.27.11 is the audit: six sessions (bc-khoe.27.6, bc-khoe.27.7, bc-gdub.2,
+ * bc-gdub.3, bc-bmry.7, bc-zjab) each independently re-derived the same handful of
+ * places a new bin/ entry incurs debt in — grepping lib/toolbelt.js and lib/grants.js
+ * by hand, reading two memory notes every time, and at least once (bc-khoe.27.6)
+ * paying for the gap with a full 369-suite gate run that ended on
+ * `test/grants.mjs: dispatch grants Bash(b7e-apply:*), which nothing classified`.
+ * `bin/b7e-owes.js` already does this for routes, config keys, the evidence register
+ * and page aliases — this is the same shape, for the registries a *command*, not a
+ * route, owes.
+ *
+ * SEVEN CHECKS, run for every candidate name — a name already in package.json's
+ * `bin` map, or a stray `b7e-*` file under bin/ with no entry yet. Two are universal
+ * (any bin/ command owes them); five apply only to the `b7e-*` family — what
+ * bc-dgx7.2 calls "a skill": typed bare on PATH by the restricted `dispatch` agent,
+ * unlike the `beadcause-*` worker tools, which a worker's already-unrestricted Bash
+ * runs by absolute path (`node bin/deliver.js`) and which therefore need none of it —
+ * no exec bit (most, like bin/file.js and bin/ask.js, are plain `-rw-r--r--`), no
+ * dedicated README `###` section (they are documented in the surrounding prose
+ * instead), and no DEFAULT_TOOL_LIST entry at all. bc-bmry.7 lived this split for
+ * real, on a non-`b7e-` command (`bin/block.js`): it checked exactly package.json and
+ * package-lock.json, found nothing else it owed, and went looking for a *different*
+ * registry (lib/sessionaudit.js) that is out of scope here too.
+ *
+ *   1. bin/<name> itself exists, is executable, and starts with a node shebang — the
+ *      EXTENSIONLESS file specifically, for a name package.json does not register
+ *      yet: lib/foundation.js puts the main checkout's bin/ on PATH, so a command
+ *      resolves by the name it is typed as, and a package.json rename resolves only
+ *      after an `npm link` this install has never had (see memory note
+ *      only-an-extensionless-bin-resolves-on-path). Once a name IS already registered,
+ *      this trusts whatever file package.json already points to, `.js` suffix and
+ *      all — bc-jlop and bc-dgx7.2 own relitigating an *existing* mismatch (b7e-owes
+ *      and b7e-say both still have one), not this tool. `b7e-*` only.
+ *   2. `package.json`'s `bin` map has an entry for the name. Universal.
+ *   3. `package-lock.json`'s `packages[""].bin` agrees with it — test/lockfile.mjs is
+ *      pinned first in the sweep, so a lock that disagrees stops every later suite.
+ *      Universal.
+ *   4. Some file under test/ actually spawns it — `path.join(ROOT, 'bin', '<name>')`
+ *      (with or without `.js`) appearing anywhere under test/, not a fixed filename:
+ *      the family's own test files disagree with each other on that (test/b7e-say.mjs
+ *      keeps the dash, test/b7eowes.mjs drops it, test/eyeball.mjs is named for
+ *      neither b7e-eyeball nor any dash-dropped spelling of it), so a name-based check
+ *      would be wrong for most of the family that already ships correctly. `b7e-*` only.
+ *   5. `docs/b7e/<name>.md` has a `### ` heading naming it, backtick-quoted — a feature
+ *      is not finished here until the documentation says it exists. `b7e-*` only.
+ *      It was README.md when this was written, then the whole specification after
+ *      bc-28jtc split it; bc-fmk4v narrowed it to the tool's *own* file, because every
+ *      `b7e-*` section used to be appended to `docs/b7e-tools.md` and that one anchor
+ *      was where thirteen of the open pull requests on 2026-09-19 conflicted. A section
+ *      that is somewhere else in the specification is reported as owed, and the message
+ *      says so rather than pretending it is missing.
+ *   6. Its own header carries a `@grant` line — `read`, `write` or `excluded` — which
+ *      is what puts `Bash(<name>:*)` on `DEFAULT_TOOL_LIST` for `dispatch` or
+ *      deliberately keeps it off. Twenty-nine of this family are excluded, each with a
+ *      paragraph in its own header (in lib/tooldecl.js until bc-fmk4v moved them beside
+ *      the declarations they argue for) explaining what it writes or spawns, and that
+ *      decision is exactly as real as being on the list — it is only unpaid when the
+ *      tool declares NOTHING, i.e. `dispatch` cannot reach it and nobody said why not.
+ *      `b7e-*` only.
+ *   7. If (6) grants it, `lib/grants.js` classifies `Bash(<name>:*)` — test/grants.mjs
+ *      fails the moment something is on DEFAULT_TOOL_LIST unclassified, "deny by
+ *      default" being the whole design of that file. `b7e-*` only.
+ *
+ * SIX AND SEVEN WERE TWO REGISTRIES UNTIL bc-wbrhi, and reading them was this tool's
+ * whole reason for existing — the six sessions above were grepping lib/toolbelt.js and
+ * lib/grants.js by hand. Both now derive their b7e half from the declaration, so there
+ * is one thing to read and it is the thing that decides. That makes check 6 STRICTER in
+ * the one direction it was wrong: "the name appears in a comment" could not tell a
+ * decision from a mention, so a tool named in passing inside somebody else's paragraph
+ * read as settled. It also makes check 7 nearly tautological, and it is kept anyway —
+ * asserting the wiring is intact costs nothing and the day it is not is the day
+ * test/grants.mjs goes red for a reason nobody can see from here.
+ *
+ * THE CHECKS THEMSELVES LIVE IN lib/enroll.js, and so do the edits that satisfy three
+ * of them — bc-dgx7.75's `b7e-register` is the applier to this linter, and the two
+ * sharing one module is the whole of why it was worth writing: what these regexes
+ * match is what that command produces. This file is the reading half's CLI, and every
+ * function it used to define is re-exported from here unchanged.
+ *
+ * Exit code is a linter's: 0 when nothing is owed, 1 when something is.
+ *
+ * The grant argument, as it was made when this tool was added — moved here verbatim from
+ * lib/tooldecl.js by bc-fmk4v, so the reason sits beside the declaration it argues for and
+ * adding a tool appends to no shared file. "This list" is DEFAULT_TOOL_LIST; "above",
+ * "below" and "beside" name the order lib/tooldecl.js kept these in, which
+ * `git show 7c47d7d77:lib/tooldecl.js` still reads whole.
+ *
+ * Read-only in the same construction sense as b7e-def/b7e-owes/b7e-affected above: it
+ * only ever calls `fs.readdirSync`/`readFileSync`/`statSync` over package.json,
+ * package-lock.json, the specification, lib/toolbelt.js, lib/grants.js and test/, and prints
+ * what a bin/ command still owes. bc-khoe.27.11 is the argument — six sessions each
+ * hand-rediscovered the same seven registries a new bin/ entry incurs debt in, one
+ * of them (bc-khoe.27.6) paying for the gap with a full parallel-gate run. See
+ * bin/b7e-enroll.
+ *
+ * @grant read
+ */
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import { candidateNames, deriveName, loadContext, problemsFor, repoRoot } from '../lib/enroll.js';
+import { GRANTS } from '../lib/grants.js';
+
+export * from '../lib/enroll.js';
+
+export const ROOT = repoRoot();
+
+/* ------------------------------------------------------------------- run */
+
+function main() {
+  const argv = process.argv.slice(2);
+  if (argv.includes('--help') || argv.includes('-h')) {
+    console.log(
+      [
+        'b7e-enroll               every command in bin/ against every registry, right now',
+        'b7e-enroll <name>        just that command',
+        'b7e-enroll <bin/file.js> the command a new bin/ file would be named, checked the same way',
+        '',
+        'b7e-register <name>      applies the three of these seven a tool can write',
+      ].join('\n')
+    );
+    process.exit(0);
+  }
+
+  // The real classification map, so check 7 asserts this checkout's own wiring. See
+  // loadContext in lib/enroll.js for why it is passed in rather than imported there.
+  const ctx = loadContext(ROOT, GRANTS);
+  const names = argv.length ? argv.map(deriveName) : candidateNames(ROOT, ctx.pkg);
+
+  let findings = [];
+  for (const name of names) {
+    for (const p of problemsFor(name, ctx)) findings.push(`${name}: ${p}`);
+  }
+
+  if (!findings.length) {
+    console.log('nothing owed — every registry agrees with what bin/ actually serves');
+    process.exit(0);
+  }
+  for (const f of findings) console.log(f);
+  process.exit(1);
+}
+
+const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) main();

@@ -1,0 +1,80 @@
+#!/usr/bin/env node
+/**
+ * `b7e-space` — how full is the disk, what of ours is filling it, and will a worktree or a gate fit?
+ *
+ *     b7e-space                    free/total for the checkout and TMPDIR, then our space users, largest first
+ *     b7e-space --need worktree    and exit 1 when a worktree checkout would not fit
+ *     b7e-space --need gate        ... or a gate run (it fans ~600 suites into TMPDIR)
+ *     b7e-space --need 2147483648  ... or an explicit byte count
+ *     b7e-space --json             the same answer as one object
+ *
+ * bc-dgx7.197: three windows on 2026-10-15 (bc-dgx7.196, bc-j2zwo.20, bc-j2zwo.14) hit ENOSPC
+ * and each worked out the cause with its own df and du commands. lib/space.js does the measuring
+ * and `fits` is the check gate admission can reuse.
+ *
+ * Writes nothing. Exit codes: `0` answered (and fits, if asked). `1` `--need` does not fit.
+ * `2` bad usage.
+ *
+ * Hidden test seams: `--root <dir>`, `--tmpdir <dir>`, `--siblings <dir>`, and the env var
+ * B7E_SPACE_FREE_BYTES, which stubs every volume's free bytes.
+ *
+ * Reads df-style volume stats and du sizes under the checkout, TMPDIR and sibling repos; it
+ * writes nothing. See bin/b7e-space.
+ *
+ * @grant read
+ */
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { mainCheckout } from '../lib/gitref.js';
+import { survey, fits, floorFor, render } from '../lib/space.js';
+
+const USAGE = `usage: b7e-space [--need worktree|gate|<bytes>] [--json]
+
+Free and total bytes on the volume holding this checkout and TMPDIR, then the space users
+that are ours — live worktrees, the retired attic, beadcause-gate-run-*/prfull-* folders in
+TMPDIR, other beadcause-* folders, sibling repos' worktrees — largest first, with lock state.
+Exits 1 when --need does not fit, 2 on bad usage. Writes nothing.`;
+
+const argv = process.argv.slice(2);
+const opts = { json: false, need: null, root: null, tmp: null, siblings: null };
+const val = (i, f) => {
+  if (argv[i + 1] === undefined || argv[i + 1].startsWith('--')) {
+    console.error(`b7e-space: ${f} wants a value`);
+    process.exit(2);
+  }
+  return argv[i + 1];
+};
+for (let i = 0; i < argv.length; i += 1) {
+  const a = argv[i];
+  if (a === '--help' || a === '-h') {
+    console.log(USAGE);
+    process.exit(0);
+  } else if (a === '--json') opts.json = true;
+  else if (a === '--need') opts.need = val(i++, a);
+  else if (a === '--root') opts.root = val(i++, a);
+  else if (a === '--tmpdir') opts.tmp = val(i++, a);
+  else if (a === '--siblings') opts.siblings = val(i++, a);
+  else {
+    console.error(`b7e-space: unexpected argument ${a}`);
+    console.error(USAGE);
+    process.exit(2);
+  }
+}
+if (opts.need != null && floorFor(opts.need) == null) {
+  console.error(`b7e-space: --need wants worktree, gate or a byte count, not "${opts.need}"`);
+  process.exit(2);
+}
+
+const root = opts.root || (await mainCheckout(process.cwd()).catch(() => process.cwd()));
+const siblings = opts.siblings || path.dirname(root);
+const stub = process.env.B7E_SPACE_FREE_BYTES;
+const statfs = stub
+  ? (p) => ({ bavail: Number(stub), bsize: 1, blocks: Number(stub) * 2, p })
+  : fs.statfsSync;
+
+const answer = survey({ root, tmp: opts.tmp || os.tmpdir(), siblings, statfs });
+const verdict = opts.need != null ? fits(answer, opts.need) : null;
+
+console.log(opts.json ? JSON.stringify({ ...answer, fits: verdict }, null, 2) : render(answer, verdict));
+process.exit(verdict && !verdict.ok ? 1 : 0);

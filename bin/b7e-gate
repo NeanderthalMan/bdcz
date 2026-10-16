@@ -1,0 +1,575 @@
+#!/usr/bin/env node
+/**
+ * `b7e-gate` — the `npm test` suites this diff can break, without bailing at the first red.
+ *
+ *     b7e-gate                              # the suites b7e-affected matches for the diff since origin/main
+ *     b7e-gate --full                       # every suite scripts/test.mjs --list would run, on purpose
+ *     b7e-gate --only test/gate.mjs --only test/b7e*.mjs
+ *     b7e-gate --skip test/browse.mjs       # known-flaky-under-concurrency, say so and drop it
+ *     b7e-gate --jobs 4                     # how many suites at once (default: from the load)
+ *     b7e-gate --timeout 120                # per-suite seconds, overriding the slow-suite default
+ *     b7e-gate --json                       # one object per suite, streamed, for a caller to parse
+ *     b7e-gate --log /path/to/gate.log      # also write every line here (default: a tmp file, named at the end)
+ *     b7e-gate --run-id <id>                # file the run record under this id, rather than minting one
+ *     b7e-gate --list                       # what would run, without running it
+ *     b7e-gate --dir <root>                 # another tree — this is how it is tested
+ *     b7e-gate --dir <python worktree> -- tests.test_report   # the declared Python arm
+ *
+ * **Narrowed by default — bc-xlz32.14.** With no `--only` and no `--full`, the run takes the
+ * same decision `bin/b7e-shipgate` takes (`affectedDecision`, lib/shipgate.js): the suites
+ * `b7e-affected` matches for the diff since origin/main, or — the moment any changed file
+ * matches nothing, or there is no diff, or `b7e-affected` refuses — every suite, with the
+ * reason said on the opening lines. Measured before this landed: 37 whole-suite session
+ * gates in three days, none of them a deliberate `--full`; 18 were a bare `b7e-gate` or a
+ * bare `b7e-detach`, which forwards here. `--full` is the whole suite on purpose. CI never
+ * narrows (`CI`/`GITHUB_ACTIONS` set): its shards pass `--only`, and anything else there runs
+ * everything. What was chosen and why goes on the run record's start line as `selection`.
+ * `--selection <kind> --selection-reason <text>` let a caller that already decided (the
+ * shipgate) hand its decision in to be recorded, rather than have it made twice.
+ *
+ * bc-khoe.39: nine sessions each hand-wrote this exact runner into a scratchpad rather than
+ * typing `npm test` — which stops dead at the first failing suite and says nothing about
+ * the other three hundred — and no two of the nine agreed on parallelism, per-suite
+ * timeout, or whether `scripts/test-swap.js` should run at all. `lib/gate.js` carries the
+ * one answer; this file is the argv parsing and the printing around it.
+ *
+ * It also writes a machine-readable run record (`lib/gaterun.js`, one JSONL line per
+ * suite) to `.claude/gate-runs` in the main checkout, so `bin/b7e-watch` (bc-gdub.3) can
+ * answer "how far has it got, and what's red" without a caller ever reading this log —
+ * that half of the same six-sessions problem is what backgrounding this run and polling
+ * it by hand cost every one of them. Best-effort: a `--dir` that is not a git checkout
+ * (every fabricated tree `test/gate.mjs` drives this CLI against) records nothing rather
+ * than throwing, because a suite runner refusing to run over a bookkeeping failure would
+ * be a worse bug than the one this exists to fix.
+ *
+ * Two things decide how much of the Mac this takes, and both say so in the opening line.
+ * `--jobs` given wins outright; given nothing, it is chosen from the load at start
+ * (`chooseJobs`, bc-xlz32.5). And before the pool starts, the run takes one of the
+ * machine's gate slots (`acquireSlot`, bc-xlz32.1) — a third gate **waits** for the first
+ * two rather than running on top of them, saying what it is waiting for on stderr.
+ * `BEADCAUSE_GATE_SLOTS=0` opts out; CI is exempt without asking. The suite list is chosen
+ * first, so a gate of `SMALL_GATE_SUITES` or fewer queues in a small lane of its own rather
+ * than behind full gates (bc-xlz32.12), and what it waited for, in which lane, goes on the
+ * run record's start line (bc-xlz32.11).
+ *
+ * **`ROOT` learns which repo it is — bc-khoe.61.** `--dir <root>` (or its default,
+ * `REPO_ROOT`) names a tree, and whether that tree is *this* repo's own `scripts/test.mjs`
+ * shape or a Python one decides which arm runs. A Python checkout says so itself, in
+ * `.beadcause/gate.json` (`{"python": "<repo-relative script>"}` — `lib/pygate.js`'s
+ * `readGateDecl`, bc-j2zwo.5): a declaration on the tree, never a name, a guess or a
+ * default. The Node arm below is completely unchanged; the Python arm is one child process
+ * instead of a discovered suite list, sharing this same lock and machine-wide slot rather
+ * than a second copy of either.
+ *
+ * Exit codes: `0` every suite passed, `1` at least one failed or timed out, `2` refused —
+ * bad usage, or another `b7e-gate` on this same tree is already running. Waiting for a slot
+ * is not a refusal and never exits: it is a queue — except that `3` is a gate whose Claude
+ * Code session went away while it was still queued, which leaves the queue rather than
+ * run a whole gate nobody will read (bc-xl7n.165). A gate already running is left alone.
+ *
+ * The grant argument, as it was made when this tool was added — moved here verbatim from
+ * lib/tooldecl.js by bc-fmk4v, so the reason sits beside the declaration it argues for and
+ * adding a tool appends to no shared file. "This list" is DEFAULT_TOOL_LIST; "above",
+ * "below" and "beside" name the order lib/tooldecl.js kept these in, which
+ * `git show 7c47d7d77:lib/tooldecl.js` still reads whole.
+ *
+ * b7e-gate (bc-khoe.39) is also deliberately NOT on this list, for a sharper version of
+ * the b7e-apply argument below: lib/grants.js already classifies `Bash(npm test:*)` —
+ * running this repo's own suites, which spawn daemons and bind ports — as a write, held
+ * by merge-advocate alone. b7e-gate does exactly that, concurrently, for up to fifty
+ * minutes; it is a heavier capability than npm test, not a lighter one, and this list
+ * reaches only `dispatch`, which has no more use for the whole suite passing than it
+ * does for anything else past its own single `bd comment`. See bin/b7e-gate.
+ *
+ * @grant excluded
+ */
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {
+  REPO_ROOT,
+  SLOW_TIMEOUT_MS,
+  acquireLock,
+  acquireSlot,
+  chooseJobs,
+  discoverSuites,
+  findOwner,
+  gateAdmission,
+  jobsLine,
+  ownerGone,
+  runGate,
+  selectSuites,
+  summaryLine,
+  toJsonRecord,
+  waitingLine,
+} from '../lib/gate.js';
+import { commandLine, findInterpreter, readGateDecl, runPythonGate } from '../lib/pygate.js';
+import { RUN_ID_RE, appendResult, endRun, runFile, runsDir, startRun } from '../lib/gaterun.js';
+import { SELECTIONS, affectedDecision } from '../lib/shipgate.js';
+import { onExit } from '../lib/teardown.js';
+
+const argv = process.argv.slice(2);
+
+/** Everything after a literal `--` — forwarded verbatim as the declared Python script's own argv. */
+const DASH_DASH_AT = argv.indexOf('--');
+/**
+ * `--help` (or any other of this command's own flags) after a literal `--` belongs to
+ * the far side, not to this one — the same split `bin/b7e-detach`'s HEAD/TAIL already
+ * draws, for the same reason: without it, a `--help` meant for the Python script would
+ * print usage instead of starting the run it was forwarded to be part of.
+ *
+ * `has`/`multi`/`value` below all read `OWN_ARGV`, never the raw `argv` — bc-dgx7.118:
+ * a flag of this command's own name (`--log`, `--only`, `--json`, ...) sitting after the
+ * `--` belongs to the far side too, the same as `--help` already was above it, and
+ * scanning the whole `argv` for it read it as this process's own and acted on it instead
+ * of forwarding it. `EXTRA_ARGS` (below) is the only reader of what comes after `--`.
+ */
+const OWN_ARGV = DASH_DASH_AT === -1 ? argv : argv.slice(0, DASH_DASH_AT);
+
+const has = (f) => OWN_ARGV.includes(f);
+/** Every occurrence of `--flag value` or `--flag=value` — `--only`/`--skip` are repeatable. */
+const multi = (f) => {
+  const out = [];
+  for (let i = 0; i < OWN_ARGV.length; i++) {
+    if (OWN_ARGV[i] === f && OWN_ARGV[i + 1] !== undefined) out.push(OWN_ARGV[++i]);
+    else if (OWN_ARGV[i].startsWith(`${f}=`)) out.push(OWN_ARGV[i].slice(f.length + 1));
+  }
+  return out;
+};
+const value = (f, fallback) => {
+  const inline = OWN_ARGV.find((a) => a.startsWith(`${f}=`));
+  if (inline) return inline.slice(f.length + 1);
+  const at = OWN_ARGV.indexOf(f);
+  return at === -1 ? fallback : (OWN_ARGV[at + 1] ?? fallback);
+};
+
+// bc-dgx7.31: this used to fall through to a real run — `--help` on argv matched none
+// of the flags above, so it read as "no suites to skip, no dir given" and started the
+// whole gate. Checked first, before ROOT or the lock, so it runs nothing at all.
+if (OWN_ARGV.includes('--help') || OWN_ARGV.includes('-h')) {
+  console.log(
+    [
+      'b7e-gate                              # the suites b7e-affected matches for the diff since origin/main',
+      '                                      #   (every suite, and says why, when a changed file matches none)',
+      'b7e-gate --full                       # every suite scripts/test.mjs --list would run, on purpose',
+      'b7e-gate --only test/gate.mjs --only test/b7e*.mjs',
+      'b7e-gate --skip test/browse.mjs       # known-flaky-under-concurrency, say so and drop it',
+      'b7e-gate --jobs 4                     # how many suites at once (default: from the load)',
+      'b7e-gate --timeout 120                # per-suite seconds, overriding the slow-suite default',
+      'b7e-gate --json                       # one object per suite, streamed, for a caller to parse',
+      'b7e-gate --log /path/to/gate.log      # also write every line here (default: a tmp file, named at the end)',
+      'b7e-gate --list                       # what would run, without running it',
+      'b7e-gate --dir <root>                 # another tree — this is how it is tested',
+      'b7e-gate --dir <python worktree> -- tests.test_report   # the Python arm, when <dir>/.beadcause/gate.json declares one',
+    ].join('\n'),
+  );
+  process.exit(0);
+}
+
+const ROOT = path.resolve(value('--dir', REPO_ROOT));
+const ONLY = multi('--only');
+const SKIP = multi('--skip');
+/**
+ * `PY_ARM`: the tree at `ROOT` declares a Python gate script in `.beadcause/gate.json`
+ * (bc-j2zwo.5), rather than being `scripts/test.mjs`'s shape. A declaration that cannot be
+ * used is refused below, never quietly treated as "no declaration".
+ */
+const GATE_DECL = readGateDecl(ROOT);
+const PY_ARM = Boolean(GATE_DECL?.script);
+/** The declared script, repo-relative — the one "suite" the Python arm reports on. */
+const PY_SCRIPT = GATE_DECL?.script ?? null;
+const EXTRA_ARGS = DASH_DASH_AT === -1 ? [] : argv.slice(DASH_DASH_AT + 1);
+/**
+ * `--jobs` given wins outright — an explicit ask from whoever is running the gate is a real
+ * ask, the rule `--timeout` already follows. Given nothing, `chooseJobs` reads the machine
+ * (bc-xlz32.5) instead of the constant 6 that was wrong whether the Mac was idle or buried.
+ */
+const JOBS_ARG = value('--jobs', null);
+const JOBS_EXPLICIT = JOBS_ARG != null && Number(JOBS_ARG) > 0;
+const CORES = os.availableParallelism();
+const LOAD = os.loadavg()[0];
+const JOBS = JOBS_EXPLICIT ? Math.max(1, Math.floor(Number(JOBS_ARG))) : chooseJobs({ cores: CORES, load: LOAD });
+/**
+ * `--run-id <id>`: file the run record under an id somebody else already chose, instead of
+ * minting one. `bin/b7e-detach` (bc-dgx7.25) is the caller — it forks this into a session
+ * of its own and has to hand *its* caller a run id in the same breath, which it cannot do
+ * by reading a log this process has not written yet. Nothing else about the run changes.
+ */
+const RUN_ID = value('--run-id', null);
+const TIMEOUT_ARG = value('--timeout', null);
+const TIMEOUT_MS = TIMEOUT_ARG == null ? null : Math.max(0, Number(TIMEOUT_ARG) || 0) * 1000;
+const JSON_MODE = has('--json');
+const FULL = has('--full');
+const SELECTION_ARG = value('--selection', null);
+const SELECTION_REASON_ARG = value('--selection-reason', null);
+/** CI never narrows — `merge_group` and `push: main` run everything, whatever this prints. */
+const IN_CI = Boolean(process.env.CI || process.env.GITHUB_ACTIONS);
+
+const dim = (s) => `\x1b[2m${s}\x1b[0m`;
+const red = (s) => `\x1b[31m${s}\x1b[0m`;
+const green = (s) => `\x1b[32m${s}\x1b[0m`;
+const amber = (s) => `\x1b[33m${s}\x1b[0m`;
+
+/** `process.exit` does not wait for a pipe to drain — flush stdout before handing back the code. */
+const leave = async (code) => {
+  await new Promise((r) => process.stdout.write('', r));
+  process.exit(code);
+};
+
+/**
+ * Checked before anything is locked or run, because both ways of getting it wrong are the
+ * caller's mistake rather than the run's: an id that is not a bare filename would decide
+ * where the record is written, and an id whose file already exists would append a second
+ * `start` line to somebody else's run and quietly ruin both readings of it.
+ */
+if (RUN_ID != null) {
+  if (!RUN_ID_RE.test(RUN_ID)) {
+    console.error(red(`--run-id wants a bare id (letters, digits, dot, dash, underscore), not ${RUN_ID}`));
+    await leave(2);
+  }
+  // A `--dir` that is not a git checkout has no runs directory at all and records nothing
+  // either way — nothing to collide with, so nothing to refuse.
+  const dir = await runsDir(ROOT).catch(() => null);
+  const existing = dir ? runFile(dir, RUN_ID) : null;
+  if (existing && fs.existsSync(existing)) {
+    console.error(red(`run ${RUN_ID} already exists — ${existing}`));
+    console.error(dim('refusing rather than appending a second run to it; `b7e-watch --run` reads that one'));
+    await leave(2);
+  }
+}
+
+/**
+ * Resolved once, up front, for both `--list` and the real run — a fresh worktree has no
+ * `.venv` of its own (bc-khoe.61's whole reason for existing), so this walks up to the
+ * main checkout before giving up. `--only`/`--skip` are the Node arm's own selection
+ * mechanism (a suite-path glob) and do not mean anything against a single Python process;
+ * refusing rather than silently ignoring them is cheaper than a confused bug report later.
+ */
+if (GATE_DECL?.problem) {
+  console.error(red(GATE_DECL.problem));
+  console.error(dim('refusing rather than guessing which arm this tree wants'));
+  await leave(2);
+}
+let interpreter = null;
+if (PY_ARM) {
+  if (ONLY.length || SKIP.length) {
+    console.error(red('--only/--skip do not apply here — pass module names after -- instead, e.g. b7e-gate -- tests.test_report'));
+    await leave(2);
+  }
+  interpreter = findInterpreter(ROOT);
+  if (!interpreter) {
+    console.error(red(`no .venv/bin/python(3) found in ${ROOT} or its main checkout`));
+    console.error(dim('refusing rather than guessing at an interpreter'));
+    await leave(2);
+  }
+}
+
+if (SELECTION_ARG != null && !SELECTIONS.includes(SELECTION_ARG)) {
+  console.error(red(`--selection is one of ${SELECTIONS.join(', ')}, not ${SELECTION_ARG}`));
+  await leave(2);
+}
+if (FULL && ONLY.length) {
+  console.error(red('--full and --only disagree — --full runs every suite, --only names some'));
+  await leave(2);
+}
+
+/**
+ * What runs, and why (bc-xlz32.14) — decided once, before `--list`, the lock or a slot, so
+ * `--list` shows exactly what a run would take. `{ kind, reason, only, skip }`: `only` is the
+ * `--only` list the run selects with (empty means every suite), `skip` is a diff whose every
+ * match is a browser check — nothing local to run. `null` on the Python arm, which has no
+ * suite list to narrow.
+ */
+function chooseSelection() {
+  if (PY_ARM) return null;
+  if (ONLY.length) return { kind: SELECTION_ARG || 'only', reason: SELECTION_REASON_ARG || `--only ${ONLY.join(', ')}`, only: ONLY };
+  if (FULL) return { kind: SELECTION_ARG || 'full-requested', reason: SELECTION_REASON_ARG || 'full gate: --full requested', only: [] };
+  if (IN_CI) return { kind: 'full-ci', reason: 'full gate: CI never narrows', only: [] };
+  const d = affectedDecision(ROOT);
+  return { kind: d.selection, reason: d.record, only: d.narrow ? d.suites : [], skip: Boolean(d.skip) };
+}
+const SELECTION = chooseSelection();
+const ALL_SUITES = PY_ARM ? [] : discoverSuites(ROOT);
+
+/**
+ * Said on every run that is not the CI shards' own `--only`, and always naming the other
+ * way: a narrowed run says `--full` is one word away, and a fallback says it is running
+ * everything and why — the one thing `b7e-affected`'s empty stdout used to leave a caller to
+ * work out. On stderr in `--json`/`--list` mode, so both streams stay parseable.
+ */
+function selectionLine(sel, count) {
+  if (!sel) return null;
+  if (sel.skip) return `selection: ${sel.reason} — nothing to run`;
+  if (sel.kind === 'affected') return `selection: ${sel.reason} — \`--full\` runs all ${ALL_SUITES.length}`;
+  if (sel.kind === 'only') return null;
+  return `selection: ${sel.reason} — running all ${count} suites`;
+}
+
+if (has('--list')) {
+  if (PY_ARM) {
+    console.log(commandLine(ROOT, { interpreter, script: PY_SCRIPT, extraArgs: EXTRA_ARGS }));
+  } else {
+    const suites = SELECTION.skip ? [] : selectSuites(ALL_SUITES, { only: SELECTION.only, skip: SKIP });
+    const said = selectionLine(SELECTION, suites.length);
+    if (said) console.error(dim(said));
+    if (suites.length) console.log(suites.join('\n'));
+  }
+  await leave(0);
+}
+
+/**
+ * Who started this, resolved before anything can make it wait (bc-xl7n.165). A gate
+ * started from a Claude Code session answers to it, and if that session is gone while this
+ * one is still queued nobody will read what it produces — see `ownerGone` in `lib/gate.js`.
+ * `null` (a shell, launchd, CI) means no opinion, and the gate is never withdrawn.
+ */
+const OWNER = findOwner();
+
+const lock = acquireLock(ROOT);
+if (!lock.ok) {
+  const since = lock.startedAt ? `${Math.round((Date.now() - lock.startedAt) / 1000)}s ago` : 'a while ago';
+  console.error(red(`a gate is already running on this tree — pid ${lock.pid}, started ${since}`));
+  console.error(dim('refusing rather than doubling the load; that run\'s own output is the one to read'));
+  await leave(2);
+}
+// `acquireLock` arms its own `onExit(release)` the instant it writes the lock file —
+// bc-arj0.25 — so there is nothing left to register here; `lock.disarm` is that same
+// registration's own off-switch.
+
+/**
+ * The suite list comes first, before any slot is asked for (bc-xlz32.12): a gate that is
+ * about to run 11 suites must not queue as though it were about to run 500, and a slot
+ * taken after discovery is also a slot held for that much less time.
+ */
+const SELECTED = PY_ARM ? [PY_SCRIPT] : SELECTION.skip ? [] : selectSuites(ALL_SUITES, { only: SELECTION.only, skip: SKIP });
+/** What goes on the start line — the kind and the one-line reason, never the list again. */
+const SELECTION_RECORD = SELECTION ? { kind: SELECTION.kind, reason: SELECTION.reason } : undefined;
+
+const ADMISSION = gateAdmission(PY_ARM ? NaN : SELECTED.length);
+
+// Said before the slot is asked for, not after: a queued gate has no record yet, and this
+// is the line `bin/b7e-detach` reads back out of the log to say what it launched.
+{
+  const said = selectionLine(SELECTION, SELECTED.length);
+  if (said && JSON_MODE) console.error(dim(said));
+  else if (said) console.log(SELECTION.kind === 'full-fallback' ? amber(said) : dim(said));
+}
+
+/**
+ * Then one of the machine's slots (bc-xlz32.1) — this waits rather than refusing, because a
+ * session told to go away runs `node scripts/test.mjs` instead and that is worse. On stderr
+ * so `--json`'s stream stays parseable, and throttled: once when the wait starts, then
+ * every 30s, so a twenty-minute wait is not twenty minutes of scrolling. A small gate
+ * queues in a lane of its own, behind other small gates only (`gateAdmission`).
+ */
+let lastSaid = 0;
+const queuedAt = Date.now();
+const slot = await acquireSlot({
+  root: ROOT,
+  lane: ADMISSION.lane,
+  limit: ADMISSION.limit,
+  onWait: (state) => {
+    const now = Date.now();
+    if (lastSaid && now - lastSaid < 30_000) return;
+    lastSaid = now;
+    console.error(amber(waitingLine(state, now)));
+  },
+  abandoned: ownerGone(OWNER),
+});
+if (slot.abandoned) {
+  console.error(amber(`the session that started this gate (pid ${OWNER.pid}) has gone — leaving the queue rather than running a full gate nobody will read`));
+  console.error(dim('the lock and the queue place are released; start it again from a live session if the result is still wanted'));
+  await leave(3);
+}
+// Same story as the lock above: `acquireSlot` arms its own `onExit(release)` right after
+// writing the ticket (bc-arj0.25), so `slot.disarm` is already what this needs.
+if (slot.waitedMs > 1000 && !JSON_MODE) {
+  console.log(dim(`waited ${Math.round(slot.waitedMs / 1000)}s for a slot on this Mac`));
+}
+
+/**
+ * `record` is `null` when nothing could be started (a non-git `--dir`, most likely) —
+ * every use below is guarded by that, so a run record failing to start never stops the
+ * gate itself from running.
+ */
+const record = await startRun(ROOT, {
+  suites: SELECTED,
+  runId: RUN_ID ?? undefined,
+  // What this run waited for, and in which lane (bc-xlz32.11) — the start line is the only
+  // place a reader of `.claude/gate-runs` can find the queue, since this is stamped after it.
+  slot: { ...ADMISSION, held: slot.held, waitedMs: slot.waitedMs, ahead: slot.ahead, queuedAt },
+  // Why this run is the size it is (bc-xlz32.14) — `affected`, `only`, `full-requested`,
+  // `full-fallback` or `full-ci`, and the one-line reason. See `SELECTIONS`.
+  selection: SELECTION_RECORD,
+}).catch(() => null);
+const wallStart = Date.now();
+
+/**
+ * A diff whose only coverage is browser checks has nothing local to run — the shipgate's
+ * long-standing answer, and now this command's too. It still files a record (an empty one,
+ * `ok`), so `b7e-detach` sees the run it launched finish rather than a child that died; the
+ * slot it took for that was the small lane's, which a zero-suite gate never waits for.
+ */
+if (SELECTION && SELECTION.skip) {
+  if (record) endRun(record.file, { status: 'ok', elapsed: 0 });
+  lock.disarm();
+  lock.release();
+  slot.disarm();
+  slot.release();
+  await leave(0);
+}
+
+const logPath = path.resolve(value('--log', path.join(fs.realpathSync(os.tmpdir()), `beadcause-gate-${process.pid}.log`)));
+const logStream = fs.createWriteStream(logPath, { flags: 'a' });
+const logLine = (plain) => logStream.write(`${plain}\n`);
+/**
+ * `stream.end()` alone does not wait for the underlying write to land — same trap as
+ * `leave()` below, and a log missing its own last line (the summary, the one line that
+ * says whether the run was clean) is worse than a log missing an early one. Measured on
+ * the first end-to-end dogfood run of this file: 392 per-suite lines, and no summary —
+ * every earlier write had a whole suite's runtime to flush in, and this one did not.
+ */
+const closeLog = () => new Promise((resolve) => logStream.end(resolve));
+
+const plainStatus = (r) => (r.status === 'ok' ? 'ok' : r.status === 'TIMEOUT' ? 'TIMEOUT' : 'FAIL');
+
+const onResult = (r, done, total) => {
+  if (record) {
+    const tail =
+      r.status !== 'ok' ? String(r.out || '').trim().split('\n').slice(-15).join('\n') : undefined;
+    appendResult(record.file, { suite: r.suite, status: r.status === 'ok' ? 'ok' : 'fail', elapsed: r.ms / 1000, tail });
+  }
+  if (JSON_MODE) {
+    const line = toJsonRecord(r, done, total);
+    console.log(JSON.stringify(line));
+    logLine(JSON.stringify(line));
+    return;
+  }
+  const mark = r.status === 'ok' ? green('ok') : r.status === 'TIMEOUT' ? amber('TIMEOUT') : red('FAIL');
+  const secs = (r.ms / 1000).toFixed(1);
+  console.log(`${dim(`[${done}/${total}]`)} ${mark} ${r.suite} ${dim(`${secs}s`)}`);
+  logLine(`[${done}/${total}] ${plainStatus(r)} ${r.suite} ${secs}s`);
+  if (r.status !== 'ok') {
+    const tail = String(r.out || '').trim().split('\n').slice(-15);
+    for (const line of tail) {
+      console.log(dim(`      ${line}`));
+      logLine(`      ${line}`);
+    }
+    if (r.scratch) {
+      console.log(dim(`      scratch kept in ${r.scratch}`));
+      logLine(`      scratch kept in ${r.scratch}`);
+    }
+  }
+};
+
+if (!JSON_MODE) {
+  if (PY_ARM) {
+    console.log(dim(commandLine(ROOT, { interpreter, script: PY_SCRIPT, extraArgs: EXTRA_ARGS })));
+  } else {
+    // Said out loud, because the number is no longer a constant anybody can assume: a gate
+    // that took twice as long as yesterday's should be explicable from its own first lines.
+    const { limit, lane } = ADMISSION;
+    const kind = lane === 'small' ? 'small ' : '';
+    const budget = limit ? `, ${limit} ${kind}gate${limit === 1 ? '' : 's'} at a time on this Mac` : '';
+    console.log(dim(`${jobsLine({ jobs: JOBS, cores: CORES, load: LOAD, explicit: JOBS_EXPLICIT })}${budget}`));
+  }
+  console.log(dim(`log: ${logPath}`));
+  if (record) console.log(dim(`run: ${record.runId} — \`b7e-watch\` reports on it while this runs and after`));
+  console.log('');
+}
+
+let result;
+try {
+  if (PY_ARM) {
+    // No suite list to pool over — one child, gated on its exit code alone (never on
+    // `out`, which the suite fills with `ERROR:` lines on a run that still passes).
+    const live = new Set();
+    const offAbort = onExit(() => {
+      for (const child of live) {
+        try {
+          child.kill('SIGTERM');
+        } catch {
+          /* already gone */
+        }
+      }
+    });
+    const r = await runPythonGate(ROOT, {
+      interpreter,
+      script: PY_SCRIPT,
+      timeoutMs: TIMEOUT_MS ?? SLOW_TIMEOUT_MS,
+      extraArgs: EXTRA_ARGS,
+      live,
+    });
+    offAbort();
+    if (record) {
+      const tail = !r.ok ? String(r.out || '').trim().split('\n').slice(-15).join('\n') : undefined;
+      appendResult(record.file, { suite: PY_SCRIPT, status: r.ok ? 'ok' : 'fail', elapsed: r.ms / 1000, tail });
+    }
+    const secs = (r.ms / 1000).toFixed(1);
+    const status = r.timedOut ? 'TIMEOUT' : r.ok ? 'ok' : 'FAIL';
+    if (JSON_MODE) {
+      const line = { index: 1, total: 1, suite: PY_SCRIPT, status, code: r.code, signal: r.signal, seconds: Number(secs) };
+      console.log(JSON.stringify(line));
+      logLine(JSON.stringify(line));
+    } else {
+      const mark = r.ok ? green('ok') : status === 'TIMEOUT' ? amber('TIMEOUT') : red('FAIL');
+      console.log(`${dim('[1/1]')} ${mark} ${PY_SCRIPT} ${dim(`${secs}s`)}`);
+      logLine(`[1/1] ${status} ${PY_SCRIPT} ${secs}s`);
+      if (!r.ok) {
+        const tail = String(r.out || '').trim().split('\n').slice(-15);
+        for (const line of tail) {
+          console.log(dim(`      ${line}`));
+          logLine(`      ${line}`);
+        }
+      }
+    }
+    result = { results: [r], passed: r.ok ? 1 : 0, failed: r.ok ? [] : [{ suite: PY_SCRIPT }], total: 1, ok: r.ok };
+  } else {
+    result = await runGate(ROOT, {
+      only: SELECTION.only,
+      skip: SKIP,
+      jobs: JOBS,
+      timeoutOverrideMs: TIMEOUT_MS,
+      onResult,
+      signalAbort: onExit,
+    });
+  }
+} finally {
+  // Two calls each, not one — bc-dgx7.40. `onExit` hands back a *disarm*: it marks the job
+  // done and splices it out of the list, and it never runs `fn` itself. So the disarm alone
+  // does not release anything; it only guarantees the exit handler behind it will not.
+  // Calling it and nothing else is how a clean run came to leave its lock file in the OS
+  // temp dir forever, harmless only because the next `acquireLock` reads a dead pid and
+  // reclaims it as stale. This is the two-call shape `scripts/helpers/chrome.mjs`'s
+  // teardown and `lib/counterproof.js` already use: disarm, then do the release for real.
+  lock.disarm();
+  lock.release();
+  slot.disarm();
+  slot.release();
+}
+
+if (!result.total) {
+  console.log(red(SELECTION && SELECTION.only.length ? `nothing matches --only ${SELECTION.only.join(', ')}` : 'no suites found'));
+  if (record) endRun(record.file, { status: 'fail', elapsed: (Date.now() - wallStart) / 1000 });
+  await closeLog();
+  await leave(1);
+}
+
+// The summary goes out before the record says `done` — bc-yuzlp. A reader that polls the
+// record (b7e-detach's caller, test/b7edetach.mjs) takes `done` as "the console is
+// complete" and reads it; ended first, it could land between the two and find no summary
+// line, which is how main went red under load 40 on 2026-10-01.
+const line = summaryLine(result);
+if (JSON_MODE) {
+  console.log(JSON.stringify({ summary: true, total: result.total, passed: result.passed, failed: result.failed.map((f) => f.suite) }));
+} else {
+  console.log('');
+  console.log(result.ok ? green(line) : red(line));
+  console.log(dim(`full log: ${logPath}`));
+}
+logLine(line);
+
+if (record) endRun(record.file, { status: result.ok ? 'ok' : 'fail', elapsed: (Date.now() - wallStart) / 1000 });
+await closeLog();
+
+await leave(result.ok ? 0 : 1);

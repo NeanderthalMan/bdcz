@@ -1,0 +1,462 @@
+#!/usr/bin/env node
+/**
+ * The memory API as something an agent can actually reach: a command.
+ *
+ * An agent here is a `claude -p` in a shell. It has Bash and an allowlist, and no
+ * way to `import` anything — so a JavaScript module is a library for the daemon and
+ * invisible to the agents it is for. This is the surface they get:
+ *
+ *   beadcause-memory remember <key> <value...>
+ *   beadcause-memory recall [<key>] [--of=<agent>]
+ *   beadcause-memory note <key> <claim...> --evidence=<how you know>
+ *   beadcause-memory notes [<key>] [--of=<agent>]
+ *   beadcause-memory debrief <text...>
+ *   beadcause-memory debriefs [<bead>]
+ *   beadcause-memory post <topic> <message...>
+ *   beadcause-memory read <topic> [--since=N]
+ *   beadcause-memory topics
+ *   beadcause-memory agents
+ *
+ * **`debrief` takes no key and `debriefs` takes no agent**, and both absences are the
+ * tier they belong to showing through. There is no key because a report on a run is not a
+ * belief that can be superseded by a later one — two calls are two things that happened,
+ * so writes append. There is no `--of` because a debrief is filed against a *bead*: the
+ * question "how did the last run at this go" has one answer whoever asks it, and an
+ * agent-scoped read would be answering a question nobody has. `--of` is therefore refused
+ * on `debriefs` by the same default-refuse guard that covers every command that writes.
+ *
+ * **Which bead is not an argument either**, for exactly the reason the agent's identity is
+ * not: `BEADCAUSE_BEAD` is stamped into the session by the daemon that opened it, and an
+ * agent that could pass its own would be able to file a report against somebody else's
+ * work — indistinguishable, afterwards, from their having written it. `--bead` exists for
+ * a human at a terminal, the way `--agent` does, and for nobody else.
+ *
+ * **`note` and `notes` are the same two verbs against the other store** — what this
+ * agent knows about the repo the command was run in, rather than what it knows
+ * everywhere. Nothing selects between them but the verb: there is no `--repo`, no
+ * `--here` and no environment variable, because the store *is* where you are standing.
+ * A flag would mean an agent could get it wrong in the direction that is invisible —
+ * writing a fact about this codebase into the memory that follows it into every other
+ * one — and two verbs cannot be forgotten the way a flag can.
+ *
+ * **Who you are is not an argument.** `--agent` exists for a human debugging from a
+ * terminal, but an agent never passes it: the daemon exports `BEADCAUSE_AGENT` when
+ * it spawns one, and that is what both halves attribute to. An agent that named
+ * itself on the command line could name itself anything, and the first time one
+ * wrote into another's memory the mistake would be indistinguishable from the design.
+ *
+ * **`--of` reads another agent's memory, and it is a second flag on purpose.**
+ * `--agent` *is* you, for the whole invocation — so `--agent=advocate recall` does
+ * not read the advocate's memory so much as become the advocate, and a `remember`
+ * in the same invocation writes into their file. That is tolerable for a human
+ * debugging at a terminal and wrong as an API. So the read half gets its own flag,
+ * which names a *subject* and never an author: `recall` and `notes` are the only
+ * commands that accept it, and every command that writes refuses it outright rather
+ * than quietly treating it as identity. Two flags is the cheapest way to make "read
+ * another agent" and "act as another agent" impossible to confuse.
+ *
+ * **Every read here is recorded, and nothing else counts as one.** `recall`, `notes`,
+ * `read` and `debriefs` each append a line to lib/memoryuse.js's log saying who opened
+ * which store, and whether the key was there. That is what makes the write-only-diary
+ * prediction the persistence epic is written against answerable at all: the refs have
+ * always said what was written and nothing said whether it came back out. A brief that
+ * quotes a note at a session is deliberately *not* a read — the daemon does that
+ * unasked, so counting it would answer the question with the instrument rather than
+ * with the agents.
+ *
+ * **No repo is named here either**, in any command or any flag — that is the whole
+ * point of the indirection in lib/memory.js, and a `--repo` flag would hand it
+ * straight back. It is the same rule for the repo-local half, where it is easier to
+ * doubt: `note` writes to the repo you are in because that is the only repo whose
+ * knowledge you have, and a run from the wrong directory should be fixed by `cd`,
+ * which is checkable, rather than by an argument, which is not.
+ */
+import {
+  remember,
+  recall,
+  recallDetail,
+  note,
+  verifyNote,
+  searchNotes,
+  staleNotes,
+  archiveNotes,
+  restoreNote,
+  archivedNotes,
+  notes,
+  notesDetail,
+  debrief,
+  debriefFamily,
+  post,
+  read,
+  topics,
+  agents,
+} from '../lib/memory.js';
+// The read half of tier 4 lives with the archive that reports end up in, not with the
+// store that stages them — see `readDebriefs`, which reads both. lib/memory.js cannot
+// import it back without a cycle, so this is the one command that reaches two modules.
+import { debriefBeads, readDebriefs } from '../lib/sessionlog.js';
+import { recordRead } from '../lib/memoryuse.js';
+
+const argv = process.argv.slice(2);
+const flags = new Map();
+const args = [];
+for (const a of argv) {
+  const m = /^--([a-z-]+)(?:=(.*))?$/.exec(a);
+  if (m) flags.set(m[1], m[2] ?? true);
+  else args.push(a);
+}
+
+const asJson = flags.has('json');
+
+/** A `--name=value` flag's value, or undefined — a bare `--name` has none to give. */
+const flag = (n) => (flags.has(n) && flags.get(n) !== true ? String(flags.get(n)) : undefined);
+
+const NOTE_USAGE =
+  'usage: note <key> <claim...> --evidence=<how you know> [--kind=gotcha|procedure|fact|decision] ' +
+  '[--scope=<glob>,<glob>] [--tags=<a>,<b>] [--supersede=<old-key>]';
+const who = String(flags.get('agent') || process.env.BEADCAUSE_AGENT || '');
+
+const USAGE = `beadcause-memory — what an agent knows, and what agents tell each other
+
+  remember <key> <value...>     store something true in any repo, for next session
+  recall [<key>]                read it back; no key lists everything
+  recall --of=<agent> [<key>]   read another agent's memory (read-only)
+  note <key> <claim...> --evidence=<how you know>
+                                store something about the repo you are in; one claim,
+                                4 KB max (aim for 1.5 KB); also --kind, --scope, --tags
+  note <key> ... --supersede=<old>  replace a near-duplicate key, deleting the old one
+  note --verify <key>           say a note still holds, without rewriting it
+  notes [<key>]                 read that back; no key lists the index (summaries)
+  notes --of=<agent> [<key>]    read another agent's notes on this repo (read-only)
+  notes --search <words>        find notes by key, summary and tags
+  notes --stale                 which notes the evidence says are stale, and why
+  notes --archived [<key>]      the archive (add --archived to --search to search it)
+  note --archive=<key>          move a note to the archive; note --restore=<key> undoes it
+  debrief <text...>             report on the run you are in, filed against your bead
+  debriefs [<bead>]             how earlier runs at that bead and its siblings went
+  post <topic> <message...>     say something to whoever is listening
+  read <topic> [--since=N]      what has been said since message N
+  topics                        which topics exist
+  agents                        which agents have remembered anything
+
+  --agent=<id>   whose memory (default: $BEADCAUSE_AGENT)
+  --bead=<id>    which bead a debrief is about (default: $BEADCAUSE_BEAD)
+  --of=<agent>   read that agent's memory instead of your own; recall/notes only
+  --since=<n>    the seq of the last message you saw, or an ISO timestamp
+  --limit=<n>    how many messages at most (default 50)
+  --json         machine-readable output
+
+There is no flag for which store or which repo. \`remember\`/\`recall\` follow you
+anywhere; \`note\`/\`notes\` belong to the repo this was run in, and a worktree of it
+sees the same notes as its main checkout. \`debrief\`/\`debriefs\` belong to a bead in
+that repo, and are about one run rather than about anything that outlives it.`;
+
+/** Identity is required for the halves that write in someone's name. */
+function me() {
+  if (!who) {
+    throw new Error('no agent — set BEADCAUSE_AGENT or pass --agent=<id>');
+  }
+  return who;
+}
+
+/**
+ * Which bead a debrief is about — required for the same reason identity is.
+ *
+ * `$BEADCAUSE_BEAD` is stamped by whatever opened the session, so an agent never passes
+ * this and cannot get it wrong. A shell with no bead in it is not an error worth guessing
+ * around: there is no work item for the report to hang off, and a debrief filed against a
+ * guess is worse than one that was refused, because nobody finds out.
+ */
+function whichBead() {
+  const bead = String(flags.get('bead') || process.env.BEADCAUSE_BEAD || '');
+  if (!bead) {
+    throw new Error(
+      'no bead — a debrief is filed against the work it is about, and this shell is not in a session; ' +
+        'set BEADCAUSE_BEAD or pass --bead=<id>. For something that outlives this run, use note or remember'
+    );
+  }
+  return bead;
+}
+
+/**
+ * The subject of a read, or null for "your own".
+ *
+ * Deliberately not defaulted to `me()`: a bare `--of` with no value is a typo for
+ * a name, and resolving it to yourself would answer a question nobody asked.
+ */
+function subject() {
+  if (!flags.has('of')) return null;
+  const of = flags.get('of');
+  if (of === true || !String(of)) throw new Error('usage: --of=<agent>');
+  return String(of);
+}
+
+/**
+ * What this note is worth, said at the moment it is read.
+ *
+ * **Not a privacy warning, and it used to be one** (bc-pud4). The first version said
+ * these were notes the other agent "never chose to publish", which framed the read as
+ * looking at something private and pointed at the fix that was rejected — curating a
+ * readable subset. The rule is the opposite: an agent writes every memory expecting
+ * the others to read it, so nothing here is unpublished and there is nothing to
+ * curate. What the reader actually needs told is the epistemic status, because that is
+ * the part it can get wrong on its own: another agent's memory can never *be* the
+ * reason for a decision. It can contribute to justifying one, and it faces the same
+ * scrutiny as any other citation — it may be stale, or about a case unlike this one.
+ *
+ * It goes to stderr so stdout stays byte-for-byte what a plain `recall` prints, and
+ * `V=$(beadcause-memory recall --of=advocate tone)` keeps working.
+ */
+const provenance = (of) =>
+  console.error(
+    `beadcause-memory: ${of}'s own conclusion, written without your context — ` +
+      'never a reason on its own; it can help justify one, and it must face scrutiny'
+  );
+
+const out = (human, value) => console.log(asJson ? JSON.stringify(value, null, 2) : human);
+
+/**
+ * Every command that only reads somebody's memory. What `--of` is allowed on.
+ *
+ * A list rather than a check per command, so the guard below stays one line and a
+ * subcommand added later is refused by default — the failure that matters is a *write*
+ * quietly accepting `--of` as an identity, and that is the case a forgotten entry here
+ * cannot produce.
+ */
+const READS = new Set(['recall', 'notes']);
+
+/**
+ * The read half of both stores, which is the same read twice.
+ *
+ * `recall`/`recallDetail` and `notes`/`notesDetail` differ only in which ref they go
+ * to, so the subject resolution, the provenance note, the miss exit code and the
+ * listing format live here once. They are worth sharing precisely because the parts
+ * that are easy to get subtly different — a miss that prints `null`, a `$( )` capture
+ * that gains a line — are the parts a caller depends on byte for byte.
+ */
+async function readBack(key, { one, detail, empty, row = (v) => v.value, tail = () => '' }) {
+  const of = subject();
+  const target = of ?? me();
+  if (of && of !== who) provenance(of);
+  // `by` is the reader and `target` is whose store — the two differ exactly when `--of`
+  // was passed, which is the one case a read record has to keep apart. `who` rather
+  // than the environment alone, because `--agent` is how a human at a terminal says it.
+  if (key) {
+    const value = await one(target, key, { by: who });
+    // Nothing on stdout and a non-zero exit for a miss, so `recall x || echo none`
+    // works in the shell an agent is actually using.
+    if (value === null) {
+      process.exitCode = 1;
+      return out('', null);
+    }
+    return out(typeof value === 'string' ? value : JSON.stringify(value, null, 2), value);
+  }
+  const all = await detail(target, { by: who });
+  const keys = Object.entries(all);
+  if (!keys.length) return out(empty(target), {});
+  return out(
+    keys
+      .map(([k, v]) => `${k}  ${typeof row(v) === 'string' ? row(v) : JSON.stringify(row(v))}  (${v.at})`)
+      .join('\n') + tail(keys.length),
+    Object.fromEntries(keys.map(([k, v]) => [k, row(v)]))
+  );
+}
+
+async function main() {
+  const [command, ...rest] = args;
+
+  // The whole safety of the read half is that it cannot reach a command that writes.
+  // Checked once, here, rather than inside each case: a subcommand added later is
+  // refused by default instead of silently inheriting `--of` as an identity.
+  if (flags.has('of') && !READS.has(command)) {
+    throw new Error(
+      `--of reads another agent's memory and cannot be combined with ${command ? `\`${command}\`` : 'anything else'} — ` +
+        'only `recall` and `notes` take it, and neither writes'
+    );
+  }
+
+  switch (command) {
+    case 'remember': {
+      const [key, ...value] = rest;
+      if (!key || !value.length) throw new Error('usage: remember <key> <value...>');
+      const r = await remember(me(), key, value.join(' '));
+      return out(`remembered ${r.agent}.${r.key}`, r);
+    }
+
+    case 'recall':
+      // `--of` needs no identity of its own: reading does not attribute to anybody,
+      // so a caller with no BEADCAUSE_AGENT can still look somebody up.
+      return readBack(rest[0], {
+        one: recall,
+        detail: recallDetail,
+        empty: (target) => `${target} has remembered nothing yet`,
+      });
+
+    case 'note': {
+      const [key, ...value] = rest;
+      // `--archive=<key>` and `--restore=<key>` move one note to or from the archive
+      // (bc-u1ltu.4). Both are a commit on both refs, so both can be undone.
+      if (flags.has('archive')) {
+        const k = flag('archive') || key;
+        if (!k) throw new Error('usage: note --archive=<key> [--reason=<why>]');
+        const r = await archiveNotes(process.cwd(), me(), [{ key: k, reason: flag('reason') || 'archived by hand' }]);
+        if (!r.archived.length) throw new Error(`no note ${k} to archive`);
+        return out(`archived ${r.agent}.${k}`, r);
+      }
+      if (flags.has('restore')) {
+        const k = flag('restore') || key;
+        if (!k) throw new Error('usage: note --restore=<key>');
+        const r = await restoreNote(process.cwd(), me(), k);
+        return out(`restored ${r.agent}.${r.key}`, r);
+      }
+      // `--verify <key>` confirms a note still holds without rewriting it (bc-u1ltu.2).
+      if (flags.has('verify')) {
+        const k = flags.get('verify') === true ? key : String(flags.get('verify'));
+        if (!k) throw new Error('usage: note --verify <key>');
+        const r = await verifyNote(me(), k);
+        return out(`verified ${r.agent}.${r.key} at ${r.verified}`, r);
+      }
+      if (!key || !value.length) throw new Error(NOTE_USAGE);
+      const r = await note(me(), key, value.join(' '), {
+        evidence: flag('evidence'),
+        kind: flag('kind'),
+        scope: flag('scope'),
+        tags: flag('tags'),
+        supersede: flag('supersede'),
+      });
+      return out(`noted ${r.agent}.${r.key} in ${r.repo}${r.superseded ? ` — ${r.superseded} deleted` : ''}`, r);
+    }
+
+    case 'notes':
+      // `--search <words>` or `--search=<words>`: a text match over the index (bc-u1ltu.3),
+      // the way to find a note among a thousand without listing them all.
+      // `--stale`: which notes the evidence says are stale, and why (bc-u1ltu.4). Read-only.
+      if (flags.has('stale')) {
+        const of = subject();
+        const list = await staleNotes(process.cwd(), of ?? me());
+        if (!list.length) return out('no note here is stale', []);
+        return out(list.map((n) => `${n.key}\n  ${n.reasons.join('\n  ')}`).join('\n'), list);
+      }
+      // `--archived [<key>]`: the archive, which nothing else reads.
+      if (flags.has('archived') && !flags.has('search')) {
+        const of = subject();
+        if (of && of !== who) provenance(of);
+        if (rest[0]) {
+          const entry = await archivedNotes(of ?? me(), rest[0], { by: who });
+          if (!entry) {
+            process.exitCode = 1;
+            return out('', null);
+          }
+          return out(typeof entry.value === 'string' ? entry.value : JSON.stringify(entry.value, null, 2), entry);
+        }
+        const index = await archivedNotes(of ?? me(), null, { by: who });
+        const rows = Object.entries(index);
+        if (!rows.length) return out('nothing here has been archived', {});
+        return out(rows.map(([k, v]) => `${k}  ${v.summary}  (archived ${v.archived?.at}: ${v.archived?.reason})`).join('\n'), index);
+      }
+      if (flags.has('search')) {
+        const words = [flag('search'), ...rest].filter(Boolean).join(' ');
+        const of = subject();
+        if (of && of !== who) provenance(of);
+        const found = await searchNotes(of ?? me(), words, { by: who, archived: flags.has('archived') });
+        if (!found.length) {
+          process.exitCode = 1;
+          return out(`no note here matches "${words}"`, []);
+        }
+        return out(
+          found.map((r) => `${r.key}  ${r.summary}  (${r.at}${r.reads ? `, ${r.reads} reads in 30 days` : ''})`).join('\n'),
+          found
+        );
+      }
+      return readBack(rest[0], {
+        one: notes,
+        detail: notesDetail,
+        // Named as being about *this repo*, because that is the half of the answer a
+        // reader can act on: the same command one directory over is a different answer,
+        // and "nothing yet" without the where reads like the store is empty.
+        empty: (target) => `${target} has noted nothing about this repo yet`,
+        // The index, not the notes (bc-u1ltu.1): a summary per key, and the one line
+        // that says how to get the rest, so a clipped summary never reads as the note.
+        row: (v) => v.summary,
+        tail: (n) => `\n\n${n} notes, summaries only — read one whole with \`beadcause-memory notes <key>\``,
+      });
+
+    case 'debrief': {
+      const text = rest.join(' ');
+      if (!text.trim()) throw new Error('usage: debrief <text...>');
+      const r = await debrief(me(), whichBead(), text);
+      return out(`debriefed ${r.bead} (${r.entries} this run) in ${r.repo}`, r);
+    }
+
+    case 'debriefs': {
+      // The bead is positional here and nowhere else, because this is the one command
+      // whose subject is a bead somebody may genuinely want to ask about — "how did the
+      // work on the epic go" is a fair question from a session that is not on it. The
+      // write half has no such argument; see the note at the top about why.
+      const bead = rest[0] || whichBead();
+      const dir = process.cwd();
+      // Every bead that has an archive, narrowed to this one's family. Two git calls to
+      // decide the candidate list, rather than one per bead in the tracker.
+      const family = debriefFamily(await debriefBeads(dir), { id: bead });
+      const found = await readDebriefs(dir, family, {
+        perBead: Number(flags.get('limit')) || 3,
+      });
+      // Tier 4's read, recorded where the other three record theirs. It cannot go in
+      // lib/memory.js with them: the read half of a debrief lives in lib/sessionlog.js,
+      // which memory.js cannot import back without a cycle — so this command is the
+      // one place that knows a debrief was opened.
+      recordRead({ by: who, tier: 'debrief', key: bead, repo: dir, hit: found.length > 0 });
+      if (!found.length) {
+        return out(`no run at ${bead} or its siblings has left a report yet`, []);
+      }
+      return out(
+        found
+          // `pending` is said out loud because it is the difference between a report that
+          // is safe where it is and one that is still waiting on an archive to fold it in.
+          // A reader who sees 58 of these knows something upstream has stopped, and a
+          // reader who wrote one a second ago knows why it is already readable.
+          .map((d) => `── ${d.bead}  ${d.at}${d.staged ? '  (pending archive)' : ''}\n${d.text}`)
+          .join('\n\n'),
+        found
+      );
+    }
+
+    case 'post': {
+      const [topic, ...message] = rest;
+      if (!topic || !message.length) throw new Error('usage: post <topic> <message...>');
+      const r = await post(topic, message.join(' '), { from: me() });
+      return out(`posted ${r.topic} #${r.seq}`, r);
+    }
+
+    case 'read': {
+      const [topic] = rest;
+      if (!topic) throw new Error('usage: read <topic> [--since=N]');
+      const rawSince = flags.get('since');
+      const since = rawSince === undefined ? 0 : /^\d+$/.test(String(rawSince)) ? Number(rawSince) : String(rawSince);
+      const limit = flags.has('limit') ? Number(flags.get('limit')) : 50;
+      const messages = await read(topic, since, { limit, by: who });
+      if (!messages.length) return out(`nothing new on ${topic}`, []);
+      return out(messages.map((m) => `#${m.seq} ${m.at} ${m.from}: ${m.message}`).join('\n'), messages);
+    }
+
+    case 'topics': {
+      const list = await topics();
+      return out(list.length ? list.join('\n') : 'no topics yet', list);
+    }
+
+    case 'agents': {
+      const list = await agents();
+      return out(list.length ? list.join('\n') : 'nobody has remembered anything yet', list);
+    }
+
+    default:
+      console.log(USAGE);
+      // Asking for help is not a failure; a typo'd subcommand is.
+      process.exitCode = command ? 2 : 0;
+  }
+}
+
+main().catch((err) => {
+  console.error(`beadcause-memory: ${err.message}`);
+  process.exit(1);
+});

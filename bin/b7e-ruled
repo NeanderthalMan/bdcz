@@ -1,0 +1,135 @@
+#!/usr/bin/env node
+/**
+ * `b7e-ruled` — Has Adam already decided this? Every ruling on a topic, newest first.
+ *
+ *     b7e-ruled -w myproject "chapter word count"
+ *     b7e-ruled -w myproject -b mp-afr.9            topic taken from that bead's title
+ *     b7e-ruled -w myproject "travel times" --since 2026-08-01
+ *     b7e-ruled -w myproject "travel times" --json
+ *
+ * bc-dgx7.102: several sessions each needed to know, before writing a decision card,
+ * whether Adam had already ruled on the question — and each worked it out by hand, a
+ * different way every time, out of `bd show`/`bd comments` greps. See `lib/ruled.js` for
+ * the read: closed `decision`/`human` beads, the ruling being the comment `respond()` wrote
+ * right before closing (reusing `lib/beadanswer.js`'s `answerFromComments` rather than
+ * re-deriving it). A repo's own files are not read (bc-j2zwo.6).
+ *
+ * This is not `b7e-answered` (bc-dgx7.84), which takes a bead you already have and asks
+ * whether *it* was answered. This starts from a topic and no bead at all — the state all
+ * five sessions above were in before they had anything to check.
+ *
+ * Exit codes: `0` ran to completion, whether or not anything was found — no ruling on a
+ * topic is a legitimate, useful answer, not a failure. `2` bad usage. `4` `-w` named a
+ * workspace this checkout has no config for, or `-b` named a bead the workspace does not
+ * have.
+ *
+ * @grant read
+ */
+import { loadConfig } from '../lib/config.js';
+import { Bd } from '../lib/bd.js';
+import { topicWords, findBeadRulings } from '../lib/ruled.js';
+
+const argv = process.argv.slice(2);
+const has = (f) => argv.includes(f);
+const value = (...names) => {
+  for (const f of names) {
+    const inline = argv.find((a) => a.startsWith(`${f}=`));
+    if (inline) return inline.slice(f.length + 1);
+    const at = argv.indexOf(f);
+    if (at > -1) return argv[at + 1];
+  }
+  return undefined;
+};
+
+const USAGE = `usage: b7e-ruled -w, --workspace <name> [-b, --bead <id>] <topic...>
+                 [--since <date>] [--json]
+
+Has Adam already decided this? Every decision-shaped record touching a topic, newest
+first: closed beads of type \`decision\` or labelled \`human\` (or the approval review label), each with
+the ruling text from its closing comment and that comment's timestamp; and the same beads
+still open (a packet already sitting on Adam's tap). A topic with no ruling returns
+nothing and exits 0.
+
+  -w, --workspace <name>   which tracker to search (required)
+  -b, --bead <id>          use this bead's title as the topic, instead of typing one out
+                            (combine with a topic to search both)
+  <topic...>               free text; every word (3+ letters) must appear in a match
+  --since <date>           only rulings at or after this date (YYYY-MM-DD or ISO)
+  --json                   the machine-readable form instead of the printed report`;
+
+if (has('--help') || has('-h')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+
+const wsName = value('-w', '--workspace');
+const beadId = value('-b', '--bead');
+const since = value('--since');
+const JSON_MODE = has('--json');
+
+// Every positional argument — anything left after `--flag <value>` pairs (and the
+// `--flag=value` inline form) are stripped out — joined back into one topic string.
+const VALUE_FLAGS = new Set(['-w', '--workspace', '-b', '--bead', '--since']);
+const positionals = [];
+for (let i = 0; i < argv.length; i += 1) {
+  const a = argv[i];
+  if (VALUE_FLAGS.has(a)) {
+    i += 1; // skip its value too
+    continue;
+  }
+  if (a.startsWith('-')) continue; // a bare flag, or a `--flag=value` inline form
+  positionals.push(a);
+}
+const topicFromArgv = positionals.join(' ').trim();
+
+function fail(msg, code = 2) {
+  console.error(`b7e-ruled: ${msg}`);
+  process.exit(code);
+}
+
+if (!wsName) fail(`-w/--workspace is required\n${USAGE}`);
+
+const cfg = loadConfig();
+const ws = cfg.workspaces.find((w) => w.name === wsName);
+if (!ws) {
+  fail(`no workspace named "${wsName}"\nconfigured workspaces: ${cfg.workspaces.map((w) => w.name).join(', ') || 'none'}`, 4);
+}
+
+const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me, approval: cfg.approval });
+
+let topic = topicFromArgv;
+if (beadId) {
+  let beadIssue;
+  try {
+    beadIssue = await bd.show(ws, beadId);
+  } catch (err) {
+    fail(`${ws.name} has no bead ${beadId}: ${String(err?.message || err).split('\n')[0]}`, 4);
+  }
+  if (!beadIssue) fail(`${ws.name} has no bead ${beadId}`, 4);
+  topic = topic ? `${topic} ${beadIssue.title}` : beadIssue.title;
+}
+
+if (!topic) fail(`a topic (free text) or -b/--bead is required\n${USAGE}`);
+
+const words = topicWords(topic);
+
+const merged = await findBeadRulings(bd, ws, words, { since });
+
+if (JSON_MODE) {
+  console.log(JSON.stringify({ topic, workspace: ws.name, results: merged }, null, 2));
+} else {
+  console.log(`b7e-ruled "${topic}" · ${ws.name}\n`);
+  if (!merged.length) {
+    console.log('no ruling found on this topic.');
+  } else {
+    for (const r of merged) {
+      console.log(`${r.id} — ${r.open ? 'open, awaiting Adam' : 'ruled'}${r.at ? ` (${r.at})` : ''}`);
+      console.log(`  ${r.title}`);
+      if (r.question) console.log(`  question: ${r.question}`);
+      if (r.text) console.log(`  ruling: ${r.text}`);
+      console.log('');
+    }
+  }
+}
+
+process.exitCode = 0;

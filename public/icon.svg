@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Beadcause">
+  <!--
+    "bcz" — b for beads, cz for the cause — set in one row. The letters are drawn at a
+    fixed size, a 68 bowl on a 512 viewport, and three of them in a row are 316 of ink
+    across, against the 410 the maskable safe zone allows. (The mark used to be four letters,
+    stacked two over two because four in a row would have been 446.) Nothing here is
+    text: the letters are drawn as strokes so they render identically whatever fonts a
+    phone has, and so the Android launcher vector (res/drawable/ic_launcher_foreground.xml)
+    can be the same geometry rather than a second drawing.
+
+    One rhythm, 48 between letters: b's bowl ends at 181, c's full circle starts at 229
+    and ends at 297, z starts at 345. The row is centred on the viewport by its ink,
+    98..414 across and 189..323 down: the b's ascender rises 36 above the 68 bowl band
+    (240..308), so the band itself sits 16 below centre.
+
+    The farthest ink is at the row's two outer corners: the top and bottom of b's stem
+    at x 113 (its round caps), and the z's bottom-right corner (399,308) with its round
+    join. Each is 152.2 out from (256,256), and the stroke adds 15, for 167.2. Everything
+    is inside the maskable safe zone — the centre 80%, a circle of radius 205 about
+    (256,256) — that icon-512.png's "any maskable" purpose asks for, with 37.8 to spare,
+    so a circular mask takes nothing at all. The launcher's own guarantee is tighter and
+    is met by a scale on the vector rather than here; see ic_launcher_foreground.xml.
+  -->
+  <rect width="512" height="512" rx="112" fill="#0b0f14"/>
+  <g fill="none" stroke="#5eead4" stroke-width="30" stroke-linecap="round" stroke-linejoin="round">
+    <!-- b: stem, bowl -->
+    <path d="M113 204 V308"/>
+    <circle cx="147" cy="274" r="34"/>
+
+    <!-- cz. The c is a bowl with 110° taken out of its right side, so it shares its
+         radius with b and the mark keeps one rhythm. -->
+    <path d="M282.5 246.15 A34 34 0 1 0 282.5 301.85"/>
+    <path d="M345 240 H399 L345 308 H399"/>
+  </g>
+</svg>

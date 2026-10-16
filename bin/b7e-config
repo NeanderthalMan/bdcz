@@ -1,0 +1,139 @@
+#!/usr/bin/env node
+/**
+ * `b7e-config` — what this install actually resolves to: the config dir, the bd
+ * binary and actor, every workspace's `.beads` dir and checkout root, and — with
+ * `-b` — what `state.json`'s `answered` map already recorded about one bead.
+ *
+ *     b7e-config
+ *     b7e-config --ws beadcause
+ *     b7e-config -b bc-dgx7.110
+ *     b7e-config --ws beadcause -b bc-dgx7.110
+ *     b7e-config --json
+ *
+ * bc-dgx7.110 (session audit, bc-dgx7.95): three sessions each needed a fact about
+ * the local install and each built its own reader, after first hunting for the
+ * file — `find / -maxdepth 6 -iname state.json`, `grep -n BEADCAUSE_CONFIG_DIR
+ * lib/config.js`, a one-off `node -e "import('./lib/config.js')…"`. `lib/config.js`
+ * already exports `CONFIG_DIR`/`CONFIG_PATH`/`STATE_PATH` and `loadConfig()`; this is
+ * the one thin shell over what was already there.
+ *
+ * One of the three (bc-dgx7.97) cost its session a filed memory note
+ * (`ws-dir-is-the-beads-dir-not-the-checkout`) because the field it read,
+ * `workspace.dir`, is the `.beads` directory and not the checkout root it actually
+ * wanted. `--ws` prints both, labelled, on one line each — `.beads:` and
+ * `checkout:` — so the distinction that cost a session a memory note is not
+ * something the next reader has to notice a second time. The checkout root is
+ * `lib/session.js`'s own `resolveSessionDir`, not a re-derivation: what this prints
+ * is exactly what opening a session there would resolve to, refusal included, for a
+ * workspace `resolveSessionDir` cannot place (a `projectRoot` mismatch, a
+ * multi-repo workspace with no default).
+ *
+ * `-b <bead>` reads `state.json`'s `answered` map — beadcause's own record of what
+ * you already said about a bead, kept so a reopened card can say "you said this
+ * already" (see lib/answered.js) — keyed `workspace/id`. Given `--ws`, one exact key
+ * is checked; without it, every configured workspace's key is tried and the first
+ * match wins. A bead with no record prints "no record", explicitly, rather than
+ * nothing.
+ *
+ * `BEADCAUSE_CONFIG_DIR` isolates the config dir this reads (see lib/config.js's
+ * header) — this always says so when it is set, since a report of the wrong
+ * install's config is worse than one nobody asked to double-check.
+ *
+ * Exit codes: `0` printed a report, whatever it found — "no record" is a legitimate
+ * answer, not a failure. `2` bad usage.
+ *
+ * @grant read
+ */
+import { loadConfig, loadState, CONFIG_DIR, CONFIG_PATH, STATE_PATH } from '../lib/config.js';
+import { workspaceRows, answerFor } from '../lib/configreport.js';
+
+const argv = process.argv.slice(2);
+const has = (f) => argv.includes(f);
+const value = (...names) => {
+  for (const f of names) {
+    const inline = argv.find((a) => a.startsWith(`${f}=`));
+    if (inline) return inline.slice(f.length + 1);
+    const at = argv.indexOf(f);
+    if (at > -1) return argv[at + 1];
+  }
+  return undefined;
+};
+
+const USAGE = `usage: b7e-config [--ws <workspace>] [-b <bead>] [--json]
+
+What this install actually resolves to. With no flags: the config dir (and whether
+BEADCAUSE_CONFIG_DIR overrode the default), the bd binary and actor, then one line per
+configured workspace naming its .beads dir and its checkout root — never the same
+string, and labelled so the two are never confused.
+
+  --ws <workspace>     only this workspace's row (still lists every one without it)
+  -b, --bead <id>      what state.json's answered map records for this bead — checked
+                        against every configured workspace's key, or just --ws's if
+                        given; prints "no record" explicitly when there is none
+  --json               the machine-readable form instead of the printed report`;
+
+if (has('--help') || has('-h')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+
+const wsName = value('--ws');
+const beadId = value('-b', '--bead');
+const JSON_MODE = has('--json');
+
+const cfg = loadConfig();
+const rows = wsName ? workspaceRows(cfg).filter((r) => r.name === wsName) : workspaceRows(cfg);
+const overridden = Boolean(process.env.BEADCAUSE_CONFIG_DIR);
+
+const report = {
+  configDir: CONFIG_DIR,
+  configDirOverridden: overridden,
+  configPath: CONFIG_PATH,
+  statePath: STATE_PATH,
+  bdBin: cfg.bdBin,
+  actor: cfg.actor,
+  workspaces: rows,
+};
+
+if (beadId) {
+  const state = loadState();
+  const found = answerFor(cfg, state, beadId, wsName || null);
+  report.bead = { id: beadId, ...found };
+}
+
+if (JSON_MODE) {
+  console.log(JSON.stringify(report, null, 2));
+  process.exit(0);
+}
+
+console.log(`config dir: ${report.configDir}${overridden ? '  (BEADCAUSE_CONFIG_DIR override in force)' : ''}`);
+console.log(`bd binary: ${report.bdBin}`);
+console.log(`actor: ${report.actor}`);
+
+if (wsName && !rows.length) {
+  console.log(`\nno workspace named "${wsName}"`);
+} else {
+  console.log('\nworkspaces:');
+  for (const w of rows) {
+    const checkout = w.checkoutRoot ? w.checkoutRoot : `(unresolved — ${w.checkoutError})`;
+    console.log(`  ${w.name}`);
+    console.log(`    .beads:   ${w.beadsDir}`);
+    console.log(`    checkout: ${checkout}`);
+  }
+}
+
+if (beadId) {
+  console.log('');
+  const { workspace, key, record } = report.bead;
+  if (record) {
+    console.log(`${key}: answered ${record.at} (×${record.count})`);
+    console.log(`  response: ${record.response}`);
+  } else {
+    console.log(
+      `no record for "${beadId}"${wsName ? ` in workspace ${wsName}` : ' in any configured workspace'}` +
+        ` (checked: ${report.bead.checked.join(', ') || 'none'})`
+    );
+  }
+}
+
+process.exit(0);

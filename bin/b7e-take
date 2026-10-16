@@ -1,0 +1,147 @@
+#!/usr/bin/env node
+/**
+ * `b7e-take` — take a bead a relay role is holding, one call instead of the refusal
+ * and the memory lookup bc-dgx7.97 found seven sessions each doing by hand.
+ *
+ *     b7e-take -w <workspace> -b <bead>
+ *     b7e-take -w <workspace> -b <bead> --dry-run
+ *     b7e-take -w <workspace> -b <bead> --release
+ *
+ * A plain `bd update <id> --claim` refuses whenever a bead already carries an
+ * assignee, whether that assignee is a real live session or, as it always was for
+ * the seven sessions this replaces, a relay role the bead had only been *routed*
+ * to. This tells the two apart by reading the calling checkout's own role roster
+ * (lib/take.js's `rosterOf` — every role its relay definitions declare, and every
+ * folder under the one their `profile` template names) rather than by guessing, and refuses by name whenever a
+ * holder is not in it — the conservative answer for what might be a real person
+ * or a live window actually working the bead.
+ *
+ * Exit codes: `0` taken (or released, or a dry run that found nothing wrong). `2`
+ * bad usage. `3` refused before writing anything (closed bead, unrecognised
+ * holder, unknown workspace/bead, nothing to release). `1` an unexpected error
+ * from `bd` itself partway through (a lock, a timeout, a lost race).
+ *
+ * The grant argument, as it was made when this tool was added — moved here verbatim from
+ * lib/tooldecl.js by bc-fmk4v, so the reason sits beside the declaration it argues for and
+ * adding a tool appends to no shared file. "This list" is DEFAULT_TOOL_LIST; "above",
+ * "below" and "beside" name the order lib/tooldecl.js kept these in, which
+ * `git show 7c47d7d77:lib/tooldecl.js` still reads whole.
+ *
+ * b7e-take (bc-dgx7.97) is deliberately NOT on this list, even though the bead's own
+ * wiring checklist named it — that checklist is right for a read-only lookup and wrong
+ * here, for the same reason `b7e-handback` (its closest sibling in shape) is not on it
+ * either: `bd update --if-assignee ... --assignee ... --status in_progress` is a
+ * tracker *write*, and this array is "the read-only surface every reply agent gets"
+ * (this file's own opening docstring) — `dispatch` never claims a bead in the first
+ * place, so there is nothing here for it to recover from. The worker session this
+ * actually serves already runs `bd update --claim` itself as the very first line of
+ * its brief, under the unrestricted CLI default, so a grant here would widen nothing
+ * that session cannot already reach — same shape as b7e-eyeball/b7e-plate just above,
+ * for a genuinely different reason (a write, not merely "not `bd`"). See bin/b7e-take
+ * and lib/take.js.
+ *
+ * @grant excluded
+ */
+import { execFileSync } from 'node:child_process';
+import { loadConfig } from '../lib/config.js';
+import { Bd } from '../lib/bd.js';
+import { take, describeTake } from '../lib/take.js';
+import { relaysIn } from '../lib/relaydefs.js';
+import { relayFor } from '../lib/relay.js';
+
+const argv = process.argv.slice(2);
+const has = (f) => argv.includes(f);
+const value = (...names) => {
+  for (const f of names) {
+    const inline = argv.find((a) => a.startsWith(`${f}=`));
+    if (inline) return inline.slice(f.length + 1);
+    const at = argv.indexOf(f);
+    if (at > -1) return argv[at + 1];
+  }
+  return undefined;
+};
+
+const USAGE = `usage: b7e-take -w <workspace> -b <bead> [--release] [--dry-run] [--json]
+
+Take a bead a relay role is holding: read who bd 1.2.1 says holds it, check that
+name against the calling checkout's own role roster, and — only when it is one of
+those names — do the atomic reassign a plain \`bd update --claim\` refuses to do
+itself. Refused, by name, when the holder is not in that roster.
+
+  -w, --workspace <name>   which tracker (required; one of the configured workspaces)
+  -b, --bead <id>          the bead to take (required)
+  --release                give it back to the role it was taken from, instead
+  --dry-run                decide and report; write nothing
+  --json                   the machine-readable form instead of the printed report`;
+
+if (has('--help') || has('-h')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+
+const wsName = value('-w', '--workspace');
+const beadId = value('-b', '--bead');
+const RELEASE = has('--release');
+const DRY_RUN = has('--dry-run');
+const JSON_MODE = has('--json');
+
+function fail(msg, code = 2) {
+  console.error(`b7e-take: ${msg}`);
+  process.exit(code);
+}
+
+if (!wsName) fail(`-w/--workspace is required\n${USAGE}`);
+if (!beadId) fail(`-b/--bead is required\n${USAGE}`);
+
+const cfg = loadConfig();
+const ws = cfg.workspaces.find((w) => w.name === wsName);
+if (!ws) {
+  fail(`no workspace named "${wsName}"\nconfigured workspaces: ${cfg.workspaces.map((w) => w.name).join(', ') || 'none'}`, 3);
+}
+
+// The checkout the *caller* is sitting in, not wherever the workspace's own `.beads`
+// happens to live — a bead's role roster (lib/take.js's `rosterOf`) is a fact about the
+// repo, and a worker invoking this is already inside it (or a worktree of it), same
+// reasoning b7e-claims' own `repoRoot` followed for the same class of question (that tool
+// now lives in delmar as tools/d5a/bin/d5a-claims — bc-j2zwo.4).
+function repoRoot(cwd = process.cwd()) {
+  try {
+    return execFileSync('git', ['rev-parse', '--show-toplevel'], {
+      cwd,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+  } catch {
+    return cwd;
+  }
+}
+
+const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me });
+
+let result;
+try {
+  // The relay definitions the roster is built from: the checkout's own file where it has
+  // one that validates, and the config's entry for this workspace where it does not — the
+  // same precedence lib/relaydefs.js's `relayDefFor` keeps.
+  const root = repoRoot();
+  const read = relaysIn(root);
+  const relays = read.defined ? Object.values(read.relays) : [relayFor(cfg, ws.name)].filter(Boolean);
+  result = await take(bd, ws, beadId, { release: RELEASE, dryRun: DRY_RUN, root, relays });
+} catch (err) {
+  console.error(`b7e-take: ${beadId} — ${String(err?.message || err).split('\n')[0]}`);
+  process.exit(1);
+}
+
+if (JSON_MODE) {
+  console.log(JSON.stringify({ workspace: ws.name, bead: beadId, release: RELEASE, dryRun: DRY_RUN, ...result }, null, 2));
+} else {
+  for (const line of describeTake(beadId, result)) console.log(line);
+}
+
+// Printed to stdout either way — the report above is the audit trail even for a
+// refusal — and echoed to stderr too, so a caller checking only stderr (the way
+// fail() above already works) sees the same reason.
+if (!result.ok) {
+  console.error(`b7e-take: ${beadId} — ${result.refused}`);
+}
+process.exit(result.ok ? 0 : 3);

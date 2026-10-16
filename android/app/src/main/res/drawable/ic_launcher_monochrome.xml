@@ -1,0 +1,46 @@
+<!--
+  The themed-icon layer: what a launcher with "Themed icons" on draws instead of the
+  colour foreground. Same lockup, same coordinates, same 0.9 fit as
+  ic_launcher_foreground — only the colour differs, because Android keeps just the
+  alpha here and paints it in the wallpaper's palette.
+
+  This used to be @drawable/ic_notification, which was fine while both were the same
+  strand. It cannot be shared any more: the status bar renders at 24dp, where a row of
+  letters is a smear, so ic_notification keeps a glyph drawn for that size and this
+  file carries the mark. Nothing is filled — every counter in b and c stays
+  transparent, so the theming does not flood them solid.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="512"
+    android:viewportHeight="512">
+    <group
+        android:pivotX="256"
+        android:pivotY="256"
+        android:scaleX="0.9"
+        android:scaleY="0.9">
+
+        <path
+            android:pathData="M113,204 L113,308"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="30"
+            android:strokeLineCap="round" />
+        <path
+            android:pathData="M113,274 a34,34 0 1,0 68,0 a34,34 0 1,0 -68,0"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="30" />
+
+        <path
+            android:pathData="M282.5,246.15 a34,34 0 1,0 0,55.7"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="30"
+            android:strokeLineCap="round" />
+        <path
+            android:pathData="M345,240 L399,240 L345,308 L399,308"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="30"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round" />
+    </group>
+</vector>

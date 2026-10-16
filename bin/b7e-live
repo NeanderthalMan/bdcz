@@ -1,0 +1,142 @@
+#!/usr/bin/env node
+/**
+ * `b7e-live` — which commit was the running daemon deployed from, and is a given sha live yet?
+ *
+ *     b7e-live                               this repo's own deploy: what is running, how far behind
+ *     b7e-live --sha f72378b7                and whether that commit is in what is running
+ *     b7e-live --sha f72378b7 --sha 0fdc2485 one verdict per commit (or: --sha a b c)
+ *     b7e-live --repo acme/example-service   another repo's deploy key
+ *     b7e-live --json                        the same answer as one object
+ *
+ * bc-dgx7.164: three windows opened minutes apart on 2026-09-19 (bc-ka5y.15.19, bc-rfnr.9.10,
+ * bc-42ow) and each worked this out by hand — curling `/api/deploys` (wants a token), grepping
+ * `lib/server.js` for a build route that does not exist, reading the journal and running
+ * `git merge-base --is-ancestor` themselves. lib/live.js's header says what "running" can and
+ * cannot mean without the daemon reporting a commit, and why a `failed` deploy is not one.
+ *
+ * Reads `<config dir>/deploys/*.json` and `restart.json` and does local `git` reads. No token,
+ * no daemon, and no fetch: `origin/<base>` is the ref as this Mac last saw it, and the answer
+ * says so.
+ *
+ * Exit codes: `0` answered, and every `--sha` asked about is live (or none was asked).
+ * `3` answered, and at least one `--sha` is not live. `2` bad usage. `4` no such repo key, or
+ * none could be chosen. `5` a `--sha` cannot be judged: no deploy record names a commit, or
+ * its checkout is not on this Mac.
+ *
+ * The grant argument, as it was made when this tool was added — moved here verbatim from
+ * lib/tooldecl.js by bc-fmk4v, so the reason sits beside the declaration it argues for and
+ * adding a tool appends to no shared file. "This list" is DEFAULT_TOOL_LIST; "above",
+ * "below" and "beside" name the order lib/tooldecl.js kept these in, which
+ * `git show 7c47d7d77:lib/tooldecl.js` still reads whole.
+ *
+ * Reads the deploy journal and restart marker under the config directory plus local git
+ * rev-parse/merge-base/rev-list; it writes nothing, fetches nothing and needs no token. See
+ * bin/b7e-live.
+ *
+ * @grant read
+ */
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { loadConfig } from '../lib/config.js';
+import { keyOf, listDeploys, lastRestart, ownRepoKey, deployFor, KEEP } from '../lib/deploy.js';
+import { mainCheckout } from '../lib/gitref.js';
+import { describeLive, recordsFor, renderLive } from '../lib/live.js';
+
+const argv = process.argv.slice(2);
+const has = (f) => argv.includes(f);
+
+const USAGE = `usage: b7e-live [--sha <commit>...] [--repo <key>] [--json]
+
+Says which commit the running daemon was last deployed from, when it last restarted, how
+many commits that is behind origin/<base>, and — for each --sha — whether the commit is
+"live", "merged, not deployed", or on neither. Reads the deploy journal and the restart
+marker under the config directory plus local git; no token, no daemon, no fetch.
+
+  --sha <commit>...   commits to judge (repeatable; several values may follow one flag)
+  --repo <key>        the deploy key (default: the one whose checkout this is)
+  --json              one object instead of the printed block
+
+Exits 0 when everything asked about is live, 3 when a --sha is not, 2 on bad usage, 4 when
+no repo key could be chosen, 5 when a --sha cannot be judged (no deploy record names a commit,
+or its checkout is not on this Mac).`;
+
+if (has('--help') || has('-h')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+
+const shas = [];
+let repo = null;
+let jsonMode = false;
+for (let i = 0; i < argv.length; i += 1) {
+  const a = argv[i];
+  if (a === '--json') jsonMode = true;
+  else if (a === '--repo') repo = argv[++i] ?? '';
+  else if (a.startsWith('--repo=')) repo = a.slice(7);
+  else if (a === '--sha') {
+    // `--sha a b c` — values run to the next flag.
+    while (i + 1 < argv.length && !argv[i + 1].startsWith('-')) shas.push(argv[++i]);
+  } else if (a.startsWith('--sha=')) shas.push(a.slice(6));
+  else {
+    console.error(`b7e-live: unexpected argument ${a}`);
+    console.error(USAGE);
+    process.exit(2);
+  }
+}
+if (has('--sha') && !shas.length) {
+  console.error('b7e-live: --sha wants at least one commit');
+  process.exit(2);
+}
+if (repo === '') {
+  console.error('b7e-live: --repo wants a deploy key');
+  process.exit(2);
+}
+// A commit-ish, never something git could read as an option: no leading dash.
+const bad = shas.find((s) => !/^[\w./~^@{}][\w./~^@{}-]*$/.test(s));
+if (bad) {
+  console.error(`b7e-live: "${bad}" is not a commit-ish`);
+  process.exit(2);
+}
+
+const cfg = loadConfig();
+const declared = Object.keys(cfg.deploys || {});
+const journal = listDeploys({ limit: KEEP });
+
+async function chooseKey() {
+  if (repo) return repo;
+  const here = await mainCheckout(process.cwd()).catch(() => null);
+  const own = (here && ownRepoKey(cfg, here)) || ownRepoKey(cfg, path.join(path.dirname(fileURLToPath(import.meta.url)), '..'));
+  if (own) return own;
+  return declared.length === 1 ? declared[0] : null;
+}
+
+const key = await chooseKey();
+const known = new Set([...declared, ...journal.map((r) => keyOf(r))]);
+if (!key || !known.has(key)) {
+  console.error(key ? `b7e-live: no deploy key "${key}"` : 'b7e-live: cannot tell which repo this checkout deploys');
+  console.error(`  known keys: ${[...known].filter(Boolean).sort().join(', ') || '(none)'}`);
+  console.error('  pass --repo <key>');
+  process.exit(4);
+}
+
+const records = recordsFor(journal, key, keyOf);
+let dir = records.find((r) => r.dir)?.dir || null;
+let base = records.find((r) => r.base)?.base || null;
+try {
+  const plan = deployFor(cfg, key);
+  dir ||= plan?.dir || null;
+  base ||= plan?.base || null;
+} catch {
+  // A declaration that does not parse is the deploy button's problem to report; the journal
+  // alone still says what ran.
+}
+const raw = (cfg.deploys || {})[key];
+const checks = raw && typeof raw === 'object' ? (Array.isArray(raw.checks) ? raw.checks.length : 0) : null;
+
+const answer = await describeLive({ key, dir, base, records, restart: lastRestart(), shas, checks });
+
+console.log(jsonMode ? JSON.stringify(answer, null, 2) : renderLive(answer));
+
+// Nothing to judge against: no deploy names a commit, or the checkout is not on this Mac.
+if (shas.length && (!answer.deployed || answer.shas.length < shas.length)) process.exit(5);
+process.exit(answer.shas.some((s) => s.verdict !== 'live') ? 3 : 0);

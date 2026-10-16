@@ -1,0 +1,341 @@
+#!/usr/bin/env node
+/**
+ * `b7e-derived` — given a diff, name what in the tree is generated from it, and whether
+ * that generated file is now stale.
+ *
+ *     b7e-derived -w myproject                     # the diff since origin/main, plus anything uncommitted
+ *     b7e-derived -w myproject docs/entries/sample-entry.md
+ *     b7e-derived -w myproject --check               # run each generator's own --check mode
+ *     b7e-derived -w myproject --rebuild              # run the generators whose sources changed
+ *     b7e-derived -w myproject --plan                 # the order --check/--rebuild would run, and why
+ *     b7e-derived -w myproject --conflicted           # mid-merge: regenerate every conflicted artifact
+ *     b7e-derived --dir <root>                      # another tree — this is how it is tested
+ *
+ * **Order (bc-dgx7.139).** A generator can say `"after": ["<id>", ...]` in the manifest, and
+ * one whose `sources` match another's declared `artifacts` waits on it without saying so.
+ * `--check`/`--rebuild` run in that order, pull in what is downstream of a changed
+ * generator, pull in an upstream one whose artifact is not on disk at all, and skip a step
+ * whose prerequisite failed rather than run it against input known to be bad — the
+ * `build_cut.py --check` refusal lm-5eu.27 hit by hand, three builders deep.
+ *
+ * **`--conflicted` (bc-dgx7.139).** Mid-merge, a conflicted file that is a declared
+ * artifact is not resolved hunk by hunk: its generator is re-run over the merged sources,
+ * then the file is checked for leftover markers and for at least one line of its own from
+ * each parent (lm-5i2.107's manual proof). Nothing is staged — `git add` stays yours.
+ * bc-dgx7.1's session audit, in a repo that generates files from other files, named five
+ * sessions that each asked "what else in this tree is derived from what I just touched?"
+ * after an edit and answered it with a different ad-hoc `grep`, or not until a gate went
+ * red six `Edit`s later. `lib/derived.js` is the mapping and the running; this is the
+ * argv parsing and the printing around it, the same split `bin/b7e-affected` and
+ * `lib/affected.js` already use for the sibling question ("what tests this file" rather
+ * than "what does this file feed").
+ *
+ * **The map is per-checkout, not per this repo.** A checkout declares its own generators
+ * in `.beadcause/derived.json` — the same convention `lib/repoviews.js` uses for
+ * `views.json`, and for the same reason: a generator's path and the sources that feed it
+ * are a fact about that checkout at that revision, and belong in the commit that changes
+ * them, not in a table here that would need a pull request to this repo every time
+ * another repo renames a script.
+ *
+ * Exit codes: `0` every changed file was placed and (under `--check`) nothing is stale.
+ * `1` a changed file fed nothing, or (under `--check`) a generator reported stale, missing
+ * or skipped, or (under `--rebuild`) one failed or was skipped, or (under `--conflicted`) a
+ * conflicted path still has markers or a parent's side did not survive. `2` refused — bad
+ * usage, no workspace resolves, the manifest could not be read, or (for any mode that runs
+ * things in order) its `after` edges form a loop.
+ *
+ * b7e-derived is deliberately NOT on DEFAULT_TOOL_LIST, for the b7e-apply/b7e-swbump reason
+ * rather than a read-only one: `--rebuild` runs a checkout's own generators and `--conflicted`
+ * rewrites the files they produce, both of them writes to a tracked tree this command does not
+ * own, with no branch of its own and no path to commit or review the result. `dispatch`, the
+ * one agent that list governs, answers one phone comment with one `bd comment` and has no
+ * generated file of its own to bring up to date. Written down by bc-fmk4v, which moved every
+ * other tool's argument into its own header and found this one had never been made anywhere.
+ *
+ * @grant excluded
+ */
+import fs from 'node:fs';
+import path from 'node:path';
+import { loadConfig } from '../lib/config.js';
+import { resolveSessionDir } from '../lib/session.js';
+import { defaultChangedFiles, toRepoRel } from '../lib/affected.js';
+import {
+  loadManifest,
+  findDerived,
+  planDerived,
+  walkPlan,
+  matchesSource,
+  runCheck,
+  runRebuild,
+  conflictedPaths,
+  stageText,
+  artifactOwner,
+  conflictMarkers,
+  sideSurvival,
+} from '../lib/derived.js';
+
+const argv = process.argv.slice(2);
+const has = (f) => argv.includes(f);
+const value = (f, fallback) => {
+  const at = argv.indexOf(f);
+  return at === -1 ? fallback : (argv[at + 1] ?? fallback);
+};
+
+if (has('--help') || has('-h')) {
+  console.log(
+    [
+      'b7e-derived -w <workspace> [<path>...]   the diff since origin/main, plus anything uncommitted, or these paths',
+      'b7e-derived -w <workspace> --check       run each generator\'s own --check mode, in order, and report staleness',
+      'b7e-derived -w <workspace> --rebuild     run the generators whose sources changed, in order, and what depends on them',
+      'b7e-derived -w <workspace> --plan        print the order --check/--rebuild would run, and why each is on it',
+      'b7e-derived -w <workspace> --conflicted  mid-merge: regenerate every conflicted declared artifact and verify it',
+      'b7e-derived --dir <root> [<path>...]     another tree — this is how it is tested',
+      '',
+      'A manifest entry may carry "after": ["<id>", ...] — never run it until those have succeeded.',
+    ].join('\n'),
+  );
+  process.exit(0);
+}
+
+const WS_NAME = value('-w', value('--workspace', null));
+const DIR_GIVEN = value('--dir', null);
+const MODES = ['--check', '--rebuild', '--plan', '--conflicted'];
+const CHECK = has('--check');
+const REBUILD = has('--rebuild');
+const PLAN = has('--plan');
+const CONFLICTED = has('--conflicted');
+
+if (!WS_NAME && !DIR_GIVEN) {
+  console.error('b7e-derived: -w <workspace> or --dir <root> is required');
+  process.exit(2);
+}
+if (MODES.filter(has).length > 1) {
+  console.error(`b7e-derived: ${MODES.filter(has).join(' and ')} are mutually exclusive`);
+  process.exit(2);
+}
+
+const FLAG_VALUES = new Set(['-w', '--workspace', '--dir']);
+const paths = [];
+for (let i = 0; i < argv.length; i++) {
+  const a = argv[i];
+  if (MODES.includes(a)) continue;
+  if (FLAG_VALUES.has(a)) {
+    i += 1;
+    continue;
+  }
+  if (a.startsWith('--')) {
+    console.error(`b7e-derived: unrecognised flag: ${a}`);
+    process.exit(2);
+  }
+  paths.push(a);
+}
+if (CONFLICTED && paths.length) {
+  console.error('b7e-derived: --conflicted reads the conflicted paths from git and takes none of its own');
+  process.exit(2);
+}
+
+let ROOT;
+if (DIR_GIVEN) {
+  ROOT = path.resolve(DIR_GIVEN);
+} else {
+  const cfg = loadConfig();
+  const ws = cfg.workspaces.find((w) => w.name === WS_NAME);
+  if (!ws) {
+    console.error(`b7e-derived: no workspace named "${WS_NAME}"`);
+    console.error(`configured workspaces: ${cfg.workspaces.map((w) => w.name).join(', ') || 'none'}`);
+    process.exit(2);
+  }
+  try {
+    ROOT = path.resolve(resolveSessionDir(cfg, ws));
+  } catch (err) {
+    console.error(`b7e-derived: ${err.message}`);
+    process.exit(2);
+  }
+}
+
+const { generators: allGenerators, problems, cycles } = loadManifest(ROOT);
+for (const p of problems) console.error(`b7e-derived: ${p}`);
+if (!allGenerators.length) {
+  console.error(`b7e-derived: no generators declared in ${ROOT}/.beadcause/derived.json — nothing to report`);
+  process.exit(problems.length ? 2 : 0);
+}
+if (cycles.length && (CHECK || REBUILD || PLAN || CONFLICTED)) {
+  console.error('b7e-derived: refusing to run anything in order while the manifest\'s "after" edges loop');
+  process.exit(2);
+}
+
+const dim = (s) => `\x1b[2m${s}\x1b[0m`;
+const red = (s) => `\x1b[31m${s}\x1b[0m`;
+const exists = (rel) => fs.existsSync(path.join(ROOT, rel));
+const readText = (rel) => {
+  try {
+    return fs.readFileSync(path.join(ROOT, rel), 'utf8');
+  } catch {
+    return '';
+  }
+};
+const warnLoop = (loop) => {
+  if (loop.length) console.error(dim(`sources and artifacts feed each other between ${loop.join(', ')} — ordered by "after" and manifest order there`));
+};
+const LABELS = {
+  clean: 'clean',
+  stale: red('stale'),
+  'no-check': dim('no --check declared'),
+  ran: 'ran',
+  failed: red('failed'),
+  'no-run': dim('no run command declared'),
+  missing: red('missing'),
+  skipped: red('skipped'),
+  blocked: red('blocked'),
+};
+const TROUBLE = new Set(['stale', 'failed', 'missing', 'skipped', 'blocked']);
+
+/* ------------------------------------------------------------------------- --conflicted */
+
+if (CONFLICTED) {
+  const conflicted = conflictedPaths(ROOT);
+  if (conflicted === null) {
+    console.error(`b7e-derived: ${ROOT} is not a git checkout git can read — cannot list conflicted paths`);
+    process.exit(2);
+  }
+  if (!conflicted.length) {
+    console.error('b7e-derived: no conflicted paths — nothing to regenerate');
+    process.exit(0);
+  }
+  const owned = new Map();
+  const byHand = [];
+  for (const p of conflicted) {
+    const owner = artifactOwner(p, allGenerators);
+    if (owner) owned.set(owner.id, [...(owned.get(owner.id) || []), p]);
+    else byHand.push(p);
+  }
+  // The three sides are read from the index *before* anything runs: a generator is free
+  // to rewrite the working file, but the index stages stay put until somebody `git add`s.
+  const sides = new Map();
+  for (const list of owned.values()) {
+    for (const p of list) sides.set(p, { base: stageText(ROOT, 1, p), ours: stageText(ROOT, 2, p), theirs: stageText(ROOT, 3, p) });
+  }
+  const stillMarked = byHand.filter((p) => conflictMarkers(readText(p)) > 0);
+  const { steps, loop } = planDerived(allGenerators.filter((g) => owned.has(g.id)), allGenerators, { exists, downstream: false });
+  warnLoop(loop);
+  const results = walkPlan(steps, (g) => runRebuild(ROOT, g), {
+    blocking: new Set(['failed', 'skipped', 'blocked', 'no-run']),
+    preset: (g) => {
+      const src = stillMarked.find((p) => matchesSource(g, p));
+      return src ? { status: 'blocked', detail: `its source ${src} still has conflict markers — resolve that one by hand first` } : null;
+    },
+  });
+
+  let exitCode = 0;
+  for (const { generator: g, reason } of steps) {
+    const { status, detail } = results.get(g.id);
+    if (status !== 'ran') exitCode = 1;
+    if (reason.kind !== 'changed') {
+      console.log(`${g.id}\tbefore ${reason.of} — ${reason.missing} is not there\t${LABELS[status] || status}${detail ? ` — ${detail}` : ''}`);
+      continue;
+    }
+    for (const p of owned.get(g.id)) {
+      const markers = conflictMarkers(readText(p));
+      const { base, ours, theirs } = sides.get(p);
+      const s = sideSurvival(base, ours, theirs, readText(p));
+      const sideText = (name, v) => {
+        const lost = v.own > 0 && v.kept === 0;
+        if (lost) exitCode = 1;
+        const text = `${name} ${v.kept}/${v.own}`;
+        return lost ? `${red(text)} (lost: ${v.sample})` : text;
+      };
+      if (markers) exitCode = 1;
+      console.log(
+        [
+          p,
+          g.id,
+          `${LABELS[status] || status}${status === 'ran' ? '' : ` — ${detail}`}`,
+          markers ? red(`${markers} markers left`) : '0 markers',
+          `${sideText('ours', s.ours)} ${sideText('theirs', s.theirs)}`,
+        ].join('\t'),
+      );
+    }
+  }
+  if (byHand.length) {
+    console.error(dim('conflicted paths no generator declares — resolve these by hand:'));
+    for (const p of byHand) {
+      const n = conflictMarkers(readText(p));
+      if (n) exitCode = 1;
+      console.error(dim(`  ${p}${n ? ` (${n} markers left)` : ' (no markers left)'}`));
+    }
+  }
+  if (!exitCode) console.error(dim('regenerated; nothing is staged — review, then git add the paths above'));
+  process.exit(exitCode);
+}
+
+/* ------------------------------------------------------------- listing, --plan, --check, --rebuild */
+
+// With `--dir`, a bare path on argv is relative to *that* tree — the whole point of
+// `--dir` is testing against a tree this process is not sitting in. Without it, ordinary
+// CLI use: relative to the real cwd. Same rule `bin/b7e-affected` uses.
+const CWD_BASE = DIR_GIVEN ? ROOT : process.cwd();
+const changedFiles = paths.length ? paths.map((p) => toRepoRel(ROOT, CWD_BASE, p)) : defaultChangedFiles(ROOT);
+if (!changedFiles.length) {
+  console.error('b7e-derived: no changed files — nothing to report');
+  process.exit(0);
+}
+
+const { results, unmatched, generators } = findDerived(changedFiles, allGenerators);
+const { steps, loop } = planDerived(generators, allGenerators, { exists });
+warnLoop(loop);
+
+/** The third column: which changed files put it on the list, or what did. */
+const why = ({ generator: g, reason }) => {
+  if (reason.kind === 'downstream') return `via ${reason.of}`;
+  if (reason.kind === 'prerequisite') return `before ${reason.of} — ${reason.missing} is not there`;
+  return results.filter((r) => r.generators.includes(g)).map((r) => r.file).join(', ');
+};
+
+let exitCode = unmatched.length ? 1 : 0;
+
+if (PLAN) {
+  steps.forEach((step, i) => {
+    const needs = step.needs.length ? `after ${step.needs.join(', ')}` : '';
+    console.log(`${i + 1}\t${step.generator.id}\t${why(step)}\t${needs}`);
+  });
+} else if (CHECK || REBUILD) {
+  const byId = new Map(steps.map((s) => [s.generator.id, s]));
+  const outcome = CHECK
+    ? walkPlan(steps, (g) => runCheck(ROOT, g), {
+        blocking: new Set(['stale', 'missing', 'skipped']),
+        // Nothing to check yet: the artifact a later step reads was never built here.
+        preset: (g) => {
+          const r = byId.get(g.id).reason;
+          return r.kind === 'prerequisite' ? { status: 'missing', detail: `--rebuild runs ${g.id} first` } : null;
+        },
+      })
+    : walkPlan(steps, (g) => runRebuild(ROOT, g), { blocking: new Set(['failed', 'skipped']) });
+  for (const step of steps) {
+    const g = step.generator;
+    const { status, detail } = outcome.get(g.id);
+    if (TROUBLE.has(status)) exitCode = 1;
+    for (const artifact of g.artifacts) {
+      console.log(`${artifact}\t${g.id}\t${why(step)}\t${LABELS[status] || status}${detail ? ` — ${detail}` : ''}`);
+    }
+  }
+} else {
+  for (const { file, generators: matched } of results) {
+    for (const g of matched) {
+      for (const artifact of g.artifacts) {
+        console.log(`${artifact}\t${g.run ? g.run.join(' ') : g.id}\t${file}`);
+      }
+    }
+  }
+  for (const step of steps) {
+    if (step.reason.kind === 'changed') continue;
+    const g = step.generator;
+    for (const artifact of g.artifacts) console.log(`${artifact}\t${g.run ? g.run.join(' ') : g.id}\t${why(step)}`);
+  }
+}
+
+if (unmatched.length) {
+  console.error(dim('changed files that feed no known generator:'));
+  for (const file of unmatched) console.error(dim(`  ${file}`));
+}
+
+process.exit(exitCode);

@@ -1,0 +1,226 @@
+#!/usr/bin/env node
+/**
+ * `b7e-asof` — when was this artefact produced, and what that governs it changed after.
+ *
+ *     b7e-asof 'webseries/library/characters/**\/*.png' \
+ *         --against 'webseries/library/characters/*\/identity.txt' \
+ *         --against webseries/library/cutout_style.py
+ *     b7e-asof graphic-novel/artist-vision.json          CHANGE_LOG entries after it
+ *     b7e-asof teaser.png --vault listing.txt             add a saved rclone lsl reading
+ *     b7e-asof '<glob>' --against '<glob>' --check        exit 1 if anything predates
+ *     b7e-asof '<glob>' --json
+ *     b7e-asof --dir <root> <path>                        another tree — how it is tested
+ *
+ * `bc-xl7n.153` (from loremia's `lm-2uu.23`): three sessions each hand-dated a generated
+ * file against the document that governs it — an mtime histogram plus `git log`, a
+ * `CHANGE_LOG.md` grep-then-`sed`, an `rclone lsf` line — and one of them wrote a memory
+ * note named for the command it wished existed. See `lib/asof.js` for which date counts
+ * as produced-at (the earliest observation, or a sidecar's own claim) and why an entry
+ * dated the same day is reported rather than dropped.
+ *
+ * Quote globs so the shell leaves `**` alone; they are expanded against the root, not
+ * the caller's cwd. With no `--against`, only the production moments and the
+ * `CHANGE_LOG.md` entries after them are reported. A root with no `CHANGE_LOG.md` still
+ * runs and says no entry ledger was found.
+ *
+ * The root is `--dir`, else the checkout `-w` names, else the git toplevel the caller's
+ * cwd is inside — never this file's own location, which `lib/foundation.js` always puts
+ * in the main checkout's `bin/`.
+ *
+ * Exit codes: `0` ran, whatever it found. `1` with `--check`, at least one artefact
+ * predates something. `2` bad usage. `3` a path or glob matched nothing, or a named
+ * `--changelog`/`--vault` file does not exist. `4` `-w` named a workspace this Mac has
+ * no config for, or there is no root to read (not in a git checkout and no `--dir`).
+ *
+ * @grant read
+ */
+import fs from 'node:fs';
+import path from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { asofReport, localDay } from '../lib/asof.js';
+
+const USAGE = `usage: b7e-asof <path|glob>... [--against <path|glob>]... [--changelog <file> | --no-changelog]
+                [--vault <listing>] [-w <workspace> | --dir <root>] [--check] [--json]
+
+When each artefact was produced — from git, its mtime, a JSON sidecar, and a saved vault
+listing, printing every reading when they disagree — and which governing files
+committed after it, and which CHANGE_LOG.md entries landed after it.
+
+  --against <path|glob>   a governing file; repeatable. Counted by its last commit.
+  --changelog <file>      the entry ledger (default: CHANGE_LOG.md at the root, if any)
+  --no-changelog          ignore the entry ledger
+  --vault <listing>       a saved \`rclone lsl\` listing to read as a fourth source
+  -w, --workspace <name>  read the checkout this workspace names
+  --dir <root>            read this directory
+  --check                 exit 1 when any artefact predates something
+  --json                  the machine-readable form`;
+
+const argv = process.argv.slice(2);
+if (argv.includes('--help') || argv.includes('-h')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+
+function fail(msg, code = 2) {
+  console.error(`b7e-asof: ${msg}`);
+  process.exit(code);
+}
+
+const artefacts = [];
+const against = [];
+let changelog;
+let vaultFile = null;
+let wsName = null;
+let dirGiven = null;
+let check = false;
+let jsonMode = false;
+let literal = false;
+
+for (let i = 0; i < argv.length; i += 1) {
+  const a = argv[i];
+  if (literal) {
+    artefacts.push(a);
+    continue;
+  }
+  const next = () => {
+    const v = argv[i + 1];
+    if (v === undefined) fail(`${a} needs a value`);
+    i += 1;
+    return v;
+  };
+  const eq = a.startsWith('--') ? a.indexOf('=') : -1;
+  const flag = eq > 0 ? a.slice(0, eq) : a;
+  const val = () => (eq > 0 ? a.slice(eq + 1) : next());
+  switch (flag) {
+    case '--':
+      literal = true;
+      break;
+    case '--against':
+      against.push(val());
+      break;
+    case '--changelog':
+      changelog = val();
+      break;
+    case '--no-changelog':
+      changelog = false;
+      break;
+    case '--vault':
+      vaultFile = val();
+      break;
+    case '-w':
+    case '--workspace':
+      wsName = val();
+      break;
+    case '--dir':
+      dirGiven = val();
+      break;
+    case '--check':
+      check = true;
+      break;
+    case '--json':
+      jsonMode = true;
+      break;
+    default:
+      if (a.startsWith('-')) fail(`unknown flag ${a}\n${USAGE}`);
+      artefacts.push(a);
+  }
+}
+
+if (!artefacts.length) fail(`name at least one artefact\n${USAGE}`);
+if (dirGiven && wsName) fail('--dir and -w are two ways of naming the root; give one');
+
+let ROOT;
+if (dirGiven) {
+  ROOT = path.resolve(dirGiven);
+} else if (wsName) {
+  const { loadConfig } = await import('../lib/config.js');
+  const { resolveSessionDir } = await import('../lib/session.js');
+  const cfg = loadConfig();
+  const ws = (cfg.workspaces || []).find((w) => w.name === wsName);
+  if (!ws) fail(`no workspace called ${wsName} — ${(cfg.workspaces || []).map((w) => w.name).join(', ')}`, 4);
+  ROOT = resolveSessionDir(cfg, ws);
+} else {
+  try {
+    ROOT = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  } catch {
+    fail('not inside a git checkout — name the root with --dir or -w', 4);
+  }
+}
+if (!ROOT || !fs.existsSync(ROOT)) fail(`no such root: ${ROOT}`, 4);
+
+let vault = null;
+if (vaultFile) {
+  const abs = path.resolve(vaultFile);
+  if (!fs.existsSync(abs)) fail(`no vault listing at ${abs}`, 3);
+  vault = fs.readFileSync(abs, 'utf8');
+}
+
+let report;
+try {
+  report = await asofReport(ROOT, { artefacts, against, changelog, vault });
+} catch (err) {
+  fail(err.message, 3);
+}
+
+const predating = report.artefacts.filter((r) => r.verdict === 'predates').length;
+
+if (jsonMode) {
+  console.log(JSON.stringify(report, null, 2));
+} else {
+  const LIST_MAX = 5;
+  const short = (iso) => iso.replace(/\.\d{3}Z$/, 'Z');
+  const wrap = (line, width = 100) => {
+    const lead = ' '.repeat(line.length - line.trimStart().length);
+    const out = [];
+    let cur = lead;
+    for (const word of line.trimStart().split(' ')) {
+      if (cur.trim() && cur.length + word.length + 1 > width) {
+        out.push(cur);
+        cur = `${lead}  ${word}`;
+      } else cur = cur.trim() ? `${cur} ${word}` : `${cur}${word}`;
+    }
+    return [...out, cur].join('\n');
+  };
+  console.log(`b7e-asof — ${report.root}`);
+  console.log(
+    report.changelog
+      ? `entry ledger: ${report.changelog.file} (${report.changelog.entries} dated entries)`
+      : changelog === false
+        ? 'entry ledger: skipped (--no-changelog)'
+        : 'entry ledger: none found — no CHANGE_LOG.md at the root (name one with --changelog)'
+  );
+  if (against.length) console.log(`against: ${report.against.length} file(s)`);
+  for (const r of report.artefacts) {
+    console.log('');
+    console.log(`${r.path}`);
+    console.log(`  produced ${r.producedAt ? short(r.producedAt) : '(no reading)'}${r.source ? ` — ${r.source}` : ''}  → ${r.verdict.toUpperCase()}`);
+    if (r.disagree) {
+      console.log('  sources disagree:');
+      for (const x of r.readings) console.log(`    ${x.source.padEnd(7)} ${short(x.date)}  ${x.detail}`);
+    }
+    for (const g of r.newer) {
+      console.log(`  newer: ${g.path}  ${g.sha ? g.sha.slice(0, 8) : '(untracked, mtime)'}  ${localDay(g.date)}${g.subject ? `  ${g.subject}` : ''}`);
+    }
+    if (r.laterEntries.length) {
+      const asc = [...r.laterEntries].sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0));
+      console.log(`  later entries: ${asc.length}`);
+      for (const e of asc.slice(0, LIST_MAX)) console.log(`    Entry ${e.entry} — ${e.day}${e.summary ? `  ${e.summary}` : ''}`);
+      // Every number, even past the detailed few: the entry that matters (a relock, a
+      // style change) is rarely the earliest one, and a "… and 123 more" hides it.
+      if (asc.length > LIST_MAX) console.log(wrap(`    and ${asc.slice(LIST_MAX).map((e) => e.entry).join(', ')} (--json for detail)`));
+    }
+    if (r.sameDayEntries.length) {
+      console.log(wrap(`  same day ${r.sameDayEntries[0].day}, cannot order: Entry ${r.sameDayEntries.map((e) => e.entry).join(', ')}`));
+    }
+  }
+  const sameDay = report.artefacts.filter((r) => r.verdict === 'same-day').length;
+  const current = report.artefacts.filter((r) => r.verdict === 'current').length;
+  console.log('');
+  console.log(`${report.artefacts.length} artefact(s): ${predating} predate something, ${sameDay} same-day only, ${current} current`);
+}
+
+if (report.unmatched.length) {
+  console.error(`b7e-asof: matched nothing: ${report.unmatched.join(', ')}`);
+  process.exit(3);
+}
+process.exit(check && predating ? 1 : 0);

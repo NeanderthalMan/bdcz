@@ -1,0 +1,459 @@
+#!/usr/bin/env node
+/**
+ * Every URL a phone still has on its home screen, and what it serves.
+ *
+ *     npm test
+ *     node test/pagepaths.mjs
+ *
+ * Pages get renamed and merged; the shortcuts people already made do not. So each
+ * view answers to several paths — `/monitor`, `/advocates`, `/sessions`, `/work`,
+ * `/work.html`, `/prs`, `/pulls` and `/prs.html` are by now all one page — and the whole
+ * point of keeping the extra ones is that a bookmark never 404s. There was nothing
+ * checking that, and the aliases live in a run of one-line `if`s in `serveStatic` which
+ * is exactly the shape a merge conflict eats.
+ *
+ * The case that made this worth a test: when the sessions view was merged into the
+ * advocate console, `public/work.html` was deleted. `/work` and `/sessions` were already
+ * aliases and were simply repointed; `/work.html` never *had* been one — it resolved as
+ * a file on disk — so deleting the file broke it, and it is the one of the three a
+ * service worker had been precaching by name. Nothing in the app would have said so.
+ * It has happened once more since, the same way: the pull request board became a pane on
+ * that same page (bc-d4d5) and `public/prs.html` went with it, which makes `/prs.html`
+ * the second path in this file whose file on disk is gone.
+ *
+ * Static serving only, so no `bd`, no advocates and no poller: `createApp` is handed a
+ * config with all of that off.
+ */
+import fs from 'node:fs';
+import http from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { boundPort } from './helpers/net.mjs';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const LIB = (f) => path.join(HERE, '..', 'lib', f);
+
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'beadcause-pagepaths-'));
+process.env.BEADCAUSE_CONFIG_DIR = path.join(tmp, 'config');
+fs.mkdirSync(process.env.BEADCAUSE_CONFIG_DIR, { recursive: true });
+
+let failures = 0;
+let ran = 0;
+const ok = (name) => {
+  ran += 1;
+  console.log(`  \x1b[32m✓\x1b[0m ${name}`);
+};
+const bad = (name, detail) => {
+  ran += 1;
+  failures += 1;
+  console.log(`  \x1b[31m✗\x1b[0m ${name}`);
+  if (detail) console.log(`      ${detail}`);
+};
+
+/* ----------------------------------------------------------------- the app */
+
+const ws = path.join(tmp, 'ws');
+fs.mkdirSync(path.join(ws, '.beads'), { recursive: true });
+
+const cfg = {
+  port: 0,
+  host: '127.0.0.1',
+  baseUrl: 'http://127.0.0.1',
+  token: 'pagepaths-token',
+  actor: 'beadcause-test',
+  workspaces: [{ name: 'demo', dir: ws }],
+  openSessions: false,
+  autoDispatch: false,
+  claudeSessions: false,
+  pollSeconds: 3600,
+  terminal: false,
+  ntfy: { enabled: false },
+  advocates: { enabled: false, workspaces: [] },
+};
+
+const { createApp, listen } = await import(LIB('server.js'));
+
+const app = createApp(cfg);
+const servers = listen(cfg, app.handler);
+const port = await boundPort(servers);
+
+const get = (pathname) =>
+  new Promise((resolve, reject) => {
+    const req = http.request(
+      { host: '127.0.0.1', port, path: pathname, method: 'GET', headers: { 'x-beadcause-token': cfg.token } },
+      (res) => {
+        let out = '';
+        res.setEncoding('utf8');
+        res.on('data', (c) => (out += c));
+        // `location` because two of these paths are a redirect rather than a document,
+        // and `http.request` does not follow one — which is what makes it the right
+        // client here: the hop itself is the thing under test.
+        res.on('end', () => resolve({ status: res.statusCode, body: out, location: res.headers.location }));
+      }
+    );
+    req.on('error', reject);
+    req.end();
+  });
+
+/* -------------------------------------------------------------------- cases */
+
+/**
+ * One page, every path that must reach it, and a string only that page contains.
+ *
+ * The marker is an id or a script src rather than a title, because a title is the
+ * sort of thing a redesign changes on purpose and the point here is only "which
+ * document came back".
+ */
+const PAGES = [
+  {
+    what: 'the inbox',
+    marker: '/app.js',
+    paths: ['/', '/index.html'],
+  },
+  // One live session's facts and its transcript — the page every session row in the app
+  // links to, and the reason the console could absorb the sessions view at all.
+  { what: 'one session', marker: '/session.js', paths: ['/session', '/session.html'] },
+  // And the same detail for one that has finished, addressed by bead instead of by pid.
+  // `/archive` is the second path because it is the word the repo uses for this everywhere
+  // else — `refs/beadcause/sessions/…` is "the archive" in the README and in the API — and
+  // it is therefore the path somebody types.
+  {
+    what: 'one finished session',
+    marker: '/beadsession.js',
+    paths: ['/bead-session', '/archive', '/beadsession.html'],
+  },
+  // The endorsement queue. Three, because the screen has two honest names — the place
+  // you *endorse* and the *queue* of what is waiting — and which one comes to mind
+  // depends on whether you arrived from the inbox's 🗳️ or went looking for it.
+  {
+    what: 'the endorsement queue',
+    marker: '/endorse.js',
+    paths: ['/endorse', '/queue', '/endorsements', '/endorse.html'],
+  },
+  // The skill library and whether anything uses it (bc-dgx7.5). Two paths, because the
+  // page is reached both by what it holds and by what the programme calls the things
+  // waiting to become one. No pill claims either, which is the recorded decision in
+  // public/viewbar.js for a page you read when you are arguing about the system.
+  { what: 'the skills view', marker: '/skills.js', paths: ['/skills', '/candidates', '/skills.html'] },
+  // The foundations register — the standing document behind the app's own design
+  // decisions. It carries no pill and loads no /viewbar.js at all, unlike the two
+  // entries below it: the `‹` anchor at the top of the page (id="back") is its only way
+  // back to the inbox, and it is deliberately the one place left in public/ that still
+  // has one — deleting it strands the page.
+  { what: 'the foundations page', marker: '/foundations.js', paths: ['/foundations', '/foundations.html'] },
+  // The map (bc-34i0). Not a pill on the row — a page you read when you are new to the
+  // system or arguing about it, not one you check. It draws the row anyway, with
+  // nothing on it current, because it is one of the eight pages the deleted bottom bar
+  // used to be the only way off (bc-khoe.1). `/map` as well as `/flow` because both
+  // are what somebody types.
+  { what: 'the map page', marker: '/flow.js', paths: ['/flow', '/map', '/flow.html'] },
+  // The requirement graph and its coverage (bc-fvmx.8). Two paths, because the page is
+  // reached both by what it holds — requirements — and by what a reader actually goes
+  // there to check, which is how much of the corpus is covered. No pill claims it
+  // either, for the same reason /skills has none — it draws the row anyway, with
+  // nothing on it current.
+  {
+    what: 'the requirements page',
+    marker: '/requirements.js',
+    paths: ['/requirements', '/coverage', '/requirements.html'],
+  },
+  { what: 'the chat session', marker: '/console.js', paths: ['/console', '/console.html'] },
+  { what: 'the in-app terminal', marker: '/term.js', paths: ['/terminal', '/term.html'] },
+  { what: 'the admin screen', marker: '/admin.js', paths: ['/admin', '/admin.html'] },
+  // The notification-sound audition (bc-ka5y.15.3). `/audition` as well as `/sounds`
+  // because that is the word the bead and the README use for what happens on it, and a
+  // channel's sound is immutable once cut — a 404 on the way to the last screen where a
+  // sound can still be argued with is an expensive 404.
+  { what: 'the sound audition', marker: '/sounds.js', paths: ['/sounds', '/audition', '/sounds.html'] },
+  { what: 'the graph', marker: '/graph.js', paths: ['/graph', '/graph.html'] },
+  // The docket — an epic's whole arc, in the order it happened (bc-it26z). Three paths,
+  // and each is one somebody actually arrives by: `/docket` is what every card links to,
+  // `/epic` is the other name Adam gave it ("epic map") and therefore the one that gets
+  // typed, and `/dockets` is the plural a reader reaches for when they want the index of
+  // them rather than one. All three are the same document, because "which epic" is a
+  // query-string question and the index is simply the answer with no `id` in it.
+  { what: 'the docket', marker: '/docket.js', paths: ['/docket', '/dockets', '/epic', '/docket.html'] },
+  { what: 'the reader', marker: '/doc.js', paths: ['/doc', '/doc.html'] },
+  // The sign-in screen. Its alias lives in the same run of one-line `if`s as all of
+  // the above — and this is the one page a browser is *sent* to rather than typing, so
+  // a 404 here is a redirect loop with nothing on screen. Reachable with sign-in off
+  // too, which is the configuration this test runs in: it is also where the pairing
+  // token is explained.
+  { what: 'the sign-in screen', marker: '/login.js', paths: ['/login', '/login.html'] },
+];
+
+/**
+ * The paths that are a **hop** rather than a document, and where each one has to land.
+ *
+ * Two kinds now, and they arrived by opposite routes.
+ *
+ * **An address that names a view** — `/history`, `/history.html` — was a row in `PAGES`
+ * until bc-khoe.30.7 and is a hop because the thing it names stopped being a document.
+ * The ledger is a pane of the shell, a pane is chosen by the hash, and a hash is never
+ * sent to a server: serving `index.html` at `/history` would open the app on Home
+ * whatever was tapped, at 200, with the address bar still saying `/history`. The
+ * `location` is the only place that failure is visible, which is what makes these rows
+ * worth more than the pages they replaced.
+ *
+ * **A door onto a view** — `/closed` and `/done`, the ledger narrowed to what finished
+ * (bc-nib3.7) — was never a page at all, for a different reason that reads the same: an
+ * alias rewrites the path and leaves the query exactly as the browser sent it, so
+ * `/closed` serving the ledger would be the whole unfiltered ledger under a name that
+ * promised otherwise. That failure is invisible from the outside — a plausible list of
+ * the wrong beads — which is why the `location` is asserted in full here rather than the
+ * page it eventually reaches.
+ *
+ * And the rows that carry a query string are the two halves of what a hop does with one.
+ * Everything the *view* reads crosses the `#`, because the ledger's filters live in the
+ * hash's own query now and a filter left in `location.search` outlives the view that
+ * wrote it. `?t=` does not cross it: it is a pairing token an ntfy action or a
+ * home-screen shortcut can arrive with, a fragment never reaches a server, and dropping
+ * it turns the second navigation into a login screen. `status` alone is overruled,
+ * because `/closed?status=open` is a contradiction and the name of the door is the half
+ * that is not a typo.
+ */
+const REDIRECTS = [
+  // The ledger's own two addresses. They were rows in `PAGES` until bc-khoe.30.7 — a
+  // phone's home screen holds them and the service worker precached them by name — and
+  // they are a hop now because the ledger is a *pane* of the shell rather than a
+  // document. A hash cannot be read server-side, so serving `index.html` here would open
+  // the app with an empty hash: Home, whatever was tapped.
+  { path: '/history', to: '/#history', what: 'the ledger, which is a pane of the shell now' },
+  { path: '/history.html', to: '/#history', what: 'the same, under the name the worker used' },
+  // And with a filter on the way in, which is the case that says where the query string
+  // went. The ledger's four filters live in the hash's own query now (decision 5 in
+  // public/hashroute.js), because in one document a `location.search` outlives the view
+  // that wrote it — so a filter arriving in the search string has to cross the `#`.
+  { path: '/history?status=closed', to: '/#history?status=closed', what: 'a filter, moved behind the hash' },
+  // `?t=` is the half that must *not* cross it: a fragment is never sent to a server, so
+  // a pairing token swept into the hash is a token this daemon can never read, and the
+  // navigation after the hop is a login screen.
+  { path: '/history?t=pair-me', to: '/?t=pair-me#history', what: 'the pairing token, left where a server can read it' },
+  { path: '/closed', to: '/#history?status=closed', what: 'the ledger, narrowed to what finished' },
+  { path: '/done', to: '/#history?status=closed', what: 'the same, under the other word for it' },
+  { path: '/closed?priority=P0', to: '/#history?priority=P0&status=closed', what: 'a second filter, kept' },
+  { path: '/closed?t=pair-me', to: '/?t=pair-me#history?status=closed', what: 'the token in front, the filters behind' },
+  { path: '/closed?status=open', to: '/#history?status=closed', what: 'a contradicted status, overruled' },
+  // The advocate console's six (bc-khoe.4). They were a row in `PAGES` — the largest one
+  // in this file — until the Advocates container stopped being `data-pending`. Every one
+  // of them is on a phone's home screen, in the Android shell's history or in a
+  // notification this app has already sent, which is why they are asserted one at a time
+  // rather than as a set.
+  { path: '/monitor', to: '/#advocates', what: 'the console, which is a pane of the shell now' },
+  { path: '/advocates', to: '/#advocates', what: 'the same, under the name you guess' },
+  { path: '/monitor.html', to: '/#advocates', what: 'the same, under the name the worker used' },
+  { path: '/sessions', to: '/#advocates', what: 'the sessions view, which the console absorbed' },
+  { path: '/work', to: '/#advocates', what: 'the same, under the word on the home screen' },
+  { path: '/work.html', to: '/#advocates', what: 'the same, with no file left behind it' },
+  // The board's three, which are the only hops in the app that name a **chip** as well as
+  // a view. `/prs` meant the board and not merely the page it was a pane of, and
+  // public/montabs.js read that off `location.pathname`; after a hop there is no pathname
+  // left, so the fact crosses the `#` as `tab=prs` (bc-khoe.4). A `/prs` that landed on a
+  // bare `/#advocates` would open the console on whichever chip was last used — plausible,
+  // wrong, and invisible from the outside, which is why the `tab=` is asserted here.
+  { path: '/prs', to: '/#advocates?tab=prs', what: 'the board, which is a chip of that view' },
+  { path: '/pulls', to: '/#advocates?tab=prs', what: "the same, under GitHub's word for the tab" },
+  { path: '/prs.html', to: '/#advocates?tab=prs', what: 'the same, with no file left behind it' },
+  { path: '/prs?t=pair-me', to: '/?t=pair-me#advocates?tab=prs', what: 'the token in front, the chip behind' },
+  // Releases (bc-khoe.30.14), a pane since v96 and a hop since this one.
+  { path: '/releases', to: '/#releases', what: 'the releases view, which is a pane of the shell now' },
+  { path: '/deploys', to: '/#releases', what: 'the same, under the word somebody types' },
+  { path: '/releases.html', to: '/#releases', what: 'the same, under the name the worker used' },
+  // The selected space's own settings (bc-khoe.10), a pane since bc-khoe.60. Three paths
+  // for the same reason the queue has three: the screen has two honest names — it is the
+  // *config* of a space, which is the word the chip it used to be was labelled with, and
+  // it is where its *settings* are, which is what somebody types — and `.html` is the
+  // name the service worker precached it under. Not `/space`: that reads as the picker
+  // rather than as the thing the picker selects.
+  { path: '/config', to: '/#config', what: 'the space’s settings, which is a pane of the shell now' },
+  { path: '/settings', to: '/#config', what: 'the same, under the word somebody types' },
+  { path: '/config.html', to: '/#config', what: 'the same, under the name the worker used' },
+];
+
+/* The sessions view's own files. Deleted with it, and named here so a stray copy
+   coming back is a failing test rather than a page nobody maintains. */
+const GONE = ['/work.js'];
+
+/**
+ * Paths that were never made, and the decision that says they never will be.
+ *
+ * The Mirror is a *pane* on the advocates page, not a fifth bottom tab (bc-3xb — the
+ * reasons are in the README under "The Mirror is a pane, not a tab"). The other way was
+ * a `/mirror` route and a `mirror.html`, and the cheapest way for this decision to come
+ * undone is for one of those to appear in the run of one-line `if`s above — a merge, a
+ * half-remembered plan, a session that never read the bead. That would be silent: a new
+ * page nobody objected to.
+ *
+ * `test/mirrorpane.mjs` asserts the same two absences by reading the sources, and this is
+ * the other side of that pair rather than a second copy of it. A static read has to know
+ * the shape the route would take — it greps `lib/server.js` for `urlPath === '/mirror'` —
+ * so a redirect, a prefix match, or a `mirror.html` dropped into `public/` and served by
+ * the static handler would all pass it. This asks a running server instead, which is the
+ * claim the decision makes: not that the code avoids a string, but that there is nothing
+ * at either path.
+ */
+const NEVER_MADE = [
+  { path: '/mirror', why: 'the mirror is a pane on /monitor, not a page (bc-3xb)' },
+  { path: '/mirror.html', why: 'and there is no document behind it to serve' },
+  // The root of the repo-view family (bc-cft6f). `/v/<workspace>/<id>` is a real address
+  // — it hops to `#<workspace>.<id>` exactly as `/history` hops — but the bare prefix
+  // names no view and never will: there is no such thing as "all repo views", and a page
+  // listing them would be a second, worse Config screen. It 404s, and it is here so that
+  // the registry gate in bin/b7e-owes.js can see the family is accounted for.
+  //
+  // The addresses under it are asserted in test/repoviews.mjs rather than here, because
+  // they only exist for a workspace whose checkout declares a manifest — that suite builds
+  // one in a temporary directory and drives the real server against it, which is not
+  // something this file's fixture has or should grow.
+  { path: '/v', why: 'the repo-view prefix names no view; /v/<workspace>/<id> does (bc-cft6f)' },
+];
+
+console.log('\npage paths\n');
+
+for (const page of PAGES) {
+  for (const p of page.paths) {
+    const res = await get(p);
+    if (res.status !== 200) bad(`${p} serves ${page.what}`, `HTTP ${res.status}`);
+    else if (!res.body.includes(page.marker)) bad(`${p} serves ${page.what}`, `no ${page.marker} in the body`);
+    else ok(`${p} serves ${page.what}`);
+  }
+}
+
+for (const { path: p, to, what } of REDIRECTS) {
+  const res = await get(p);
+  if (res.status !== 302) bad(`${p} sends you to ${what}`, `HTTP ${res.status}, not a redirect`);
+  else if (res.location !== to) bad(`${p} sends you to ${what}`, `landed on ${res.location}, not ${to}`);
+  else ok(`${p} → ${to} — ${what}`);
+}
+
+/* And that the far end of every one of those hops is a real page and not a 404 under a
+   good-looking `location` — the one thing asserting the header alone cannot tell you.
+   It is the shell for all of them now: `/` answering 200 proves the document is there, and
+   each pane's own script being on it proves the document that answered can draw the pane
+   the hash names. A shell that had dropped a tag would pass every row above and open on an
+   empty pane.
+
+   One marker per pane rather than one for the file, because they fail independently and
+   for different reasons — `/prs.js` is the one that used to be checked by a second
+   `PAGES` row of its own, on the argument that `/monitor.js` proves the paths reach the
+   console and only `/prs.js` proves what they reach can draw a board. That row is gone
+   now that those paths are hops; the claim it made is this line. */
+{
+  const PANES = [
+    ['/history.js', 'the ledger'],
+    ['/monitor.js', 'the console'],
+    ['/prs.js', 'the board it draws'],
+    ['/releases.js', 'the releases view'],
+  ];
+  const res = await get('/');
+  if (res.status !== 200) bad('and the far end of every hop is the shell', `HTTP ${res.status}`);
+  else {
+    const missing = PANES.filter(([m]) => !res.body.includes(m));
+    if (missing.length) bad('and the far end of every hop is the shell', `no ${missing.map(([m]) => m).join(', ')} on it`);
+    else ok(`and the far end of every hop is the shell, with ${PANES.map(([, w]) => w).join(', ')} on it`);
+  }
+}
+
+for (const p of GONE) {
+  const res = await get(p);
+  if (res.status === 404) ok(`${p} is gone, and says so`);
+  else bad(`${p} is gone, and says so`, `HTTP ${res.status}`);
+}
+
+for (const { path: p, why } of NEVER_MADE) {
+  const res = await get(p);
+  if (res.status === 404) ok(`${p} 404s — ${why}`);
+  else bad(`${p} 404s — ${why}`, `HTTP ${res.status}: something is serving a page this decision says does not exist`);
+}
+
+/*
+  And the other half of the same worry: a path that serves the right page but that the
+  pill row does not recognise (bc-khoe.1).
+
+  Every table above proves a shortcut still *opens* something. None of them proves the
+  navigation knows where you have landed — and the row marks the current view by asking
+  `viewOfPath` what view `location.pathname` names, so a phone opening the `/work`
+  shortcut it has had on its home screen for months would get the advocate console with
+  **nothing on the row current**. That reads as the page having lost its way in, on the
+  exact devices the aliases exist for.
+
+  The table those paths live in moved to public/hashroute.js with bc-khoe.30.2 — which
+  view an address names is the same question as which view a hash names, and the point of
+  that file is that it is asked in one place. So this reads `VIEWS` rather than `PILLS`,
+  and the word "pill" below is a view's pill: the ids are deliberately the same.
+
+  So: for every page a pill points at, every alias of that page is claimed by exactly one
+  pill. Exactly one, because two pills claiming a path is two current pills on one screen —
+  and the pair this is really about is Advocates and PRs, which share a document and split
+  its nine paths between them. `.html` twins are excluded: `/prs.html` is genuinely on
+  people's home screens and is claimed, but `/endorse.html` belongs to a page that has no
+  pill at all, and the rule is about pages that have one.
+*/
+{
+  const src = fs.readFileSync(path.join(HERE, '..', 'public', 'hashroute.js'), 'utf8');
+  const pills = [...src.matchAll(/id: '([a-z]+)',[\s\S]{0,400}?paths: \[([^\]]*)\]/g)].map((m) => ({
+    id: m[1],
+    paths: [...m[2].matchAll(/'([^']+)'/g)].map((q) => q[1]),
+  }));
+  if (!pills.length) bad('the pill row keeps its paths in one table', 'could not read VIEWS out of public/hashroute.js');
+  else {
+    const owner = new Map();
+    let clash = null;
+    for (const pill of pills) {
+      for (const one of pill.paths) {
+        if (owner.has(one)) clash = `${one} is claimed by both ${owner.get(one)} and ${pill.id}`;
+        owner.set(one, pill.id);
+      }
+    }
+    if (clash) bad('no path is claimed by two pills', clash);
+    else ok(`the row's ${owner.size} paths are claimed by ${pills.length} pills, one each`);
+
+    /* And the same claim for a path that is a *hop to a view* rather than a page
+       (bc-khoe.30.7). The rule below walks `PAGES`, so an address stops being covered by
+       it the moment it stops serving a document — which is exactly when it starts being
+       able to land on the wrong pane. Two cases, and the difference is whether the
+       address is one of the view's own.
+
+       An address the row claims must land on the view that claims it: `/history` hopping
+       to `#advocates` would show one pane and light another pill, and each half of that
+       is readable only from one of these two sources — the `location` off a running
+       server, and `VIEWS` off the file the row is drawn from.
+
+       A *door* — `/closed`, `/done` — is claimed by no pill on purpose: it is a question
+       asked of a view rather than one of that view's addresses, and the pill it lights is
+       the view's own. What it still owes is landing on a view that exists at all, because
+       `#nowhere` is Home with the filter silently dropped. */
+    const hops = new Map();
+    for (const { path: one, to } of REDIRECTS) {
+      const named = /^\/(?:\?[^#]*)?#([a-z]+)/.exec(to);
+      if (named) hops.set(one.split('?')[0], named[1]);
+    }
+    for (const [one, view] of hops) {
+      const claimed = owner.get(one);
+      if (claimed && claimed !== view) bad(`${one} hops to the view its own pill claims`, `it lands on #${view}, which is ${claimed}'s`);
+      else if (claimed) ok(`${one} hops to #${view}, the view whose pill claims it`);
+      else if (pills.some((pill) => pill.id === view)) ok(`${one} is a door onto #${view}, which is a view`);
+      else bad(`${one} is a door onto a view that exists`, `it lands on #${view}, which is on no pill and in no VIEWS row`);
+    }
+
+    for (const page of PAGES) {
+      // The page a pill lives on is the one whose alias list holds that pill's own paths.
+      if (!page.paths.some((one) => owner.has(one))) continue;
+      const orphans = page.paths.filter((one) => !owner.has(one));
+      if (!orphans.length) ok(`every path of ${page.what} is on the row`);
+      else
+        bad(
+          `every path of ${page.what} is on the row`,
+          `${orphans.join(', ')} serve${orphans.length === 1 ? 's' : ''} it but no pill recognises ` +
+            `${orphans.length === 1 ? 'it' : 'them'} — arriving that way marks nothing as current`
+        );
+    }
+  }
+}
+
+for (const s of servers || []) s.close?.();
+app.stop?.();
+
+console.log(failures ? `\n\x1b[31m${failures} of ${ran} failed\x1b[0m\n` : `\n\x1b[32mall ${ran} checks passed\x1b[0m\n`);
+process.exit(failures ? 1 : 0);

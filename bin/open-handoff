@@ -1,0 +1,253 @@
+#!/usr/bin/env bash
+# open-handoff — open a beads handoff in a brand-new Claude Code session.
+#
+#   bin/open-handoff <handoff-id> [-d <project-dir>] [-w <workspace>] [--tab]
+#                                 [--no-daemon] [--dry-run]
+#
+# Lived at ~/.claude/open-handoff.sh, outside any repo, until bc-nense brought it here —
+# its first path is this repo's /api/handoff and test/handoffdoor.mjs is its test. The
+# handoff skill still calls ~/.claude/open-handoff.sh, which is a symlink to this file.
+#
+# Two paths, in this order:
+#
+#   1. The **local beadcause daemon**, if one answers. POST /api/handoff, and the
+#      daemon opens the successor itself — so the window shows up in its session
+#      list, on the console, and under its "never two on one bead" guard.
+#   2. The **iTerm2 fallback**, which is what this script has always done: a new
+#      window (or tab with --tab), cd to <project-dir> so the shell resolves the
+#      right BEADS_DIR, and an interactive `claude --permission-mode
+#      auto` already primed to read, claim and continue the handoff. Falls back
+#      again to Terminal.app when iTerm2 isn't installed.
+#
+# <project-dir> is a *checkout*, never a worktree. A worktree passed to -d (or
+# inherited from $PWD) is resolved to the checkout it belongs to, and the redirect
+# is printed — see bc-tstol below.
+#
+# Every daemon refusal — no daemon, wrong workspace, OBSERVING, 409, 400 — falls
+# through to path 2 and says so on one line. A handoff that silently opens nothing
+# is the failure this whole thing exists to avoid.
+#
+# Exits non-zero with a message when the fallback itself cannot run, so the caller
+# can fall back to telling the user to paste the kickoff prompt themselves.
+
+set -euo pipefail
+
+ID=""; DIR="$PWD"; WS=""; WHERE="window"; DRY=0; USE_DAEMON=1
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -d|--dir)        DIR="${2:-}"; shift 2 ;;
+    -w|--workspace)  WS="${2:-}"; shift 2 ;;
+    --tab)           WHERE="tab"; shift ;;
+    --window)        WHERE="window"; shift ;;
+    --no-daemon)     USE_DAEMON=0; shift ;;
+    --dry-run)       DRY=1; shift ;;
+    -h|--help)       sed -n '2,27p' "$0"; exit 0 ;;
+    -*)              echo "open-handoff: unknown flag $1" >&2; exit 2 ;;
+    *)               ID="$1"; shift ;;
+  esac
+done
+
+[ -n "$ID" ]      || { echo "open-handoff: no handoff id given" >&2; exit 2; }
+[ -d "$DIR" ]     || { echo "open-handoff: no such directory: $DIR" >&2; exit 2; }
+DIR="$(cd "$DIR" && pwd)"
+
+# A worktree is never where a successor should come up. bc-tstol: a handoff written from
+# .claude/worktrees/<name> handed that path to -d — which is what the skill said to pass,
+# and what DIR="$PWD" defaults to — the fallback made it the `cd`, and the new session came
+# up inside a DIFFERENT, STILL-LIVE session's locked worktree. From the inside that looks
+# exactly like a session that has already claimed one, so it never called EnterWorktree;
+# the two of them then committed to the same branch out of one index.
+#
+# The daemon path has always been right about this (it resolves the directory itself, from
+# the workspace's checkout and the bead's `repo:` label), so this only brings the fallback
+# into line. A successor opened in the main checkout is where it must be: the one place the
+# worktree guard makes it claim a fresh worktree of its own.
+#
+# Detection is git's own — in a linked worktree --git-dir is .git/worktrees/<name> while
+# --git-common-dir is the repo's .git, and the main checkout is that dir's parent. The
+# workspace derived below does not move: a worktree and its checkout resolve to the same
+# beads graph, so the handoff still resolves to the graph it was filed in.
+GITDIR="$(git -C "$DIR" rev-parse --path-format=absolute --git-dir 2>/dev/null || true)"
+COMMON="$(git -C "$DIR" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+if [ -n "$COMMON" ] && [ -n "$GITDIR" ] && [ "$GITDIR" != "$COMMON" ]; then
+  MAIN="$(cd "$(dirname "$COMMON")" 2>/dev/null && pwd)" || MAIN=""
+  if [ -n "$MAIN" ] && [ "$MAIN" != "$DIR" ]; then
+    # Say it out loud. A cd somewhere other than what was asked for is its own trap.
+    echo "open-handoff: -d was a worktree ($DIR) — opening in $MAIN instead, so the successor claims a worktree of its own" >&2
+    DIR="$MAIN"
+  fi
+fi
+
+CFG="${BEADCAUSE_CONFIG_DIR:-$HOME/.config/beadcause}/config.json"
+DAEMON_BODY=""; DAEMON_CODE=""
+
+# Which beads workspace this handoff lives in: whatever graph `bd` resolves in <dir>,
+# named the way this daemon's config names it. That is what actually decided which graph
+# the handoff was written into, so it is asked rather than guessed from the path.
+#
+# Asked from a fresh shell started in <dir> with BEADS_DIR unset, because the caller's
+# BEADS_DIR belongs to wherever the caller is, not to <dir>. The fresh shell re-runs the
+# user's own startup file, so a per-directory BEADS_DIR rule there still decides; with no
+# such rule, `bd` walks up from <dir> to the nearest .beads. The graph it names is then
+# matched against `.workspaces[].dir` in the config. No match leaves WS empty: the daemon
+# path is skipped with the reason, and the fallback opens the window anyway. -w overrides.
+workspace_for() {
+  command -v jq >/dev/null && [ -r "$CFG" ] || return 0
+  local sh bd where want
+  sh="$(command -v zsh || command -v bash)"
+  bd="$(jq -r '.bdBin // "bd"' "$CFG" 2>/dev/null || echo bd)"
+  where="$(cd "$DIR" && env -u BEADS_DIR "$sh" -c "$(printf '%q' "$bd") where --json" 2>/dev/null || true)"
+  where="$(printf '%s' "$where" | jq -r '.path // empty' 2>/dev/null || true)"
+  [ -n "$where" ] || return 0
+  want="$(cd "$where" 2>/dev/null && pwd -P || echo "$where")"
+  jq -r '.workspaces[]? | "\(.name)\t\(.dir)"' "$CFG" 2>/dev/null | while IFS=$'\t' read -r name dir; do
+    [ -n "$dir" ] || continue
+    if [ "$dir" = "$where" ] || [ "$(cd "$dir" 2>/dev/null && pwd -P || true)" = "$want" ]; then
+      echo "$name"; break
+    fi
+  done
+}
+[ -n "$WS" ] || WS="$(workspace_for)"
+
+# ---------------------------------------------------------------- path 1: daemon
+#
+# Plain HTTP to 127.0.0.1 and never HTTPS: tls.enabled is true in the config, but
+# what answers on loopback is HTTP — an https:// probe returns nothing at all, and
+# a probe that always fails is a daemon path that never runs.
+#
+# /api/health is the one route in front of the token gate (lib/server.js), and its
+# payload names the workspaces this daemon serves. Checking that list here is what
+# turns "wrong Mac, or a workspace it doesn't know" into a clean fall-through
+# rather than a 400 out of requireWorkspace.
+#
+# Echoes the port on success and the reason on failure, so the caller has one line
+# to print either way.
+daemon_says() {
+  [ "$USE_DAEMON" = 1 ] || { echo "--no-daemon"; return 1; }
+  [ -n "$WS" ]              || { echo "no workspace in $CFG holds the graph bd resolves in $DIR — pass -w"; return 1; }
+  command -v curl >/dev/null || { echo "no curl"; return 1; }
+  command -v jq   >/dev/null || { echo "no jq"; return 1; }
+  [ -r "$CFG" ]              || { echo "no $CFG"; return 1; }
+
+  local port health
+  port="$(jq -r '.port // 4318' "$CFG" 2>/dev/null || echo 4318)"
+  [ -n "$(jq -r '.token // empty' "$CFG" 2>/dev/null || true)" ] || { echo "no token in $CFG"; return 1; }
+
+  health="$(curl -fsS -m 2 "http://127.0.0.1:${port}/api/health" 2>/dev/null || true)"
+  [ -n "$health" ] || { echo "no daemon on 127.0.0.1:${port}"; return 1; }
+
+  if ! printf '%s' "$health" | jq -e --arg w "$WS" '.workspaces | index($w)' >/dev/null 2>&1; then
+    echo "daemon on :${port} does not serve the '$WS' workspace"; return 1
+  fi
+  echo "$port"
+}
+
+post_handoff() {
+  local port="$1" body out code token
+  # Re-read rather than reuse `daemon_says`'s TOKEN: that function runs in a command
+  # substitution — it has to, its stdout is the port — so every variable it sets dies
+  # with the subshell, and an empty token here is a 401 that reads like a refusal.
+  token="$(jq -r '.token // empty' "$CFG" 2>/dev/null || true)"
+  body="$(jq -nc --arg w "$WS" --arg i "$ID" '{workspace:$w, id:$i}')"
+  # Body and status in one call: the refusals carry a sentence worth printing, and
+  # a 409 discarded in favour of "it didn't work" is a fall-back nobody can debug.
+  out="$(curl -sS -m 20 -o /dev/stdout -w '\n%{http_code}' \
+          -H 'Content-Type: application/json' \
+          -H "x-beadcause-token: ${token}" \
+          -d "$body" "http://127.0.0.1:${port}/api/handoff" 2>/dev/null || true)"
+  code="$(printf '%s' "$out" | tail -n1)"
+  DAEMON_BODY="$(printf '%s' "$out" | sed '$d')"
+  DAEMON_CODE="${code:-000}"
+  [ "$code" = "200" ]
+}
+
+# ------------------------------------------------------------- path 2: the iTerm
+#
+# The kickoff prompt lives here, byte-exact, and the daemon's `handoffPromptFor`
+# (lib/session.js in beadcause) says the same four things in markdown. They have to
+# agree: which path opened the successor must not change what the successor does.
+PROMPT="Read handoff ${ID}. Run: bd show ${ID} --json | jq -r '.[0].description'
+Then run: bd update ${ID} --claim
+Then continue from that handoff's \"Next action\". Do not re-derive context that
+the handoff already states; if something it claims is UNVERIFIED, verify it before
+relying on it."
+
+open_iterm() {
+  command -v claude >/dev/null || { echo "open-handoff: claude not on PATH" >&2; exit 3; }
+
+  # The command is written to a runner file rather than typed into AppleScript, so
+  # the prompt's quotes, backticks and $… survive verbatim — AppleScript string
+  # escaping is the one thing guaranteed to corrupt them.
+  RUNNER="${TMPDIR:-/tmp}/claude-open-handoff-$$-${ID//[^A-Za-z0-9_-]/_}.zsh"
+  {
+    printf 'rm -f %q\n' "$RUNNER"
+    printf 'cd %q || return\n' "$DIR"
+    printf 'claude -n %q --permission-mode auto %q\n' "handoff $ID" "$PROMPT"
+  } > "$RUNNER"
+
+  TYPED="source $(printf '%q' "$RUNNER")"
+
+  if [ "$DRY" = 1 ]; then
+    echo "--- would open a new $WHERE and run:"; cat "$RUNNER"; rm -f "$RUNNER"; return 0
+  fi
+
+  if [ -d /Applications/iTerm.app ]; then
+    if [ "$WHERE" = tab ]; then
+      osascript <<APPLESCRIPT >/dev/null
+tell application "iTerm2"
+  activate
+  if (count of windows) = 0 then
+    set t to (create window with default profile)
+    tell current session of t to write text "$TYPED"
+  else
+    tell current window
+      set t to (create tab with default profile)
+      tell current session of t to write text "$TYPED"
+    end tell
+  end if
+end tell
+APPLESCRIPT
+    else
+      osascript <<APPLESCRIPT >/dev/null
+tell application "iTerm2"
+  activate
+  set w to (create window with default profile)
+  tell current session of w to write text "$TYPED"
+end tell
+APPLESCRIPT
+    fi
+  else
+    osascript <<APPLESCRIPT >/dev/null
+tell application "Terminal"
+  activate
+  do script "$TYPED"
+end tell
+APPLESCRIPT
+  fi
+
+  echo "open-handoff: opened $ID in a new iTerm $WHERE (dir: $DIR, permission-mode auto)"
+}
+
+# ----------------------------------------------------------------------- do it
+
+if PORT="$(daemon_says)"; then
+  if [ "$DRY" = 1 ]; then
+    echo "--- would ask the local beadcause on 127.0.0.1:${PORT}:"
+    echo "    POST /api/handoff   {\"workspace\":\"$WS\",\"id\":\"$ID\"}"
+    echo "--- and would fall back to iTerm if it refused:"
+    open_iterm
+    exit 0
+  fi
+  if post_handoff "$PORT"; then
+    OPENED_IN="$(printf '%s' "$DAEMON_BODY" | jq -r '.dir // empty' 2>/dev/null || true)"
+    echo "open-handoff: beadcause opened $WS/$ID${OPENED_IN:+ in $OPENED_IN}"
+    exit 0
+  fi
+  WHY="$(printf '%s' "$DAEMON_BODY" | jq -r '.error // empty' 2>/dev/null || true)"
+  echo "open-handoff: beadcause refused (${DAEMON_CODE}${WHY:+ — $WHY}) — opening an iTerm window instead" >&2
+else
+  # daemon_says echoes the reason on the failure path.
+  echo "open-handoff: no local beadcause ($PORT) — opening an iTerm window instead" >&2
+fi
+
+open_iterm

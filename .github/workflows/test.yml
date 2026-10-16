@@ -1,0 +1,341 @@
+# `npm test`, run by GitHub, on the merge that is actually about to happen.
+#
+# This repo lands ~20 concurrent worktrees through pull requests, and until this file
+# existed nothing on GitHub's side ran the suite: `bin/deliver.js` ran it locally, on the
+# branch, against the `main` the branch was *cut from*. Two branches that each pass alone
+# can still break `main` together — the merge is a third thing neither of them tested.
+# That is bc-rcrt, and this workflow is the half of it GitHub can enforce.
+#
+# ## Why this is sharded (bc-xlz32.4)
+#
+# `npm test` (`scripts/test.mjs`) is strictly serial and stops at the first red suite. The
+# suite grew from 135 files to 455 in twelve days; a serial run went from comfortably under
+# `timeout-minutes: 20` to 14-15 minutes against it, with the headroom shrinking every
+# week — and once it runs out, every PR and every merge-group entry fails on a *timeout*
+# instead of on a test, and the merge queue stalls on a required check that never reports.
+#
+# So the suite is split across 4 parallel `shard` jobs (`bin/b7e-shard`, stride-sliced —
+# `suites[i]` goes to shard `i % 4`, not a contiguous block, so the handful of expensive
+# suites spread across shards instead of piling into whichever one's slice happens to cover
+# them) and each shard runs under `bin/b7e-gate`, which does not bail at the first red: a
+# failing shard names every failing suite in it, not just the first.
+#
+# ## Why this runs on a Mac in the house, not on `macos-latest` (bc-hkval)
+#
+# Every job on every `main` run from 2026-09-18T14:17 was refused before a runner was
+# allocated — *"The job was not started because recent account payments have failed or
+# your spending limit needs to be increased"* — so there were no logs to read, all five
+# checks failed identically and instantly, and the merge queue held ~24 pull requests on
+# a base that could not go green by any amount of work on any branch. A full local gate
+# against that same `main` passed all 560 suites. Nothing was wrong with the tree.
+#
+# Self-hosted runners consume no billed minutes, which is also why the bill got here:
+# `macos-latest` is billed at a **10x** multiplier on a private repository, and this repo
+# lands ~20 merges a day, each one five jobs. The runner lives under a dedicated
+# `ghrunner` account on the studio Mac — `.claude/setup-self-hosted-runners.sh` is what
+# installed it, and it is idempotent if it ever needs rebuilding.
+#
+# **One runner, not three, and the number came down on measurement.** `acquireLock` in
+# lib/gate.js is per root, so every worktree runs its own gate; on 2026-09-19 eight
+# concurrent `b7e-gate` runs exhausted memory and the harness killed a full gate before it
+# ran a single suite. A starved runner does not report starvation, it reports flaky
+# suites. One runner takes the four shards back to back — ~10-12 minutes a merge — which
+# is affordable because bc-3m8en means a green local gate can answer for a red base, so
+# the queue is not wedged while this settles. `RUNNER_COUNT` in that script raises it.
+#
+# **The separate account is load-bearing, not hygiene.** `discoverWorkspaces` scans
+# `~/beads/*/.beads` and four suites spawn the real daemon; under the everyday account
+# that is loremia, sorrel, ehden and beadcause — the live trackers. Under `ghrunner` it
+# is the one empty workspace the step below creates. It also keeps branch code away from
+# `~/.config/beadcause/config.json` and the JIRA token in `~/.zshenv`.
+#
+# **What this costs:** CI is now a machine that can sleep. A reboot is covered — the
+# runners are LaunchDaemons — but a Mac asleep mid-merge leaves the queue waiting on a
+# check that will not report. That is the trade for a queue that moves at all.
+#
+# ## Why `--jobs 6`, fixed, and not the load-based default (bc-s57oe)
+#
+# The gate's own default (`chooseJobs`, bc-xlz32.5) is `cores - load`, floored at 2. That
+# is the right manners for a local session and the wrong rule for CI, which now runs on
+# that same Mac (two runners, Adams-MacBook-Pro-M4-1 and -2). Measured on 2026-10-14/15:
+# at load 15-50 every CI gate got the floor, 2 suites at once. The full roster is ~116
+# suite-minutes (run 38625658479), so a `main` run at 2-3 took 40-58 minutes and was
+# cancelled at the 45-minute limit. A narrowed PR run (~290 suites, 40-57 suite-minutes)
+# took 20-30 minutes. Checkout plus `npm ci` was ~25 seconds of that. Under contention
+# the CPU is shared per process, so 2 suites also meant a 2/40 share of the machine, and
+# every merge waited on it.
+#
+# 6 because two runners at 6 each is 12, the core count. CI does not oversubscribe the
+# Mac by itself, and it no longer gives way to every local gate. The older history below
+# is about a 3-core hosted runner and explains why this does not go higher.
+#
+# `macos-latest` was a 3-core runner, and this used to run `--jobs 4` on the reasoning that
+# a GitHub runner is otherwise uncontended, so parallelism within a shard is close to free
+# — true of *other tenants*, not of the shard oversubscribing its own three cores by 33%.
+# Three suites went red on `main` under exactly that self-contention on 2026-08-25
+# (`test/chromeprofile.mjs` twice, `test/claims.mjs`, `test/tls.mjs`), all fixture
+# weaknesses that are now fixed — but nothing says those three were the whole set of
+# suites that assume a process gets scheduled promptly, out of ~460.
+#
+# Measured (two shards, `--jobs` 1/2/3/4/6, CPU-constrained to 3 cores): the suites here
+# are substantially I/O- and subprocess-bound, so parallelism keeps paying off past the
+# core count, but with sharply diminishing returns — `--jobs 3` (which exactly saturates
+# three cores, no oversubscription) cost only ~12-19% more wall-clock than `--jobs 4` per
+# shard, and `--jobs 6` bought nothing further over `--jobs 4`. Per-shard wall-clock is a
+# couple of minutes even fully serial (`--jobs 1`), nowhere near `timeout-minutes: 20` —
+# the headroom this trade spends is real but small. `--jobs 3` removes the
+# self-oversubscription for a cost inside the noise of a single run.
+#
+# `SHARD_TOTAL` is 1 and the job is not a matrix any more (bc-t3amq, below). Sharding
+# again means a `shard` matrix plus a separate roll-up job named `test`, and the
+# matrix list and `SHARD_TOTAL` must agree.
+#
+# ## Why there is one job, named `test` (bc-t3amq)
+#
+# A required check is named by its **job** name, and GitHub does not complain when a
+# required check stops matching; it waits forever for one that will never report. While
+# the suite was a matrix, `test` was a cheap roll-up that `needs:` every `shard` leg. With
+# one shard on two self-hosted runners, every extra job is another wait in the runner
+# queue, so the decision, the suite and the verdict are now steps of the one `test` job.
+# `b7e-shard --index 0 --total $SHARD_TOTAL` stays in the suite step so going back to a
+# matrix is a change to this job, not a rewrite.
+#
+# ## A pull request runs what it affects; the gate runs everything (bc-xlz32.8)
+#
+# `b7e-affected` answers "which suites cover this diff" and `b7e-shard --from` slices that
+# answer instead of the whole roster, so on a `pull_request` each shard runs only the part
+# of the narrowed list that belongs to it. Measured over the last thirty merges to `main`:
+# a median diff selects **4% of the suite's total time**, and one in thirty selects all of
+# it. On `merge_group` and `push: main` nothing is narrowed — those run all 530.
+#
+# That split is the whole safety argument. Narrowing can only be wrong by running too
+# little, and the place it would matter is the merge, which is exactly where it is turned
+# off: a branch narrowed wrongly is caught when it enters the queue, not in `main`. Three
+# things make the narrowing itself trustworthy rather than merely fast, and all three live
+# in `lib/affected.js`: a changed file it cannot place empties the list, which means *run
+# everything* rather than run nothing; a suite that walks a source directory is selected
+# for any change under it, which is what covers a brand-new file nothing names yet; and a
+# suite the gate has never heard of is dropped before `--only` ever sees it.
+#
+# **An empty slice must never become a bare `b7e-gate`.** With the full roster a shard is
+# never empty, so the old version of this step could interpolate `$ONLY_ARGS` unguarded.
+# A narrowed list shorter than `SHARD_TOTAL` leaves some shard with nothing, and
+# `b7e-gate` with no `--only` at all is every suite — the exact opposite of what that
+# shard was asked to do. Hence the `if [ -s ... ]`.
+#
+# ## Why three triggers
+#
+# - `pull_request` — the ordinary signal, so a red suite is visible on the PR page before
+#   anyone (or `bin/deliver.js`) merges it. The one trigger that narrows.
+# - `merge_group` — **the load-bearing one.** A merge queue builds a temporary ref of
+#   `main` + the entries ahead of yours + yours, and runs the required checks against
+#   *that*. Without this trigger the queue has nothing to wait for and every entry stalls.
+#   It is here before the queue is switched on, deliberately: a required check that does
+#   not answer for `merge_group` events blocks the queue rather than gating it.
+# - `push` on `main` — so the history of `main` itself has a verdict, which is what makes
+#   "was main already broken when I branched?" answerable after the fact.
+#
+# ## Why the git identity step
+#
+# ~28 suites build a throwaway repo in a temp dir and commit into it. Most set
+# `user.email` themselves; the ones that do not inherit the machine's global config, which
+# every developer here has and a fresh runner does not — `git commit` there fails with
+# "Please tell me who you are", and the suite goes red for a reason that has nothing to do
+# with the change under test. Setting it globally on the runner is the cheap fix; making
+# every suite set its own is the right one, and is not this file's job.
+#
+# ## What this does not measure, on purpose
+#
+# `bd` is not installed on the runner, so the nine `test/*real.mjs` suites plus
+# `test/landcheck.mjs` — the ones that drive a real `bd` end to end — skip here. That is
+# roughly a quarter of the suite's actual cost, and CI is not exercising it at all. That is
+# a deliberate decision to keep this workflow cheap, not an oversight: installing `bd` on
+# the runner would put that whole quarter back and spend exactly the budget this workflow
+# exists to protect. If that coverage gap should close, it is its own bead.
+name: test
+
+on:
+  pull_request:
+  merge_group:
+  push:
+    branches: [main]
+  # So a runner change can be proved on demand rather than by pushing something and
+  # hoping — bc-hkval was diagnosed with no logs to read at all.
+  workflow_dispatch:
+
+# One run per pull request: a branch pushed three times in a minute should not hold three
+# sets of runners. Merge-group runs are never cancelled — cancelling one drops the entry
+# from the queue, which is the opposite of what the queue is for.
+concurrency:
+  group: test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+  # The first step of `test` lists the pull request's files — bc-sypx2.
+  pull-requests: read
+
+env:
+  # One, on the self-hosted runner (bc-xul1q). Four shards were built for four hosted
+  # runners working at once; with one runner they ran back to back — 3-10 minutes of
+  # suites each, plus the waits between them — so a PR took 30-60 minutes for a suite a
+  # local gate finishes in about ten. One job, parallelised by `b7e-gate`'s own load-based
+  # `--jobs`, is that local gate. Raise this (and the matrix below) together, only if CI
+  # moves back to hosted runners that really do run in parallel.
+  SHARD_TOTAL: 1
+
+jobs:
+  # One job, so a run takes a runner once (bc-t3amq). It used to be three — `changes`,
+  # `shard 0`, and a `test` roll-up — and each one queued separately for one of the two
+  # runners on this Mac. In run 38690265261 the four-second roll-up waited 56 minutes for a
+  # runner after its shard had already passed, behind other runs' gates. The job is still
+  # named `test`, because that is the check name every PR has always reported.
+  test:
+    name: test
+    # The `ghrunner` runners on the studio Mac — see the header. The labels are every one
+    # they were registered with, so a job cannot land on some future runner that happens
+    # to share one of them.
+    runs-on: [self-hosted, macOS, ARM64]
+    # About 20 minutes for the full roster on a loaded Mac at `--jobs 6`, and less for a
+    # narrowed PR. 45 rather than the 20 a hosted runner needed: the job shares the machine
+    # with local gates and the live daemon, and #105's own first run lost a shard to the
+    # 20-minute limit while the tests themselves were fine. Still short enough that a suite
+    # hanging on a port or a lock is killed rather than sitting ahead of everybody else.
+    # Time spent queued for a runner does not count against it.
+    timeout-minutes: 45
+    steps:
+      # Whether this run needs the suite at all — bc-sypx2. A pull request that changes
+      # nothing but `.claude/` (handoffs, settings, the runner installer) cannot change what
+      # any suite tests, so every later step is skipped and the job passes. It still
+      # *reports*: `paths-ignore` would leave the head with zero checks, and the merge queue
+      # refuses a head nothing ran on (bc-ysqd.1, lib/mergeadvocate.js).
+      #
+      # **Only `.claude/`, not docs.** 127 suites read `docs/` or a README — the b7e tool
+      # pages, the sw-cache notes, the command reference — so a docs-only change can break
+      # the gate and gets the whole of it.
+      #
+      # Asked of GitHub's own file list, before the checkout; anything that goes wrong (the
+      # API, a list it truncates, no files) answers "run it", which is the direction that
+      # can only cost time. Any failure in this step fails the job, which is red, never a
+      # silent skip.
+      - id: decide
+        env:
+          TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" != "pull_request" ]; then echo "code=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          : > files.txt
+          for page in 1 2 3 4 5 6 7 8 9 10; do
+            if ! curl -fsS -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/$REPO/pulls/$PR/files?per_page=100&page=$page" > page.json; then
+              echo "could not list the files — running the suite"; echo "code=true" >> "$GITHUB_OUTPUT"; exit 0
+            fi
+            grep -o '"filename": *"[^"]*"' page.json | sed 's/.*: *"//; s/"$//' > page.txt || true
+            [ -s page.txt ] || break
+            cat page.txt >> files.txt
+            [ "$(wc -l < page.txt)" -lt 100 ] && break
+          done
+          echo "changed files:"; cat files.txt
+          # GitHub lists at most 3000; a list that long is not one to second-guess.
+          if [ ! -s files.txt ] || [ "$(wc -l < files.txt)" -ge 1000 ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if grep -qv '^\.claude/' files.txt; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "only .claude/ changed — skipping the suite"
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.decide.outputs.code == 'true'
+        with:
+          # The narrowing diffs against the merge-base with the PR's base branch, which a
+          # depth-1 checkout does not have. Full history on every event rather than only on
+          # `pull_request`, because a conditional `fetch-depth` is a second thing to get
+          # wrong for a clone this size.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        if: steps.decide.outputs.code == 'true'
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Give the runner a git identity
+        if: steps.decide.outputs.code == 'true'
+        run: |
+          git config --global user.name "beadcause ci"
+          git config --global user.email "ci@beadcause.invalid"
+
+      # `discoverWorkspaces` scans `~/beads/*/.beads`, and `bin/beadcause.js` exits 1 with
+      # "nothing to serve" when it finds none — correctly. But four suites spawn the real
+      # daemon to test the *router* (ports, slow starts, the outage push, the blue/green
+      # swap), and on a machine with no workspaces every one of them reads as a backend
+      # that died at startup. An empty directory is all the scan requires; no `bd`, no
+      # database, and nothing here asks the tracker anything.
+      - name: Give the runner a beads workspace to serve
+        if: steps.decide.outputs.code == 'true'
+        run: mkdir -p "$HOME/beads/ci/.beads"
+
+      # `postinstall` runs scripts/vendor.js, which copies the browser builds into
+      # public/vendor — it needs node_modules, which after this step it has.
+      - run: npm ci
+        if: steps.decide.outputs.code == 'true'
+
+      # On a pull request only. `b7e-affected` prints nothing and exits 1 when a changed
+      # file matched no suite — `|| true` keeps that from failing the step, because an
+      # empty list is `b7e-shard --from`'s own spelling of "the whole roster", which is
+      # exactly the fallback being asked for.
+      - name: Work out which suites this pull request affects
+        if: steps.decide.outputs.code == 'true' && github.event_name == 'pull_request'
+        run: |
+          BASE=$(git merge-base "${{ github.event.pull_request.base.sha }}" HEAD)
+          git diff --name-only "$BASE" HEAD > changed.txt
+          echo "changed files:"; cat changed.txt
+          # No changed files at all is not "narrow to nothing" — leave affected.txt absent
+          # and the next step runs the whole roster.
+          [ -s changed.txt ] || { echo "nothing changed — not narrowing"; exit 0; }
+          # Unquoted on purpose: this is the one place the file list has to become argv,
+          # and no path in this repo contains a space. A file outside bin/lib/public/
+          # scripts/test — package.json, this workflow — matches nothing, which empties
+          # the list, which runs everything. That is the conservative direction and it is
+          # the intended one.
+          node bin/b7e-affected $(cat changed.txt) > affected.txt || true
+          echo "affected suites: $(wc -l < affected.txt)"; cat affected.txt
+
+      - name: Run the suite, no-bail
+        if: steps.decide.outputs.code == 'true'
+        run: |
+          FROM=""
+          [ -f affected.txt ] && FROM="--from affected.txt"
+          node bin/b7e-shard --index 0 --total ${{ env.SHARD_TOTAL }} $FROM > slice.txt
+          # test/browse.mjs cannot get a page out of headless Chrome under the runner's
+          # account (no login session) and passes every time as a person — bc-i6d5d. Left
+          # out of CI only; the full local gate on main still runs it. Filtered before the
+          # empty-slice check so a slice of just this suite is "nothing to run", not a
+          # bare b7e-gate.
+          grep -vx 'test/browse.mjs' slice.txt > slice.kept || true
+          mv slice.kept slice.txt
+          if [ ! -s slice.txt ]; then
+            echo "nothing for this shard to run — the narrowed list is shorter than SHARD_TOTAL"
+            exit 0
+          fi
+          ONLY_ARGS=$(sed 's/^/--only=/' slice.txt | tr '\n' ' ')
+          # Tee'd to a world-readable path on the runner host, because on a self-hosted
+          # Mac the job's own log is the one thing nobody can read: `_diag` belongs to the
+          # service account, and `gh run view --log` fetches from GitHub's blob store,
+          # which this network does not reach — that is how bc-hkval stayed undiagnosed
+          # for two days. The run id is in the name so a failure can be read after the
+          # fact, and `|| true` on the copy keeps a logging convenience from ever being
+          # the thing that fails a shard.
+          mkdir -p /tmp/beadcause-ci 2>/dev/null || true
+          LOG=/tmp/beadcause-ci/${{ github.run_id }}-shard-0.log
+          set -o pipefail
+          # Fixed, not load-based: see "Why `--jobs 6`" in the header (bc-s57oe).
+          node bin/b7e-gate --jobs 6 $ONLY_ARGS 2>&1 | tee "$LOG"
+          STATUS=$?
+          chmod 644 "$LOG" 2>/dev/null || true
+          exit $STATUS

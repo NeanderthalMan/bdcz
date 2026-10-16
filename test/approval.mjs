@@ -1,0 +1,666 @@
+#!/usr/bin/env node
+/**
+ * **Per-space PR policy** — who merges their own work, and who has to be approved first.
+ *
+ *     npm test
+ *     node test/approval.mjs
+ *
+ * Whether a worker merges its own pull request used to be one global switch,
+ * `pr.autoMerge`, and it was the same answer for every repo in every space. That is
+ * wrong at both edges: a personal side project wants its work landed without being
+ * asked at three in the morning, and anything with other people on it wants eyes on
+ * the diff before it is in `main`. Spaces are already the unit for that kind of
+ * policy, so both answers now resolve through `prPolicyFor` in lib/spaces.js.
+ *
+ * **bc-r941 moved half of this file's subject one process along.** A worker no longer
+ * merges, so it no longer consults `requireApproval` at all: it queues, and the merge
+ * queue is what stops at a missing approval and files the card. The `requireApproval`
+ * decision is therefore pinned as a pure function in test/mergegate.mjs — every one of
+ * GitHub's `reviewDecision` values, including that a missing approval is a *wait* rather
+ * than a refusal — where it can be asserted without a git server and a fake gh. What
+ * stayed here is the half that is still `bin/deliver.js`'s: which of the two endings a
+ * delivery takes.
+ *
+ * Four things are worth a test, and only the first is arithmetic:
+ *
+ * 1. **The resolution itself**, in both directions. A space must be able to turn
+ *    auto-merge *on* where the global says off as well as off where it says on —
+ *    that is the whole difference between this and `autoDispatchAllowed`, whose
+ *    global `false` is a safety veto no space may argue with. A setup that can only
+ *    subtract cannot express "off everywhere except the side project".
+ * 2. **A delivery must never merge, in any space.** The assertion that matters is
+ *    negative and it is the point of the feature: `gh pr merge` must not appear in the
+ *    call log at all. Checks green, branch clean, approval on the pull request, and it
+ *    still hands over.
+ * 3. **`autoMerge` picks the ending, and only that.** On, and the work goes on the queue
+ *    with no card in the inbox. Off, and it is the ask-first card it always was — with
+ *    no merge-bead beside it, because two blockers on one work bead is the pile bc-ec6
+ *    was about.
+ * 4. **The two readers must agree.** `bin/deliver.js` decides which ending and
+ *    `lib/session.js` writes the brief promising what that command will do; a brief
+ *    promising a merge to a session whose delivery then files a question is how you
+ *    get a window reporting work as landed over a bead that says otherwise. Both go
+ *    through the one helper, and this pins that they answer the same for one space.
+ *
+ * Real git against a real bare remote, because the push and the "is there anything
+ * ahead" test are real. `gh` and `bd` are fakes on `PATH` and in the config, keyed off
+ * JSON world files with a call log each — nothing here reaches the network, a real
+ * tracker, or anyone's phone.
+ */
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { cleanupTmp } from './helpers/tmp.mjs';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const DELIVER = path.join(HERE, '..', 'bin', 'deliver.js');
+
+let failures = 0;
+const ok = (name) => console.log(`  \x1b[32m✓\x1b[0m ${name}`);
+const bad = (name, detail) => {
+  failures += 1;
+  console.log(`  \x1b[31m✗\x1b[0m ${name}`);
+  if (detail) console.log(`      ${detail}`);
+};
+const check = (name, cond, detail = '') => (cond ? ok(name) : bad(name, detail));
+
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'beadcause-approval-'));
+const CONFIG_DIR = path.join(tmp, 'config');
+fs.mkdirSync(CONFIG_DIR, { recursive: true });
+
+/* ------------------------------------------------ the helper, on its own first */
+
+const { prPolicyFor } = await import(path.join(HERE, '..', 'lib', 'spaces.js'));
+
+const SPACES = (over) => ({ spaces: [{ name: 'Work', workspaces: ['demo'], ...over }] });
+
+console.log('\nresolving the two answers per space\n');
+
+check(
+  'with no spaces at all it is the global, and the global default is to land its own work',
+  prPolicyFor({}, 'demo').autoMerge === true && prPolicyFor({}, 'demo').requireApproval === false
+);
+check(
+  'a workspace in no space still gets the global',
+  prPolicyFor({ ...SPACES({}), pr: { autoMerge: false } }, 'unassigned').autoMerge === false
+);
+check(
+  'a space can turn it off where the global says on',
+  prPolicyFor(SPACES({ autoMerge: false }), 'demo').autoMerge === false
+);
+check(
+  'and on where the global says off — the direction an exclude list cannot express',
+  prPolicyFor({ ...SPACES({ autoMerge: true }), pr: { autoMerge: false } }, 'demo').autoMerge === true
+);
+check(
+  'a space that says nothing inherits, whichever way the global points',
+  prPolicyFor({ ...SPACES({}), pr: { autoMerge: false } }, 'demo').autoMerge === false &&
+    prPolicyFor({ ...SPACES({}), pr: { autoMerge: true } }, 'demo').autoMerge === true
+);
+check(
+  'requireApproval resolves the same way, from the same two places',
+  prPolicyFor({ pr: { requireApproval: true } }, 'demo').requireApproval === true &&
+    prPolicyFor(SPACES({ requireApproval: true }), 'demo').requireApproval === true &&
+    prPolicyFor({ ...SPACES({ requireApproval: false }), pr: { requireApproval: true } }, 'demo').requireApproval === false
+);
+check(
+  'a non-boolean on the space is not an answer, so it inherits rather than guessing',
+  prPolicyFor({ ...SPACES({ autoMerge: 'false' }), pr: { autoMerge: true } }, 'demo').autoMerge === true,
+  JSON.stringify(prPolicyFor({ ...SPACES({ autoMerge: 'false' }) }, 'demo'))
+);
+
+/* --------------------------------------------------------------- the fake bd */
+
+const WORLD = path.join(tmp, 'world.json');
+const BD_LOG = path.join(tmp, 'bd-calls.log');
+const FAKE_BD = path.join(tmp, 'bd');
+
+const world = () => JSON.parse(fs.readFileSync(WORLD, 'utf8'));
+
+fs.writeFileSync(
+  FAKE_BD,
+  `#!/usr/bin/env node
+const fs = require('fs');
+const WORLD = ${JSON.stringify(WORLD)};
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(BD_LOG)}, JSON.stringify(args) + '\\n');
+const w = JSON.parse(fs.readFileSync(WORLD, 'utf8'));
+const save = () => fs.writeFileSync(WORLD, JSON.stringify(w, null, 2));
+const flag = (name) => { const i = args.indexOf(name); return i === -1 ? null : args[i + 1]; };
+const all = (name) => args.map((a, i) => (a === name ? args[i + 1] : null)).filter(Boolean);
+const die = (msg) => { process.stderr.write(msg + '\\n'); process.exit(1); };
+const hydrate = (issue) => ({
+  ...issue,
+  dependencies: (issue.dependencies || []).map((d) => ({ ...d, status: (w.issues[d.id] || {}).status || 'closed' })),
+});
+
+if (args[0] === 'show') {
+  const issue = w.issues[args[1]];
+  if (!issue) die('Error fetching ' + args[1] + ': no issue found');
+  process.stdout.write(JSON.stringify([hydrate(issue)]));
+  process.exit(0);
+}
+if (args[0] === 'list') {
+  const label = flag('--label');
+  const rows = Object.values(w.issues)
+    .filter((i) => (label ? (i.labels || []).includes(label) : true))
+    .filter((i) => i.status !== 'closed')
+    .map(hydrate);
+  process.stdout.write(JSON.stringify(rows));
+  process.exit(0);
+}
+if (args[0] === 'create') {
+  const id = 'zz-' + (w.seq = (w.seq || 0) + 1);
+  w.issues[id] = {
+    id,
+    title: flag('--title') || '',
+    description: flag('--description') || '',
+    labels: all('--label'),
+    status: 'open',
+    issue_type: flag('--type') || 'task',
+    dependencies: [],
+  };
+  save();
+  process.stdout.write(JSON.stringify({ id }));
+  process.exit(0);
+}
+if (args[0] === 'close') {
+  const issue = w.issues[args[1]];
+  if (!issue) die('Error: no issue found matching "' + args[1] + '"');
+  const open = (issue.dependencies || [])
+    .filter((d) => d.dependency_type === 'blocks')
+    .filter((d) => ((w.issues[d.id] || {}).status || 'closed') !== 'closed')
+    .map((d) => d.id);
+  if (open.length) die('cannot close ' + issue.id + ': blocked by open issues [' + open.join(' ') + ']');
+  issue.status = 'closed';
+  issue.close_reason = flag('--reason') || '';
+  save();
+  process.stdout.write('closed\\n');
+  process.exit(0);
+}
+if (args[0] === 'comment') {
+  const issue = w.issues[args[1]];
+  if (!issue) die('Error: no issue found matching "' + args[1] + '"');
+  (issue.comments = issue.comments || []).push(args[2]);
+  save();
+  process.exit(0);
+}
+if (args[0] === 'dep' && args[1] === 'add') {
+  const issue = w.issues[args[2]];
+  if (!issue) die('Error: no issue found matching "' + args[2] + '"');
+  issue.dependencies = issue.dependencies || [];
+  if (!issue.dependencies.some((d) => d.id === args[3])) issue.dependencies.push({ id: args[3], dependency_type: 'blocks' });
+  save();
+  process.exit(0);
+}
+if (args[0] === 'dep' && args[1] === 'remove') {
+  const issue = w.issues[args[2]];
+  if (!issue) die('Error: no issue found matching "' + args[2] + '"');
+  issue.dependencies = (issue.dependencies || []).filter((d) => d.id !== args[3]);
+  save();
+  process.exit(0);
+}
+process.stdout.write('[]');
+`,
+  { mode: 0o755 }
+);
+
+/* --------------------------------------------------------------- the fake gh */
+
+const BIN = path.join(tmp, 'bin');
+fs.mkdirSync(BIN, { recursive: true });
+const GH_STATE = path.join(tmp, 'gh.json');
+const GH_LOG = path.join(tmp, 'gh-calls.log');
+
+/**
+ * One pull request per branch, plus the one knob this suite turns: `review`, which is
+ * stamped onto every PR the moment it is viewed. That is deliberately not a property of
+ * the PR record — an approval arrives *after* the PR exists, and the whole question here
+ * is what the worker does with the answer it reads back at merge time.
+ */
+fs.writeFileSync(GH_STATE, JSON.stringify({ next: 40, review: null, prs: {} }));
+const ghState = () => JSON.parse(fs.readFileSync(GH_STATE, 'utf8'));
+const setReview = (review) => {
+  const s = ghState();
+  s.review = review;
+  fs.writeFileSync(GH_STATE, JSON.stringify(s, null, 2));
+};
+
+fs.writeFileSync(
+  path.join(BIN, 'gh'),
+  `#!/usr/bin/env node
+const fs = require('fs');
+const STATE = ${JSON.stringify(GH_STATE)};
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(GH_LOG)}, JSON.stringify(args) + '\\n');
+const s = JSON.parse(fs.readFileSync(STATE, 'utf8'));
+const save = () => fs.writeFileSync(STATE, JSON.stringify(s, null, 2));
+const out = (t) => { process.stdout.write(t); process.exit(0); };
+const fail = (t) => { process.stderr.write(t + '\\n'); process.exit(1); };
+const flag = (n) => { const i = args.indexOf(n); return i === -1 ? null : args[i + 1]; };
+const find = (ref) => Object.values(s.prs).find((p) => p.headRefName === ref || String(p.number) === String(ref));
+
+if (args[0] === 'auth') out('Logged in to github.com\\n');
+if (args[0] === 'repo' && args[1] === 'view') out(JSON.stringify({ nameWithOwner: 'acme/widgets' }));
+if (args[0] === 'pr') {
+  if (args[1] === 'create') {
+    const head = flag('--head');
+    const number = s.next++;
+    s.prs[head] = {
+      number,
+      title: flag('--title') || '',
+      url: 'https://github.com/acme/widgets/pull/' + number,
+      state: 'OPEN',
+      isDraft: false,
+      mergeable: 'MERGEABLE',
+      mergeStateStatus: 'CLEAN',
+      headRefName: head,
+      baseRefName: flag('--base') || 'main',
+      additions: 3,
+      deletions: 1,
+      changedFiles: 1,
+      // Green, in every scenario in this file. The approval gate has to be the only
+      // thing that can stop a merge here, or a passing assertion proves nothing.
+      statusCheckRollup: [{ name: 'build', conclusion: 'SUCCESS' }],
+      reviewDecision: null,
+      mergedAt: null,
+      mergeCommit: null,
+    };
+    save();
+    out(s.prs[head].url + '\\n');
+  }
+  const pr = find(args[2]);
+  if (args[1] === 'view') {
+    if (!pr) fail('no pull requests found for branch ' + args[2]);
+    out(JSON.stringify({ ...pr, reviewDecision: s.review }));
+  }
+  if (args[1] === 'comment') out('commented\\n');
+  if (args[1] === 'merge') {
+    if (!pr) fail('no pull request found');
+    pr.state = 'MERGED';
+    pr.mergedAt = '2026-08-10T12:00:00Z';
+    pr.mergeCommit = { oid: 'aa11bb22cc33dd44' };
+    save();
+    out('Merged pull request #' + pr.number + '\\n');
+  }
+}
+fail('unknown gh invocation: ' + args.join(' '));
+`,
+  { mode: 0o755 }
+);
+
+/* ------------------------------------------------------------------- the repo */
+
+const git = (cwd, ...args) =>
+  execFileSync('git', args, {
+    cwd,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: 'test',
+      GIT_AUTHOR_EMAIL: 't@e',
+      GIT_COMMITTER_NAME: 'test',
+      GIT_COMMITTER_EMAIL: 't@e',
+    },
+  }).trim();
+
+const origin = path.join(tmp, 'origin.git');
+const repo = path.join(tmp, 'repo');
+git(tmp, 'init', '--quiet', '--bare', '--initial-branch=main', origin);
+git(tmp, 'clone', '--quiet', origin, repo);
+git(repo, 'config', 'user.email', 't@e');
+git(repo, 'config', 'user.name', 'test');
+fs.writeFileSync(path.join(repo, 'file.txt'), 'one\n');
+git(repo, 'add', 'file.txt');
+git(repo, 'commit', '--quiet', '-m', 'one');
+git(repo, 'push', '--quiet', '-u', 'origin', 'main');
+
+/** A fresh branch with one commit on it — one scenario, one pull request. */
+const branchOff = (name) => {
+  git(repo, 'checkout', '--quiet', 'main');
+  git(repo, 'checkout', '--quiet', '-b', name);
+  fs.writeFileSync(path.join(repo, `${name}.txt`), `${name}\n`);
+  git(repo, 'add', '-A');
+  git(repo, 'commit', '--quiet', '-m', name);
+};
+
+/* ----------------------------------------------------------------- the config */
+
+const wsDir = path.join(tmp, 'ws');
+fs.mkdirSync(path.join(wsDir, '.beads'), { recursive: true });
+
+const writeConfig = (over = {}) =>
+  fs.writeFileSync(
+    path.join(CONFIG_DIR, 'config.json'),
+    JSON.stringify({
+      port: 4318,
+      host: '127.0.0.1',
+      baseUrl: 'http://127.0.0.1:4318',
+      token: 'approval-token',
+      actor: 'beadcause-test',
+      bdBin: FAKE_BD,
+      workspaces: [{ name: 'demo', dir: wsDir }],
+      sessionDirs: { demo: repo },
+      openSessions: false,
+      claudeSessions: false,
+      ntfy: { enabled: false },
+      advocates: { enabled: false, workspaces: [] },
+      ...over,
+    })
+  );
+
+/** Run a delivery the way a worker session ends. The exit code is data, never a throw. */
+function deliver(bead) {
+  const res = execFileSync(process.execPath, [DELIVER, '-w', 'demo', '-b', bead, '--dir', repo, '--tests', 'npm test — green'], {
+    cwd: repo,
+    encoding: 'utf8',
+    input: 'What changed and why.',
+    env: {
+      ...process.env,
+      BEADCAUSE_CONFIG_DIR: CONFIG_DIR,
+      PATH: `${BIN}${path.delimiter}${process.env.PATH}`,
+    },
+  });
+  return res.trim().split('\n').filter(Boolean).pop() || '';
+}
+
+const reset = (bead) => {
+  fs.writeFileSync(
+    WORLD,
+    JSON.stringify({
+      seq: 200,
+      issues: {
+        [bead]: { id: bead, title: 'The work', description: '', labels: [], status: 'in_progress', issue_type: 'task', dependencies: [] },
+      },
+    })
+  );
+  fs.writeFileSync(BD_LOG, '');
+  fs.writeFileSync(GH_LOG, '');
+};
+
+const ghCalls = () =>
+  fs
+    .readFileSync(GH_LOG, 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => JSON.parse(l));
+const merged = () => ghCalls().some((c) => c[0] === 'pr' && c[1] === 'merge');
+const cardOf = (id) => world().issues[id]?.description || '';
+
+/* -------------------------------- green and unapproved, in a space that asks */
+
+console.log('\ngreen checks, no approving review, in a space that requires one\n');
+
+/*
+ * bc-r941 moved this decision one process along, and these scenarios move with it.
+ *
+ * `requireApproval` used to be read by `bin/deliver.js`: the worker waited for the
+ * checks, found them green, found no approving review, and filed the card itself. It no
+ * longer waits for anything and no longer merges, so what it does with an approval-gated
+ * space is exactly what it does with any other — it queues, and the *queue* stops at the
+ * approval and files the card.
+ *
+ * That is a genuine loss of coverage in this file and a genuine gain elsewhere, so it is
+ * worth naming rather than quietly rewriting. The decision itself is pinned as a pure
+ * function in test/mergegate.mjs — `gateVerdict` with `requireApproval` and each of
+ * GitHub's four `reviewDecision` values, including that a missing approval is a *wait*
+ * and not a refusal — which is the assertion these scenarios were really making, and it
+ * can be made there without a git server, a fake gh and a tracker.
+ *
+ * What is still worth asserting here is the half that is about `autoMerge`: which of the
+ * two endings a delivery takes. That is still `bin/deliver.js`'s call, it is still
+ * resolved per space, and it is still the setting whose two directions an exclude list
+ * cannot express.
+ */
+
+{
+  writeConfig({
+    pr: { base: 'main', mergeMethod: 'merge', autoMerge: true, mergeWaitMs: 1000 },
+    spaces: [{ name: 'Work', workspaces: ['demo'], requireApproval: true }],
+  });
+  reset('zz-a');
+  setReview(null);
+  branchOff('work-a');
+
+  const last = deliver('zz-a');
+  const queued = last.split(' ').pop();
+
+  check('it does not merge — the assertion the whole feature is', !merged(), ghCalls().map((c) => c.join(' ')).join(' | '));
+  check('it queues instead, printing the merge-bead rather than `landed`', /^queued #\d+ /.test(last), last);
+  check('the work bead is still open, because nothing has landed', world().issues['zz-a'].status !== 'closed');
+  check(
+    'and it is parked behind the merge-bead, so the advocate does not open a second session on it',
+    (world().issues['zz-a'].dependencies || []).some((d) => d.id === queued),
+    JSON.stringify(world().issues['zz-a'].dependencies)
+  );
+  check(
+    'NO CARD IS FILED HERE — the approval is the queue’s wall to hit, not the worker’s',
+    !Object.values(world().issues).some((i) => (i.labels || []).includes('pr-delivery')),
+    JSON.stringify(Object.entries(world().issues).filter(([, i]) => (i.labels || []).includes('pr-delivery')).map(([k]) => k))
+  );
+  check(
+    'and the queue entry carries the pull request the approval will be about',
+    /number: \d+/.test(world().issues[queued]?.description || ''),
+    (world().issues[queued]?.description || '').split('\n').slice(-8).join(' | ')
+  );
+}
+
+/* ------------------------------------------- the same space, once it is approved */
+
+console.log('\nthe same space, with the approval on it\n');
+
+{
+  reset('zz-b');
+  setReview('APPROVED');
+  branchOff('work-b');
+
+  const last = deliver('zz-b');
+
+  // Identical, and that is the point of the scenario now: an approving review changes
+  // nothing about what a *worker* does, because the worker no longer consults it. Two
+  // deliveries that differ only in `reviewDecision` must produce the same handover, or
+  // the policy is being read in two places again.
+  check('an approved pull request queues exactly like an unapproved one', /^queued #\d+ /.test(last), last);
+  check('and still merges nothing here', !merged(), ghCalls().map((c) => c.join(' ')).join(' | '));
+  check('the bead is open — it closes when the queue merges it, not before', world().issues['zz-b'].status !== 'closed');
+  check('and no card is filed at all', !Object.values(world().issues).some((i) => (i.labels || []).includes('pr-delivery')));
+}
+
+/* ------------------------------- a space that switches auto-merge off on its own */
+
+console.log('\na space that turns auto-merge off while the global leaves it on\n');
+
+{
+  writeConfig({
+    pr: { base: 'main', mergeMethod: 'merge', autoMerge: true, mergeWaitMs: 1000 },
+    spaces: [{ name: 'Work', workspaces: ['demo'], autoMerge: false }],
+  });
+  reset('zz-d');
+  setReview('APPROVED');
+  branchOff('work-d');
+
+  const last = deliver('zz-d');
+  const card = last.split(' ')[0];
+
+  check('the space wins over a global that says merge it', !merged());
+  check('and the delivery asks rather than queuing', !/^queued /.test(last), last);
+  check(
+    'the card is the original ask-first sentence',
+    /Nothing is merged until you say so/.test(cardOf(card)),
+    cardOf(card).split('\n')[0]
+  );
+  check('and it offers the same answers it always did', /id: merge/.test(cardOf(card)) && /id: changes/.test(cardOf(card)) && /id: decline/.test(cardOf(card)));
+  check(
+    'no merge-bead was filed beside it — one blocker on the work bead, not two',
+    !Object.values(world().issues).some((i) => (i.labels || []).includes('merge-queue')),
+    JSON.stringify(Object.entries(world().issues).filter(([, i]) => (i.labels || []).includes('merge-queue')).map(([k]) => k))
+  );
+}
+
+/* ------------------------- and one that switches it on where the global says off */
+
+console.log('\nand a space that turns it on where the global says off\n');
+
+{
+  writeConfig({
+    pr: { base: 'main', mergeMethod: 'merge', autoMerge: false, mergeWaitMs: 1000 },
+    spaces: [{ name: 'Personal', workspaces: ['demo'], autoMerge: true }],
+  });
+  reset('zz-e');
+  setReview(null);
+  branchOff('work-e');
+
+  const last = deliver('zz-e');
+  check('a space may add as well as subtract — the setup an exclude list cannot express', /^queued #\d+ /.test(last), last);
+  check('and it goes on the queue rather than into the inbox', !Object.values(world().issues).some((i) => (i.labels || []).includes('pr-delivery')));
+}
+
+/* ----------------------------- the brief and the command reading the same answer */
+
+console.log('\nthe brief and the command, reading one answer\n');
+
+{
+  process.env.BEADCAUSE_CONFIG_DIR = CONFIG_DIR;
+  process.env.PATH = `${BIN}${path.delimiter}${process.env.PATH}`;
+  const { prMode, workPromptFor } = await import(path.join(HERE, '..', 'lib', 'session.js'));
+
+  const cfg = {
+    pr: { base: 'main', mergeMethod: 'merge', autoMerge: true },
+    spaces: [
+      { name: 'Work', workspaces: ['demo'], requireApproval: true },
+      { name: 'Solo', workspaces: ['solo'] },
+    ],
+  };
+  const bead = { id: 'zz-brief', title: 'A thing' };
+
+  const work = await prMode(cfg, repo, 'demo');
+  const solo = await prMode(cfg, repo, 'solo');
+
+  check('the brief reads the same helper the delivery does', work.requireApproval === true && solo.requireApproval === false);
+  check(
+    'a session in the require-approval space is told the card is the ordinary ending there',
+    /waits for an approving review/.test(workPromptFor('demo', bead, 1, work, 'Adam')),
+    (workPromptFor('demo', bead, 1, work, 'Adam').match(/.*approving review.*/) || [])[0]
+  );
+  check(
+    'and that the wait is not its to chase — since bc-r941 it is the queue that stops there',
+    /not yours to chase/.test(workPromptFor('demo', bead, 1, work, 'Adam')),
+    (workPromptFor('demo', bead, 1, work, 'Adam').match(/.*chase.*/) || [])[0]
+  );
+  // Deliberately the two sentences the policy adds, and no longer a bare `/approv/i` over
+  // the whole brief. Since bc-36xx.6 every auto-merge brief says a reviewer reads the diff
+  // and either approves it or hands it back — a different approval, by an agent, in every
+  // space — so the substring test now fails on a brief that says nothing about the policy
+  // at all. (It also fires on a worktree whose *path* contains "approv", which is
+  // bc-36xx.15.) What is worth pinning is that the space's own wait is not promised where
+  // no space asked for it.
+  check(
+    'a session anywhere else gets exactly the brief it got before, with no mention of the approval policy',
+    !/waits for an approving review/.test(workPromptFor('solo', bead, 1, solo, 'Adam')) &&
+      !/not yours to chase/.test(workPromptFor('solo', bead, 1, solo, 'Adam')),
+    (workPromptFor('solo', bead, 1, solo, 'Adam').match(/.*approving review.*/) || [])[0]
+  );
+  check(
+    'and both still land their own work, since requiring a review is not switching auto-merge off',
+    work.autoMerge === true && solo.autoMerge === true
+  );
+  check(
+    'a space that switches auto-merge off cannot also be asking for an approval — there is nothing left to gate',
+    (await prMode({ ...cfg, spaces: [{ name: 'Work', workspaces: ['demo'], autoMerge: false, requireApproval: true }] }, repo, 'demo'))
+      .requireApproval === false
+  );
+
+  /* -------------------------------------------- and what happens after the merge */
+
+  // Per repo rather than per space, which is the level `autoShipPerWorkspace` exists for
+  // — and the point of checking it here is that the brief reads the *same resolver* the
+  // release queue does, so a session is never told its merge ships itself in a repo where
+  // it does not.
+  const ships = await prMode({ ...cfg, autoShipPerWorkspace: { demo: true } }, repo, 'demo');
+  check('the brief knows whether the merge ships itself, per repo', ships.autoShip === true && work.autoShip === false);
+  check(
+    'and says so, so a session does not declare a deploy owed that nobody has to run',
+    /merge ships itself here/.test(workPromptFor('demo', bead, 1, ships, 'Adam')) &&
+      /drop the flag rather than declaring a deploy/.test(workPromptFor('demo', bead, 1, ships, 'Adam'))
+  );
+  check(
+    'a repo that waits for Ship gets exactly the brief it got before',
+    !/ships itself/.test(workPromptFor('demo', bead, 1, work, 'Adam'))
+  );
+  check(
+    'and a repo whose workers do not merge at all is never told its merge ships — there is no merge to ship',
+    (
+      await prMode(
+        { ...cfg, autoShipPerWorkspace: { demo: true }, autoMergePerWorkspace: { demo: false } },
+        repo,
+        'demo'
+      )
+    ).autoShip === false
+  );
+
+  /* ------------------------- a worktree whose own name says "approv" ------------------------- */
+
+  // bc-36xx.15: this suite used to fail from ANY worktree whose directory name contained
+  // "approv" — nothing to do with approval policy. The brief bakes in an absolute path to
+  // bin/deliver.js (`pr.deliver`, built by `DELIVER_CMD()` above), and a bare `/approv/i`
+  // over the whole brief swept that baked-in path in too. `git stash` cannot prove this is
+  // fixed — the trap moves with the directory, not the tracked content — so this proves it
+  // the only way that is real: load `lib/session.js` from an actual worktree named with the
+  // word in it, and run the same brief through it.
+  //
+  // Two things have to hold at once, and this is the one place both are exercised together:
+  //   - `DELIVER_CMD()` resolves through `mainCheckout()` (bc-xl7n.61), which asks git's own
+  //     `--git-common-dir` for the answer, so the baked-in path names the checkout this
+  //     worktree belongs to and never the worktree itself.
+  //   - the assertions above (bc-36xx.6) test specific sentences, not a substring sweep.
+  //
+  // A throwaway repo, not the repo this suite is running from — the same reason every other
+  // `git worktree add` in this file's neighbours (test/regions.mjs, test/prboard.mjs, and
+  // the rest) uses one: a worktree of the real checkout registers in *its* git-common-dir,
+  // which every other session on this machine can see in `git worktree list` until it is
+  // removed. A throwaway repo's worktree is invisible to anyone else, and `cleanupTmp`'s
+  // plain `rm -rf` is enough for it — there is no shared `.git` to leave a dangling entry in.
+  console.log('\na worktree whose own directory name says "approv" gets the identical brief\n');
+  {
+    const fixture = path.join(tmp, 'wt-fixture');
+    fs.mkdirSync(fixture, { recursive: true });
+    fs.cpSync(path.join(HERE, '..', 'lib'), path.join(fixture, 'lib'), { recursive: true });
+    const fg = (...a) => execFileSync('git', a, { cwd: fixture, encoding: 'utf8' });
+    fg('init', '-q');
+    fg('-c', 'user.name=t', '-c', 'user.email=t@example.com', 'add', '-A');
+    fg('-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-q', '-m', 'lib');
+
+    const wtDir = path.join(tmp, 'review-approval-regress');
+    fg('worktree', 'add', '-q', '--detach', wtDir, 'HEAD');
+    fs.symlinkSync(path.join(HERE, '..', 'node_modules'), path.join(wtDir, 'node_modules'));
+
+    const { prMode: prModeWt, workPromptFor: workPromptForWt } = await import(path.join(wtDir, 'lib', 'session.js'));
+    const workWt = await prModeWt(cfg, repo, 'demo');
+    const soloWt = await prModeWt(cfg, repo, 'solo');
+
+    check(
+      'the baked-in delivery command names the checkout this worktree belongs to, not the worktree itself',
+      typeof workWt?.deliver === 'string' &&
+        workWt.deliver.includes('bin/deliver.js') &&
+        !workWt.deliver.includes('review-approval-regress'),
+      workWt?.deliver
+    );
+    check(
+      'and its brief still says the require-approval sentence, in the space that asks for one',
+      /waits for an approving review/.test(workPromptForWt('demo', bead, 1, workWt, 'Adam')) &&
+        /not yours to chase/.test(workPromptForWt('demo', bead, 1, workWt, 'Adam'))
+    );
+    check(
+      'while the exact same worktree, on a brief for a space that never asked, says neither sentence',
+      !/waits for an approving review/.test(workPromptForWt('solo', bead, 1, soloWt, 'Adam')) &&
+        !/not yours to chase/.test(workPromptForWt('solo', bead, 1, soloWt, 'Adam'))
+    );
+  }
+}
+
+await cleanupTmp(tmp);
+
+console.log(failures ? `\n\x1b[31m${failures} failed\x1b[0m\n` : '\n\x1b[32mall checks passed\x1b[0m\n');
+process.exit(failures ? 1 : 0);

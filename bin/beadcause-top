@@ -1,0 +1,88 @@
+#!/usr/bin/env node
+/**
+ * `beadcause-top` — every Claude Code session on this Mac, live, like `top`.
+ *
+ *     beadcause-top                 redraw every 3s until q
+ *     beadcause-top --every 10      redraw every ten seconds
+ *     beadcause-top --once          one frame and exit (screenshots, cron, a sanity check)
+ *     beadcause-top --json          the rows as one object and exit
+ *     beadcause-top --no-alt        draw inline instead of taking over the screen
+ *
+ * bc-5to5r.7, from Adam's request on 2026-10-12: "one iterm window should remain separate,
+ * and it is a monitor process that shows all the current sessions, like 'beadcause-top', it
+ * shows all the current agent processes, their bead/name, and other helpful metrics about
+ * them." One row per session — his hand-opened windows and the daemon's workers alike:
+ * name, workspace, bead, kind, busy/idle and since when, context occupancy, cpu, memory,
+ * uptime, directory, last transcript write. The header counts them and says when the Mac
+ * booted, when the register was last polled and what the reboot pass did for this boot.
+ * lib/top.js says where each column comes from; none of it is new instrumentation.
+ *
+ * After a boot the daemon opens this in an iTerm window of its own (`TOP_WINDOW` — never a
+ * tab among the conversations), and `b7e-sessions --watch` is the same view. Reads the
+ * session records under `~/.claude/sessions`, `sessions.json` and `state.json` under the
+ * config directory, the tail of one transcript per row, and runs one `ps`. It writes
+ * nothing, opens nothing and needs no token or daemon — it works when the daemon is down,
+ * which is when it is wanted most.
+ *
+ * @grant read
+ */
+import { loadConfig } from '../lib/config.js';
+import { TOP_REFRESH_MS, collectTop, runTop } from '../lib/top.js';
+
+const argv = process.argv.slice(2);
+const USAGE = `usage: beadcause-top [--once | --json] [--every <seconds>] [--no-alt]
+
+A live table of every Claude Code session on this Mac: name, workspace, bead, kind,
+busy/idle, context, cpu, memory, uptime, where, last write. q quits, r redraws now.
+
+  --once            one frame and exit
+  --json            the rows as one object and exit
+  --every <seconds> how often to redraw (default ${TOP_REFRESH_MS / 1000})
+  --no-alt          draw inline instead of taking over the screen`;
+
+if (argv.includes('--help') || argv.includes('-h')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+const takes = new Set(['--every']);
+const known = new Set(['--once', '--json', '--no-alt', ...takes]);
+let every = TOP_REFRESH_MS;
+for (let i = 0; i < argv.length; i += 1) {
+  const a = argv[i];
+  if (!known.has(a)) {
+    console.error(`beadcause-top: unknown argument ${a}\n\n${USAGE}`);
+    process.exit(2);
+  }
+  if (takes.has(a)) {
+    const v = Number(argv[i + 1]);
+    if (!Number.isFinite(v) || v <= 0) {
+      console.error(`beadcause-top: ${a} wants a number of seconds\n\n${USAGE}`);
+      process.exit(2);
+    }
+    every = v * 1000;
+    i += 1;
+  }
+}
+
+const cfg = loadConfig();
+const collect = () => collectTop({ cfg });
+
+if (argv.includes('--json')) {
+  const { rows, report, register, boot } = await collect();
+  console.log(
+    JSON.stringify(
+      { boot: new Date(boot).toISOString(), report: report ? { boot: report.boot, at: report.at } : null, polledAt: register.polledAt, rows },
+      null,
+      2
+    )
+  );
+  process.exit(0);
+}
+
+const code = await runTop({
+  collect,
+  every,
+  once: argv.includes('--once'),
+  alt: Boolean(process.stdout.isTTY) && !argv.includes('--once') && !argv.includes('--no-alt'),
+});
+process.exit(code);

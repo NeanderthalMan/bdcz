@@ -1,0 +1,154 @@
+#!/usr/bin/env node
+/**
+ * Which paragraphs of the specification describe the code I just changed — one call
+ * instead of a guessed phrase, a second guess, and a `sed -n` to read around the hit.
+ * `lib/describes.js` does the diff reading and the matching; this is the argv shell.
+ *
+ *   b7e-describes                              the working diff since origin/main, plus anything uncommitted
+ *   b7e-describes <file> [<file> ...]          just these files (changed or not)
+ *   b7e-describes <file> <export>              narrowed to one top-level definition of one file
+ *   b7e-describes ... --json                   machine-readable
+ *   b7e-describes ... --near <n>               neighbours per hit section (default 10; 0 drops them)
+ *   b7e-describes ... --dir <root>             another tree's diff and specification
+ *
+ * bc-dgx7.165 names five sessions (`bc-xl7n.162`, `bc-sj8k.1`, `bc-rfnr.9.13`,
+ * `bc-sj8k.6`, `bc-y8k4.8`) that each changed a behaviour in `lib/` and then had to find the
+ * sentences in `README.md` and `docs/*.md` the change had made false, by grepping for a
+ * phrase they guessed — differently every time. This asks the question directly.
+ *
+ * One block per paragraph, heading, list item, table row or code line in the specification
+ * that names a changed file, a definition whose body the diff touched, or a route,
+ * environment variable or config key on a changed line. Each says where it is
+ * (`file:line`), the heading it sits under with that heading's anchor slug, which names
+ * matched, and the sentence or bullet itself. After a section that has hits come its
+ * nearest paragraphs that name nothing — neighbours, not matches — because the paragraph a
+ * change makes false is often the one beside the paragraph that names the code.
+ *
+ * If the diff removes or renames a heading in a specification document, that heading is
+ * reported with every `](#old-slug)` link still pointing at it, from any document in the
+ * set — so `test/anchors.mjs` is not the first thing to find out.
+ *
+ * Reads the tree the command is run from (a worktree reads its own uncommitted edits, not
+ * the main checkout's). Every path through it is a read — nothing is written.
+ *
+ * Exit codes: `0` an answer, including "nothing describes this" — a module no document
+ * mentions prints nothing and exits 0. `2` refused: a file that exists nowhere, a name the
+ * file does not define, a bad flag, or not a git repository.
+ *
+ * The grant argument, as it was made when this tool was added — moved here verbatim from
+ * lib/tooldecl.js by bc-fmk4v, so the reason sits beside the declaration it argues for and
+ * adding a tool appends to no shared file. "This list" is DEFAULT_TOOL_LIST; "above",
+ * "below" and "beside" name the order lib/tooldecl.js kept these in, which
+ * `git show 7c47d7d77:lib/tooldecl.js` still reads whole.
+ *
+ * It only reads: git diff, show, merge-base and ls-files, then the specification files; every
+ * path through it is a read, so an agent may run it with no argument list to restrict. See
+ * bin/b7e-describes.
+ *
+ * @grant read
+ */
+import fs from 'node:fs';
+import path from 'node:path';
+import { describes, repoRootOf } from '../lib/describes.js';
+
+const argv = process.argv.slice(2);
+
+const USAGE = [
+  'b7e-describes                          the working diff since origin/main plus anything uncommitted',
+  'b7e-describes <file> [<file> ...]      just these files',
+  'b7e-describes <file> <export>          narrowed to one top-level definition',
+  'b7e-describes ... --json               machine-readable',
+  'b7e-describes ... --near <n>           neighbours per hit section (default 10; 0 drops them)',
+  "b7e-describes ... --dir <root>         another tree's diff and specification",
+].join('\n');
+
+if (argv.includes('--help') || argv.includes('-h')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+
+const refuse = (msg) => {
+  console.error(`${msg}\n\n${USAGE}`);
+  process.exit(2);
+};
+
+let JSON_MODE = false;
+let DIR = null;
+let NEAR = 10;
+const positional = [];
+for (let i = 0; i < argv.length; i += 1) {
+  const a = argv[i];
+  if (a === '--json') JSON_MODE = true;
+  else if (a === '--dir') {
+    DIR = argv[(i += 1)];
+    if (!DIR) refuse('--dir needs a directory');
+  } else if (a === '--near') {
+    const n = Number(argv[(i += 1)]);
+    if (!Number.isInteger(n) || n < 0) refuse('--near needs a whole number, 0 or more');
+    NEAR = n;
+  } else if (a.startsWith('-') && a !== '-') refuse(`unknown flag ${a}`);
+  else positional.push(a);
+}
+
+const cwd = process.cwd();
+const root = DIR ? repoRootOf(path.resolve(DIR)) : repoRootOf(cwd);
+if (!root) refuse(`${DIR ? path.resolve(DIR) : cwd} is not inside a git repository`);
+
+// A second positional that is not a path is the export the first is narrowed to.
+let only = null;
+let files = positional;
+if (
+  positional.length === 2 &&
+  /^[A-Za-z_$][\w$]*$/.test(positional[1]) &&
+  !fs.existsSync(path.resolve(cwd, positional[1]))
+) {
+  [, only] = positional;
+  files = [positional[0]];
+}
+const rel = (p) => {
+  const abs = path.isAbsolute(p) ? p : path.resolve(DIR ? root : cwd, p);
+  return path.relative(root, abs).split(path.sep).join('/');
+};
+
+const result = describes(root, { paths: files.map(rel), only, near: NEAR });
+if (result.error) refuse(result.error);
+
+// Output is written whole and the process left to end on its own: `process.exit` right
+// after a large write to a pipe drops whatever of it is still pending (bc-dgx7.45).
+if (JSON_MODE) {
+  console.log(JSON.stringify(result));
+} else {
+  const out = [];
+  const where = (h) => `${h.file}:${h.line}`;
+  const heading = (h) =>
+    h ? `${'#'.repeat(h.level)} ${h.title}  #${h.slug}` : '(above every heading)';
+
+  // One block per hit; a section's neighbours follow its last hit.
+  const nb = new Map(result.neighbours.map((n) => [`${n.file}:${n.heading.line}`, n]));
+  const lastOfSection = new Map();
+  result.hits.forEach((h, i) => {
+    if (h.heading) lastOfSection.set(`${h.file}:${h.heading.line}`, i);
+  });
+  result.hits.forEach((h, i) => {
+    out.push(`${where(h)}  (${h.kind})  names ${h.names.join(', ')}`);
+    out.push(`  under ${heading(h.heading)}`);
+    out.push(`  ${h.text}`);
+    const key = h.heading ? `${h.file}:${h.heading.line}` : null;
+    if (key && lastOfSection.get(key) === i && nb.has(key)) {
+      out.push('  neighbours — same section, name nothing above, nearest first:');
+      for (const b of nb.get(key).blocks) out.push(`    ${h.file}:${b.line}  ${b.text}`);
+    }
+    out.push('');
+  });
+
+  for (const c of result.headings) {
+    out.push(
+      `${c.file}:${c.line}  heading ${c.now ? 'renamed' : 'removed'}: ${'#'.repeat(c.level)} ${c.title}  (was #${c.slug})`
+    );
+    if (c.now) out.push(`  now ${c.file}:${c.now.line}  ${'#'.repeat(c.now.level)} ${c.now.title}  #${c.now.slug}`);
+    if (!c.links.length) out.push('  no link points at the old anchor');
+    for (const l of c.links) out.push(`  inbound ${l.file}:${l.line}  ${l.text}`);
+    out.push('');
+  }
+  if (out.length) process.stdout.write(`${out.join('\n')}\n`);
+}

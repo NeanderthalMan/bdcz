@@ -1,0 +1,51 @@
+<!--
+  "bcz", ported from public/icon.svg so the app icon and the PWA are the same thing.
+  Kept on the source's 512 viewport, with the same coordinates and the same 30-wide
+  strokes, so the two can be diffed line for line rather than drifting apart.
+
+  Two differences are forced by the format and the mask:
+    - vector drawables have no <circle>, so each bowl is an arc pair;
+    - the launcher only guarantees the central 66dp of 108dp — a circle of radius 156.4
+      on this viewport, tighter than the 205 the PWA's "maskable" purpose asks for.
+      The farthest ink is at the row's outer corners: the ends of b's stem and the z's
+      bottom-right corner, 152.2 out from the centre plus their round caps and join,
+      for 167.2. That overshoots 156.4, so the group scales 0.9 about the centre and
+      lands at 150.5, 5.9 inside. There is no translate: the lockup is drawn centred on
+      (256,256) to begin with.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="512"
+    android:viewportHeight="512">
+    <group
+        android:pivotX="256"
+        android:pivotY="256"
+        android:scaleX="0.9"
+        android:scaleY="0.9">
+
+        <!-- b: stem, bowl -->
+        <path
+            android:pathData="M113,204 L113,308"
+            android:strokeColor="#5eead4"
+            android:strokeWidth="30"
+            android:strokeLineCap="round" />
+        <path
+            android:pathData="M113,274 a34,34 0 1,0 68,0 a34,34 0 1,0 -68,0"
+            android:strokeColor="#5eead4"
+            android:strokeWidth="30" />
+
+        <!-- cz. The c is a bowl with 110° taken out of its right side. -->
+        <path
+            android:pathData="M282.5,246.15 a34,34 0 1,0 0,55.7"
+            android:strokeColor="#5eead4"
+            android:strokeWidth="30"
+            android:strokeLineCap="round" />
+        <path
+            android:pathData="M345,240 L399,240 L345,308 L399,308"
+            android:strokeColor="#5eead4"
+            android:strokeWidth="30"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round" />
+    </group>
+</vector>

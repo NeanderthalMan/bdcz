@@ -1,0 +1,255 @@
+#!/usr/bin/env node
+/**
+ * `b7e-newest` — which ref actually holds the newest version of these paths, and what
+ * building on it costs.
+ *
+ *     b7e-newest -w myproject -- src/lib/ CHANGELOG.md
+ *     b7e-newest -w myproject src/lib/ --json
+ *     b7e-newest --dir /path/to/checkout --base main src/
+ *     b7e-newest -w myproject --refs origin/some-branch,other -- src/lib/
+ *
+ * bc-dgx7.83. Three sessions in a busy repo each had to answer
+ * "is the code I need on main yet, or still on somebody's unmerged branch?" against ~23
+ * live worktrees, each asked it differently, and one got it wrong — it merged a branch
+ * cut from a stale main and silently reverted another session's landed work, caught
+ * only by an unrelated `git diff --stat`. See the bead for the account.
+ *
+ * **One row per candidate that is ahead of the delivery base on these paths** — every live
+ * worktree branch, every open pull request head, and any `--refs` — with whether it is
+ * `ahead` (strictly newer), `diverged` (the base moved on the same paths too), or has only
+ * `uncommitted` edits; commits ahead/behind; the per-path diffstat of what it adds; the
+ * files it changes *outside* the paths; the files the base changed since it forked (which
+ * taking its tree wholesale would silently drop); the files both sides changed; and
+ * whether a worktree is on it, locked, and which pull request carries it. Then a VERDICT
+ * line naming the ref that holds the newest content and what building on it costs.
+ * Refs that differ only because the base moved past them are counted, not listed;
+ * `--all` lists them.
+ *
+ * **The base is `bin/deliver.js`'s own.** With `-w`, the checkout and the base branch are
+ * resolved exactly as `b7e-deliverbase` resolves them (`resolveSessionDir`, `baseFor`), so
+ * this never has an opinion that could drift from where a delivery would land. Without
+ * `-w`, `--dir` (default: the cwd's checkout) and `--base` (default `main`) say it.
+ *
+ * **Fetched once.** The base is fetched, then every pull-request head that has no local
+ * worktree, once each — `--no-fetch` skips both. A fetch or `gh` that cannot answer does
+ * not stop the survey; it says so on one line and reads what is already here.
+ *
+ * Paths are pathspecs relative to the checkout root (`src/lib/`), or absolute inside
+ * it. Everything after a literal `--` is a path, `--help` included.
+ *
+ * Exit codes: `0` the base holds the newest committed version (nothing else is ahead),
+ * `1` some other ref does — read the verdict before building on the base — `2` bad usage.
+ *
+ * The grant argument, as it was made when this tool was added — moved here verbatim from
+ * lib/tooldecl.js by bc-fmk4v, so the reason sits beside the declaration it argues for and
+ * adding a tool appends to no shared file. "This list" is DEFAULT_TOOL_LIST; "above",
+ * "below" and "beside" name the order lib/tooldecl.js kept these in, which
+ * `git show 7c47d7d77:lib/tooldecl.js` still reads whole.
+ *
+ * read-only survey: fetches refs, reads worktrees and open PRs, writes nothing See
+ * bin/b7e-newest.
+ *
+ * @grant read
+ */
+import fs from 'node:fs';
+import path from 'node:path';
+import { loadConfig } from '../lib/config.js';
+import { resolveSessionDir } from '../lib/session.js';
+import { baseFor } from '../lib/prbase.js';
+import { git, gitCode, ok } from '../lib/gitref.js';
+import { newestFor, openPrs, MAX_FILES } from '../lib/newest.js';
+
+const argv = process.argv.slice(2);
+// Every flag of ours is read from before the first literal `--`; everything after it is
+// a path, even one that spells `--help`.
+const dashAt = argv.indexOf('--');
+const own = dashAt === -1 ? argv : argv.slice(0, dashAt);
+const tail = dashAt === -1 ? [] : argv.slice(dashAt + 1);
+
+const VALUE_FLAGS = new Set(['-w', '--workspace', '--dir', '--base', '--refs']);
+const has = (f) => own.includes(f);
+const value = (...names) => {
+  for (const name of names) {
+    const at = own.indexOf(name);
+    if (at > -1) return own[at + 1];
+  }
+  return undefined;
+};
+
+const USAGE = `usage: b7e-newest [-w <workspace> | --dir <checkout> [--base <ref>]] [--refs a,b] [--all]
+                  [--no-fetch] [--no-prs] [--json] [--] <path>...
+
+Which ref actually holds the newest version of these paths — among the delivery base,
+every live worktree branch, every open pull request head and any --refs — and what
+building on it costs: what a merge drags in from outside the paths, and what taking its
+tree wholesale would silently drop from the base.
+
+  -w, --workspace <name>   resolve the checkout and the delivery base as a real delivery would
+  --dir <checkout>         a checkout other than the cwd's (a test fixture, another repo)
+  --base <ref>             the base when no -w says (default: main)
+  --refs a,b               widen the candidates with these named refs
+  --all                    also list refs that differ only because the base moved past them
+  --no-fetch               use whatever the base and the PR heads already are here
+  --no-prs                 do not ask GitHub for open pull requests
+  --json                   one object on stdout, untruncated
+
+Paths are relative to the checkout root, or absolute inside it. After a literal --,
+everything is a path.`;
+
+if (has('--help') || has('-h')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+
+const die = (msg, code = 2) => {
+  console.error(`b7e-newest: ${msg}`);
+  process.exit(code);
+};
+
+const positional = [];
+for (let i = 0; i < own.length; i++) {
+  const a = own[i];
+  if (VALUE_FLAGS.has(a)) i += 1;
+  else if (a.startsWith('-')) {
+    if (!['--all', '--no-fetch', '--no-prs', '--json', '--help', '-h'].includes(a)) die(`unknown flag ${a}\n${USAGE}`);
+  } else positional.push(a);
+}
+const rawPaths = [...positional, ...tail];
+if (!rawPaths.length) die(`give at least one path\n${USAGE}`);
+
+const wsName = value('-w', '--workspace');
+const jsonMode = has('--json');
+const showAll = has('--all');
+const extraRefs = (value('--refs') || '').split(',').map((s) => s.trim()).filter(Boolean);
+
+let dir;
+let base;
+if (wsName) {
+  const cfg = loadConfig();
+  const ws = (cfg.workspaces || []).find((w) => w.name === wsName);
+  if (!ws) die(`no workspace named "${wsName}"\nconfigured workspaces: ${(cfg.workspaces || []).map((w) => w.name).join(', ') || 'none'}`);
+  if (cfg.pr?.enabled === false) die(`pr delivery is disabled (pr.enabled: false) — there is nothing for "${wsName}" to deliver into`);
+  try {
+    dir = value('--dir') ? path.resolve(value('--dir')) : resolveSessionDir(cfg, ws);
+  } catch (err) {
+    die(err.message);
+  }
+  if (!fs.existsSync(dir)) die(`no checkout at ${dir} for workspace "${wsName}"`);
+  base = value('--base') || (await baseFor(cfg, wsName, dir));
+} else {
+  dir = path.resolve(value('--dir') || process.cwd());
+  base = value('--base') || 'main';
+}
+
+// Git answers in realpaths; a fixture under /tmp is a symlink on a Mac. Resolve the root
+// through git itself, never through path.resolve.
+const top = (await ok(git(dir, ['rev-parse', '--show-toplevel'])))?.trim();
+if (!top) die(`${dir} is not a git checkout`);
+const root = fs.realpathSync(top);
+
+const paths = [];
+for (const p of rawPaths) {
+  if (!path.isAbsolute(p)) {
+    paths.push(p);
+    continue;
+  }
+  const rel = path.relative(root, fs.existsSync(p) ? fs.realpathSync(p) : p);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) die(`${p} is outside the checkout at ${root}`);
+  paths.push(rel || '.');
+}
+
+const noFetch = has('--no-fetch');
+let fetched = false;
+if (!noFetch) fetched = (await gitCode(root, ['fetch', 'origin', base, '--quiet'])).code === 0;
+
+const hasOriginBase = (await ok(git(root, ['rev-parse', '--verify', '--quiet', `origin/${base}^{commit}`]))) !== null;
+const hasLocalBase = (await ok(git(root, ['rev-parse', '--verify', '--quiet', `${base}^{commit}`]))) !== null;
+const baseRef = hasOriginBase ? `origin/${base}` : hasLocalBase ? base : null;
+if (!baseRef) die(`no origin/${base} and no local ${base} in ${root} — nothing to measure against`);
+
+let prs = [];
+let prReason = has('--no-prs') ? '--no-prs' : '';
+if (!has('--no-prs')) {
+  const got = await openPrs(root);
+  prs = got.prs;
+  prReason = got.reason;
+}
+
+// A pull-request head with no worktree here is read as origin/<branch>, which is only as
+// fresh as the last fetch of it. One fetch for all of them.
+let prsFetched = null;
+if (!noFetch && prs.length) {
+  const worktrees = (await ok(git(root, ['worktree', 'list', '--porcelain']))) || '';
+  const local = new Set([...worktrees.matchAll(/^branch refs\/heads\/(.+)$/gm)].map((m) => m[1]));
+  const heads = [...new Set(prs.map((p) => p.branch).filter((b) => b && !local.has(b)))];
+  if (heads.length) {
+    prsFetched = (await gitCode(root, ['fetch', 'origin', '--quiet', ...heads.map((b) => `+refs/heads/${b}:refs/remotes/origin/${b}`)])).code === 0;
+  }
+}
+
+const result = await newestFor(root, baseRef, paths, { extraRefs, prs });
+const short = (sha) => sha.slice(0, 8);
+const exit = result.verdict.kind === 'base' ? 0 : 1;
+
+if (jsonMode) {
+  console.log(
+    JSON.stringify({
+      workspace: wsName || null,
+      dir: root,
+      base,
+      baseRef: result.baseRef,
+      baseSha: result.baseSha,
+      paths,
+      fetched,
+      prsFetched,
+      prReason,
+      rows: showAll ? result.all : result.rows,
+      hidden: result.hidden,
+      verdict: result.verdict,
+      uncommitted: result.uncommitted,
+      skipped: result.skipped,
+    })
+  );
+  // Not process.exit(): a long JSON object on a pipe is flushed asynchronously and an
+  // early exit truncates it, which is the one thing --json must never do.
+  process.exitCode = exit;
+} else {
+  const notes = [];
+  if (!noFetch && !fetched) notes.push(`fetch of ${base} failed — offline?`);
+  if (prsFetched === false) notes.push('fetch of pull-request heads failed — their rows are as fresh as the last fetch');
+  if (prReason) notes.push(`open pull requests not consulted: ${prReason}`);
+  console.log(`[b7e-newest] ${result.baseRef} (${short(result.baseSha)}) — ${paths.join(' ')}${notes.length ? `  (${notes.join('; ')})` : ''}`);
+
+  const shown = showAll ? result.all : result.rows;
+  for (const r of shown) {
+    const where = [
+      r.worktree ? `worktree${r.worktree.locked ? ' (locked)' : ''}${r.worktree.onDisk ? '' : ' (gone from disk)'}` : null,
+      r.pr ? `PR #${r.pr.number}${r.pr.draft ? ' draft' : ''}` : null,
+    ].filter(Boolean);
+    console.log(`\n  ${r.name} (${short(r.sha)}) ${r.state} — ${r.ahead} ahead, ${r.behind} behind${where.length ? ` · ${where.join(' · ')}` : ''}`);
+    for (const [p, s] of Object.entries(r.diffstat)) {
+      if (s.files) console.log(`      ${p}  ${s.files} file${s.files === 1 ? '' : 's'} +${s.insertions} -${s.deletions}`);
+    }
+    for (const c of r.commits) console.log(`      ${c.sha} ${c.date.slice(0, 10)} ${c.subject}`);
+    if (r.commitsTotal > r.commits.length) console.log(`      … and ${r.commitsTotal - r.commits.length} more on these paths`);
+    if (r.uncommitted) console.log(`      uncommitted: ${r.uncommitted} file${r.uncommitted === 1 ? '' : 's'} on these paths (not counted in the verdict)`);
+    if (r.commitsTotal) {
+      console.log(`      outside the paths: ${r.outside.length} · dropped if its tree is taken wholesale: ${r.baseSide.length} · changed on both sides: ${r.overlap.length}`);
+      for (const f of r.outside.slice(0, MAX_FILES)) console.log(`        + ${f}`);
+      if (r.outside.length > MAX_FILES) console.log(`        … and ${r.outside.length - MAX_FILES} more`);
+      for (const f of r.overlap.slice(0, MAX_FILES)) console.log(`        ! ${f}`);
+    }
+  }
+  const hiddenNote = [
+    !showAll && result.hidden.behind ? `${result.hidden.behind} behind the base on these paths` : null,
+    !showAll && result.hidden.landed ? `${result.hidden.landed} already landed` : null,
+  ].filter(Boolean);
+  if (hiddenNote.length) console.log(`\n  not listed (--all): ${hiddenNote.join(', ')}`);
+  for (const s of result.skipped) console.log(`  skipped ${s.ref}: ${s.reason}`);
+
+  console.log(`\n[b7e-newest] VERDICT: ${result.verdict.message}`);
+  if (result.uncommitted.length) {
+    console.log(`[b7e-newest] uncommitted edits on these paths in: ${result.uncommitted.map((u) => `${u.name} (${u.files})`).join(', ')}`);
+  }
+  process.exitCode = exit;
+}

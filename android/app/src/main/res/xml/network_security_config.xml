@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The server is HTTPS on its MagicDNS name — `<host>.<tailnet>.ts.net`, with a
+  certificate from `tailscale cert`. So cleartext is off, and the platform is the
+  thing that enforces it: a request to an http:// URL fails at the socket with
+  `UnknownServiceException`, before any of this app's own code gets a say.
+
+  The exceptions are loopback and nothing else. `10.0.2.2` is how an emulator reaches
+  the Mac it is running on; `127.0.0.1` and `localhost` are the same hop by other
+  names. There is no wire there to eavesdrop on and no certificate to be had for it,
+  and it is the one path development cannot do without.
+
+  What this file still cannot express is a *range*: it matches hostnames by DNS
+  suffix, right to left, so `<domain includeSubdomains="true">100.96</domain>` would
+  match `foo.100.96` and emphatically not `100.96.0.42`. That is why Tailscale's
+  100.64.0.0/10 was never restricted here and could not be. It no longer needs to be
+  — cleartext to it is simply refused now, by the line below.
+
+  `Address.kt` is the other half, and the halves are not interchangeable. This file
+  decides what the socket may carry; `Address` decides where the *token* may go, which
+  is a stricter question and one that has to be answered before the first request.
+  Its LOOPBACK set and the domains here are the same three names, and
+  `test/pairhost.mjs` fails the build if they ever stop being.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">localhost</domain>
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">10.0.2.2</domain>
+    </domain-config>
+</network-security-config>

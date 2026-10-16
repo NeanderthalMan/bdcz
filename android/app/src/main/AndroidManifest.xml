@@ -1,0 +1,151 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!--
+      specialUse, not dataSync. A dataSync foreground service is capped at 6 hours a
+      day on Android 15, which would silently stop the watcher some time each evening.
+      specialUse has no timeout; it needs a Play Store justification, which a
+      sideloaded personal build never has to give.
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!--
+      Replacing itself with the APK the Mac just rebuilt. There is no Play track here:
+      a deploy that touches android/ publishes to public/beadcause.apk and the phone
+      picks it up over the same tailnet that carries the questions (see Updater).
+
+      This is a *request* permission, not a grant — Android still requires the
+      "install unknown apps" toggle for this app, which is a one-off in Settings, and
+      Updater checks `canRequestPackageInstalls` and opens that screen rather than
+      failing inside a coroutine where nobody would see it.
+    -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <!--
+      Dictating an answer. Asked for at the first tap on the mic rather than at
+      startup, because a pairing screen that opens by asking for the microphone reads
+      as an app with an agenda — and everything else here works without it.
+    -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!--
+      /sounds' haptic row (bc-ka5y.15.18) — feeling the Decisions channel's own buzz
+      beside a single tick, both fired by the activity rather than by a channel. A
+      normal permission, granted at install with no runtime prompt.
+    -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
+
+    <!--
+      Android 11 hides other packages from this one unless they are declared here, and
+      `SpeechRecognizer.isRecognitionAvailable` works by *looking for* a package that
+      serves this intent. Without this block it answers false on every device, the
+      bridge tells the page there is no dictation, and the mic never appears — with
+      nothing anywhere saying why. It is a visibility declaration, not a permission:
+      it grants the ability to see that a recogniser exists, nothing more.
+    -->
+    <queries>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+    </queries>
+
+    <application
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.Beadcause"
+        android:networkSecurityConfig="@xml/network_security_config">
+
+        <!--
+          configChanges is what makes rotating the phone survivable. Without it a
+          rotation destroys and recreates the activity, which reloads the WebView:
+          scroll position gone, open card closed, and a half-typed answer only
+          rescued by the draft in localStorage. Handling it ourselves keeps the
+          same WebView and simply re-lays it out — which is also what lets the
+          landscape rules in style.css be worth having.
+        -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".PairActivity"
+            android:exported="false"
+            android:label="@string/pair_title" />
+
+        <!-- The reader tab. A doc opens on top of the list so your place is kept.
+             Same rotation reasoning as above: rotating a doc to read a wide table is
+             the whole point, and a reload would throw away where you had read to. -->
+        <activity
+            android:name=".DocActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden"
+            android:label="@string/doc_title" />
+
+        <activity
+            android:name=".ShareActivity"
+            android:exported="true"
+            android:label="@string/share_title"
+            android:theme="@style/Theme.Beadcause.Dialog"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".WatchService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Holds one long-poll to a private Tailscale host so decision requests arrive as notifications" />
+        </service>
+
+        <receiver
+            android:name=".ActionReceiver"
+            android:exported="false" />
+
+        <!--
+          How PackageInstaller answers, and how the app comes back afterwards. Not
+          exported, and it is reached by an explicit intent with `setPackage` on it: the
+          PendingIntent behind it has to be MUTABLE so the platform can put the status on
+          it, and an unexported explicit component is what makes that safe.
+        -->
+        <receiver
+            android:name=".UpdateReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="n12n.beadcause.INSTALL_STATUS" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

@@ -1,0 +1,192 @@
+#!/usr/bin/env node
+/**
+ * A named section of a document, with its line span, instead of grep-then-guess-a-range —
+ * `lib/section.js` does the parsing and matching; this is the argv shell.
+ *
+ * `bc-dgx7.108` names seven sessions that each spent four to eight calls locating one
+ * section of a governing document by hand — a heading found by `grep`, a range guessed by
+ * `sed -n`/`awk`, no two the same dialect, and one of them (`lm-b5d.33`) doing the same
+ * thing to a Python function definition rather than a Markdown heading. This is the one
+ * call that replaces all of it: name a document and a heading or a symbol, get back its
+ * exact line span and its body, verbatim.
+ *
+ *   b7e-section <path> <heading-or-name>       the section whose heading/name matches
+ *   b7e-section <path> --toc                   every heading: depth, span, line count, text
+ *   b7e-section <path> <name> --at <ref>       the file as it was at <ref>, not the working tree
+ *   b7e-section <path> <name> --json           machine-readable
+ *   b7e-section --dir <root> <path> <name>     <path> resolved under another tree, not cwd
+ *
+ * Matching is exact (the whole heading, case-insensitive) first, substring second — see
+ * `lib/section.js`'s header for why, and for the two heading flavours (Markdown ATX or
+ * bolded label lines; `def`/`function`/`class` levelled by indentation everywhere else).
+ *
+ * Exit codes: `0` a single section matched (or `--toc` found at least one heading). `1` a
+ * real, non-error answer that is not a section — no heading/name matches, or more than one
+ * does at the tier that found anything. `2` bad usage. `3` the file could not be read: a bad
+ * path, or (with `--at`) a ref that does not resolve or is not inside a git repository.
+ *
+ * @grant read
+ */
+import fs from 'node:fs';
+import path from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { analyzeDocument, describeSection, matchHeadings, nearestHeadings, tableOfContents } from '../lib/section.js';
+
+const argv = process.argv.slice(2);
+const has = (f) => argv.includes(f);
+const value = (f) => {
+  const at = argv.indexOf(f);
+  return at === -1 ? null : (argv[at + 1] ?? null);
+};
+
+const USAGE = [
+  'b7e-section <path> <heading-or-name>       the section whose heading/name matches',
+  'b7e-section <path> --toc                   every heading: depth, span, line count, text',
+  'b7e-section <path> <name> --at <ref>       the file as it was at <ref>, not the working tree',
+  'b7e-section <path> <name> --json           machine-readable',
+  'b7e-section --dir <root> <path> <name>     <path> resolved under another tree, not cwd',
+].join('\n');
+
+if (has('--help') || has('-h')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+
+const DIR = value('--dir');
+const AT = value('--at');
+const TOC = has('--toc');
+const JSON_MODE = has('--json');
+
+const FLAG_VALUES = new Set(['--dir', '--at']);
+const FLAG_BARE = new Set(['--toc', '--json', '--help', '-h']);
+const positional = [];
+for (let i = 0; i < argv.length; i += 1) {
+  const a = argv[i];
+  if (FLAG_VALUES.has(a)) {
+    i += 1;
+    continue;
+  }
+  if (FLAG_BARE.has(a)) continue;
+  positional.push(a);
+}
+
+const filePath = positional[0] ?? null;
+const query = positional[1] ?? null;
+
+if (!filePath) {
+  console.error('b7e-section: a <path> is required\n\n' + USAGE);
+  process.exit(2);
+}
+if (!TOC && !query) {
+  console.error('b7e-section: a <heading-or-name> is required unless --toc is given\n\n' + USAGE);
+  process.exit(2);
+}
+if (TOC && query) {
+  console.error('b7e-section: --toc reports every heading — it does not take a <heading-or-name> too\n\n' + USAGE);
+  process.exit(2);
+}
+
+const baseDirRaw = DIR ? path.resolve(DIR) : process.cwd();
+// realpath'd because `git rev-parse --show-toplevel` always answers in real paths — on a
+// Mac, `/tmp` is itself a symlink to `/private/tmp`, so comparing an un-realpath'd baseDir
+// against git's answer computes a relative path through a phantom `../../..` chain.
+const baseDir = (() => {
+  try {
+    return fs.realpathSync(baseDirRaw);
+  } catch {
+    return baseDirRaw;
+  }
+})();
+
+function resolveRepoRoot(cwd) {
+  try {
+    return execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  } catch {
+    return null;
+  }
+}
+
+let text;
+if (AT) {
+  const repoRoot = resolveRepoRoot(baseDir);
+  if (!repoRoot) {
+    console.error(`b7e-section: --at needs a git repository — ${baseDir} is not inside one`);
+    process.exit(3);
+  }
+  const relPath = path.relative(repoRoot, path.resolve(baseDir, filePath));
+  try {
+    text = execFileSync('git', ['show', `${AT}:${relPath}`], { cwd: repoRoot, maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] }).toString('utf8');
+  } catch {
+    console.error(`b7e-section: could not read ${relPath} at ${AT} — no such ref, or the path did not exist there`);
+    process.exit(3);
+  }
+} else {
+  const absPath = path.resolve(baseDir, filePath);
+  try {
+    text = fs.readFileSync(absPath, 'utf8');
+  } catch (err) {
+    console.error(`b7e-section: could not read ${absPath} — ${err.message}`);
+    process.exit(3);
+  }
+}
+
+const analysis = analyzeDocument(text, filePath);
+
+const printSection = (path_, s) => {
+  console.log(`${path_}:${s.startLine}-${s.endLine}  ${s.headingLine.trim()}`);
+  console.log(s.body);
+};
+
+/* --------------------------------------------------------------------------- --toc */
+
+if (TOC) {
+  const sections = tableOfContents(analysis);
+  if (JSON_MODE) {
+    console.log(JSON.stringify(sections.map(({ body, ...rest }) => rest)));
+    process.exitCode = sections.length ? 0 : 1;
+  } else if (!sections.length) {
+    console.log(`no headings found in ${filePath}`);
+    process.exitCode = 1;
+  } else {
+    for (const s of sections) {
+      console.log(`${s.level}  ${s.startLine}-${s.endLine}  (${s.endLine - s.startLine + 1} lines)  ${s.title}`);
+    }
+    process.exitCode = 0;
+  }
+  process.exit(process.exitCode);
+}
+
+/* ---------------------------------------------------------------- <heading-or-name> */
+
+const { tier, headings } = matchHeadings(analysis.headings, query);
+
+if (tier === 'none') {
+  const nearest = nearestHeadings(analysis.headings, query).map((h) => describeSection(analysis, h));
+  if (JSON_MODE) {
+    console.log(JSON.stringify({ error: 'not-found', query, nearest: nearest.map(({ body, ...rest }) => rest) }));
+  } else if (!nearest.length) {
+    console.log(`no headings found in ${filePath} at all`);
+  } else {
+    console.log(`nothing in ${filePath} matches "${query}" — nearest:`);
+    for (const s of nearest) console.log(`  ${filePath}:${s.startLine}-${s.endLine}  ${s.headingLine.trim()}`);
+  }
+  process.exitCode = 1;
+} else if (headings.length > 1) {
+  const sections = headings.map((h) => describeSection(analysis, h));
+  if (JSON_MODE) {
+    console.log(JSON.stringify({ error: 'ambiguous', query, tier, matches: sections.map(({ body, ...rest }) => rest) }));
+  } else {
+    console.log(`"${query}" matches ${sections.length} headings in ${filePath} (${tier}) — say which:`);
+    for (const s of sections) console.log(`  ${filePath}:${s.startLine}-${s.endLine}  ${s.headingLine.trim()}`);
+  }
+  process.exitCode = 1;
+} else {
+  const s = describeSection(analysis, headings[0]);
+  if (JSON_MODE) {
+    console.log(JSON.stringify({ path: filePath, tier, ...s }));
+  } else {
+    printSection(filePath, s);
+  }
+  process.exitCode = 0;
+}
+process.exit(process.exitCode);

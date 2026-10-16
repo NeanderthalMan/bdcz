@@ -1,0 +1,655 @@
+#!/usr/bin/env node
+// FIRST, and it has to stay first — bc-zjab.4. Importing it puts a UTC timestamp on
+// every line this process writes to `~/Library/Logs/beadcause.log`, which is where a
+// backend's console goes: the router spawns it with `stdio: 'inherit'`. A side effect of
+// the import rather than a call below, because lib/resolvers.js prints *while it is
+// being evaluated* and a call below would arrive too late to stamp it. `--url` and
+// `--qr` are excluded inside it — the first is command-substituted in a shell script.
+import '../lib/logstamp.js';
+import { loadConfig, loadState, saveState, reconcileBaseUrl, workspaceRoots, CONFIG_PATH, OBSERVING } from '../lib/config.js';
+import { createApp, startPoller, listen } from '../lib/server.js';
+import { advocatedWorkspaces, workerLimit, globalWorkerCap } from '../lib/advocate.js';
+import { buildStamp } from '../lib/build.js';
+import { beginShutdown, installCrashHandlers } from '../lib/crash.js';
+import { declareOwnDeploy, ownWorkspace } from '../lib/deploy.js';
+import { hotSwapProblem, problemBanner } from '../lib/service.js';
+import { attachTerminalSocket, attachUpgrade, releaseSockets } from '../lib/termsocket.js';
+import { cleartextWarning, closeServer, localBaseUrl, startRenewal } from '../lib/tls.js';
+import { describeTailnet, tailnetState } from '../lib/tailnet.js';
+import { pushCertificate } from '../lib/notify.js';
+import { startSlack, slackStatusLine, slackTokenWarnings } from '../lib/slack.js';
+import { repoStatusLine, repoWarnings } from '../lib/repos.js';
+import { flush } from '../lib/commonrepo.js';
+import { restoreTerminals, shutdownTerminals, startTerminalReaper, terminalsEnabled } from '../lib/terminal.js';
+import { bootAt, resumeAfterReboot } from '../lib/rebootresume.js';
+import { loadRegister, saveRegister, startRegisterPoll } from '../lib/sessionregister.js';
+import { TOP_WINDOW } from '../lib/top.js';
+import { openCommandWindow, openResumedWindow } from '../lib/session.js';
+import { liveSessions } from '../lib/claude.js';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const cfg = loadConfig();
+
+/**
+ * This process may be the one the phone talks to, or the understudy.
+ *
+ * `--port` puts it on an internal loopback port behind bin/router.js, and
+ * `--standby` starts it **without its poller**. That second flag is the whole
+ * safety property: two live pollers would both see a new question and both push
+ * it, so exactly one process is ever active, and the router promotes the new one
+ * only after the old one has stood down. See bin/router.js for the sequence.
+ *
+ * With neither flag this is the plain unsupervised server it always was, on the real
+ * port, polling — which is what `npm run start:bare` gives you.
+ */
+const flagValue = (name) => {
+  const i = process.argv.indexOf(name);
+  return i >= 0 ? process.argv[i + 1] : null;
+};
+const internalPort = Number(flagValue('--port') || 0) || null;
+const startStandby = process.argv.includes('--standby');
+
+const setupUrl = `${cfg.baseUrl}/?t=${cfg.token}`;
+
+/**
+ * The one thing this Mac knows about the link it is handing out that the person taking
+ * it does not: whether the Android app will accept it — bc-affn.
+ *
+ * **On stderr, every time, because stdout here is a value rather than a display.**
+ * `--url` is piped into shell scripts (scripts/install.sh, the QR page, anything that
+ * wants the address), and a warning mixed into that would be a URL nothing can use.
+ * `cleartextWarning` answers null for the https case, so the ordinary run stays silent.
+ */
+const sayIfCleartext = () => {
+  for (const line of cleartextWarning(cfg.baseUrl) || []) console.warn(`[beadcause] ${line}`);
+};
+
+if (process.argv.includes('--url')) {
+  console.log(setupUrl);
+  sayIfCleartext();
+  process.exit(0);
+}
+
+/**
+ * Both of the URLs that have to get from this Mac onto a phone, as codes you can
+ * point a camera at. Typing a tailnet IP, a port and a path on a phone keyboard is
+ * the worst part of every reinstall, and there is a fresh APK after every build.
+ *
+ * The APK code only appears when there is an APK to install — offering a QR for a
+ * 404 wastes the one scan somebody makes while standing there holding the phone.
+ */
+if (process.argv.includes('--qr')) {
+  const qr = (await import('qrcode-terminal')).default;
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+
+  const show = (label, url) =>
+    new Promise((resolve) => {
+      console.log(`\n${label}\n`);
+      qr.generate(url, { small: true }, (art) => {
+        console.log(art);
+        console.log(`  ${url}\n`);
+        resolve();
+      });
+    });
+
+  await show('Pair the app — scan, then Share > Add to Home Screen:', setupUrl);
+
+  const apk = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public', 'beadcause.apk');
+  try {
+    const stat = fs.statSync(apk);
+    const mb = (stat.size / 1024 / 1024).toFixed(0);
+    // Local time, not toISOString(): a build made at 09:04 reported as 12:04 reads
+    // like yesterday's APK, which is exactly the doubt this line exists to remove.
+    const p2 = (n) => String(n).padStart(2, '0');
+    const m = stat.mtime;
+    const built = `${m.getFullYear()}-${p2(m.getMonth() + 1)}-${p2(m.getDate())} ${p2(m.getHours())}:${p2(m.getMinutes())}`;
+    await show(`Install the Android app — ${mb}MB, built ${built}:`, `${cfg.baseUrl}/beadcause.apk`);
+  } catch {
+    console.log('  (no APK published yet — npm run android)\n');
+  }
+  // Last, so it is what is still on screen when somebody walks off with the phone —
+  // and after both codes, because the http one is the address in both of them.
+  sayIfCleartext();
+  process.exit(0);
+}
+
+if (!cfg.workspaces.length) {
+  // The roots by name, because "under ~/beads" was a lie on any install that had been
+  // pointed somewhere else, and the one thing this message has to get right is where to
+  // go and look.
+  console.error(
+    `[beadcause] no beads workspaces found under ${workspaceRoots(cfg).join(', ')} — nothing to serve.`
+  );
+  console.error('[beadcause] add a root to workspaceRoots in ' + CONFIG_PATH + ', or run npm run configure.');
+  process.exit(1);
+}
+
+const app = createApp(cfg);
+
+const startedAt = new Date().toISOString();
+const build = buildStamp();
+let role = startStandby ? 'standby' : 'active';
+
+/**
+ * From here on, a crash in this process is a bead rather than only a log line — bc-p38c.4,
+ * and lib/crash.js is where all of it lives.
+ *
+ * As early as it can be, which is: after `createApp` (that is what makes a `bd` handle
+ * exist) and after the two names `where` reads, and *before* the poller and the Slack
+ * socket, because those are the first things here that can throw. Anything above still
+ * crashes the old way, and that is a trade rather than an omission — a throw during config
+ * load or `createApp` has no tracker to file into, and launchd's KeepAlive turning a boot
+ * failure into a loud restart loop with the reason in the log is exactly the volume that
+ * failure wants (see `assertRoutes`).
+ *
+ * The workspace is **this checkout's own**, not `cfg.workspaces[0]`. A beadcause bug
+ * belongs on the beadcause graph, and the first configured workspace is very often the one
+ * wired to a team's JIRA. Falling back to the first is deliberate too: a daemon whose
+ * checkout matches no configured workspace still has crashes worth recording, and a bead
+ * on the wrong graph beats no bead at all.
+ *
+ * `where` is a function because `role` moves. A standby promoted an hour ago should say
+ * `active` on the bead it files, and a string built here would be quietly wrong for
+ * exactly the crashes that are hardest to reason about afterwards.
+ */
+const ownWs = cfg.workspaces.find((w) => w.name === ownWorkspace(cfg)) || cfg.workspaces[0];
+installCrashHandlers(cfg, {
+  bd: app.bd,
+  workspace: ownWs,
+  bus: app.bus,
+  where: () =>
+    `the beadcause daemon — ${role}, build ${build}, pid ${process.pid}${internalPort ? `, internal :${internalPort}` : ''}`,
+});
+
+let poller = startStandby ? null : startPoller(cfg, app);
+/**
+ * The Slack socket, and why it is tied to exactly the same switch as the poller.
+ *
+ * Slack's interactivity cannot reach a tailnet name, so the buttons on a posted question
+ * arrive over an outbound WebSocket this process opens (lib/slack.js). Slack hands an
+ * interaction to one connection, so two backends holding one would not double-answer —
+ * but a standby holding a connection is a standby doing work, and every guarantee the
+ * swap makes rests on it doing none. So it starts when the poller starts, stops when the
+ * poller stops, and null is the ordinary state: Slack off, or no app token.
+ */
+let slack = startStandby ? null : startSlack(cfg);
+// What draining waits on. A long poll parks for up to 55 seconds, and killing the
+// process out from under one is the difference between a seamless swap and the
+// phone deciding it is offline.
+let inflight = 0;
+
+/**
+ * The Claude Code windows that were on this Mac's *screen* when it went down — bc-5to5r.
+ * lib/rebootresume.js is the whole argument, including why this one is allowed to open
+ * windows unasked where `restoreTerminals` below is not.
+ *
+ * **Active only, and that is the safety property.** `--standby` exists because two live
+ * pollers would both act on the same fact; a standby that also reopened every window would
+ * double every one of them the moment a swap promoted it. The same reasoning as the reaper.
+ *
+ * **And so it runs at promotion, not only at an active start — bc-5to5r.1.** Under the
+ * router every backend starts as a standby and is promoted through `/internal/activate`,
+ * so a guard of `if (!startStandby)` alone meant this never ran in production at all: two
+ * weeks of boots, zero `[reboot]` lines in the log. Once per *process* here (`resumed`),
+ * once per *boot* across processes by the stamp inside, so the hot swap at 3pm that
+ * promotes a fresh backend finds the boot already handled and opens nothing.
+ *
+ * Fire-and-forget on purpose: neither the startup path nor the activate reply may wait on
+ * iTerm. A failure inside is already logged per window, and a failure of the whole thing
+ * is one window nobody sees rather than a daemon that did not come up.
+ *
+ * After a real boot, one more window — bc-5to5r.3, then bc-5to5r.7: `beadcause-top`, the
+ * live table of every session and what this pass did with each, redrawn every few seconds
+ * until it is quit. Only after a boot (the pass says `fresh`), never after a hot swap. It
+ * used to be `b7e-sessions`, one frame, and only when the pass had something to report;
+ * a monitor is wanted after every boot, including the one where nothing was open, because
+ * the windows Adam opens next appear in it. It goes in **its own iTerm window**
+ * (`TOP_WINDOW`), not a tab of the shared one: the conversations go back into their
+ * workspaces' windows (bc-5to5r.6) and this one stays separate, which is the point of it.
+ */
+let resumed = false;
+const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
+const bringBackAfterBoot = () => {
+  if (resumed) return;
+  resumed = true;
+  resumeAfterReboot(cfg, {
+    loadState,
+    saveState,
+    liveSessions,
+    openWindow: openResumedWindow,
+    loadRegister,
+    saveRegister,
+  })
+    .then((out) => {
+      if (!out?.fresh) return null;
+      return openCommandWindow(cfg, {
+        command: `${shq(process.execPath)} ${shq(path.join(ROOT, 'bin', 'beadcause-top'))}`,
+        title: 'beadcause-top',
+        workspace: TOP_WINDOW,
+      }).then(
+        () => console.log('[reboot] opened the session status window (beadcause-top)'),
+        (err) => console.error(`[reboot] no status window — ${err.message.split('\n')[0]}`)
+      );
+    })
+    .catch((err) => console.error(`[reboot] nothing resumed — ${err.message.split('\n')[0]}`));
+};
+
+/**
+ * The register of open windows the reboot pass reads — bc-5to5r.2. Polled every minute
+ * by the active backend only, for the reason the reaper is: a standby reading the same
+ * records and writing the same file would race the active one over which windows exist.
+ * Started with the poller, stopped with it.
+ */
+let registerPoll = null;
+/**
+ * `BEADCAUSE_REGISTER_POLL_MS` — poll faster. Test-only, like `BEADCAUSE_START_DELAY_MS`
+ * below and for the same shape of reason: a suite that drives a real backend through
+ * promotion and stand-down has to see the register written and then *stop* being written,
+ * and sixty seconds is not a wait a test can take twice.
+ */
+const registerPollMs = Number(process.env.BEADCAUSE_REGISTER_POLL_MS) || undefined;
+const startSessionRegister = () =>
+  cfg.resumeAfterReboot === false
+    ? null
+    : startRegisterPoll(cfg, { liveSessions, loadState, booted: () => bootAt(), every: registerPollMs });
+
+/**
+ * The control plane, wrapped around the app rather than added to lib/server.js.
+ *
+ * Keeping it here means the swap machinery touches no file another session is
+ * likely to be editing, and these calls can never collide with a real route: the
+ * paths are under `/internal/`, refused off loopback, and still need the token.
+ */
+const control = (req, res) => {
+  const url = new URL(req.url, 'http://localhost');
+  const addr = req.socket.remoteAddress;
+  const local = addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
+  const supplied = req.headers['x-beadcause-token'] || url.searchParams.get('t');
+  if (!local || supplied !== cfg.token) {
+    res.writeHead(403, { 'content-type': 'application/json' });
+    return res.end('{"error":"internal"}');
+  }
+
+  // Any authenticated control call is proof a router is still watching. See the
+  // orphan guard below for why that matters.
+  lastContact = Date.now();
+
+  const reply = (obj) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(obj));
+  };
+
+  switch (url.pathname) {
+    case '/internal/state':
+      // `inflight - 1` excludes this very request, which is counted like any other.
+      // `reaping` is reported because the invariant it stands for — exactly one
+      // process sweeping terminals — has a 30-minute idle window before it can be
+      // observed going wrong, which is far too long for any test to wait out.
+      return reply({ role, build, startedAt, pid: process.pid, inflight: inflight - 1, reaping: reaper !== null });
+    case '/internal/activate':
+      if (!poller) poller = startPoller(cfg, app);
+      // Restored again, having already been restored at startup. A standby can sit
+      // idle for a long time before it is promoted, and everything the outgoing
+      // backend did to a terminal in that window happened after this process read
+      // the directory — so promoting without a re-read serves a list from before
+      // the swap. Idempotent: restoreTerminals() skips any id already in memory.
+      //
+      // What that skip also means, and the reason this is not a full refresh: a
+      // terminal this process restored as resumable and which has since *ended*
+      // keeps its stale in-memory state, because the id is already known. Fixing
+      // that needs reconciliation rather than a second restore.
+      if (terminalsEnabled(cfg)) restoreTerminals(cfg);
+      if (!reaper && terminalsEnabled(cfg)) reaper = startTerminalReaper(cfg);
+      if (!slack) slack = startSlack(cfg);
+      // The windows a reboot killed, and the register that remembers them — see
+      // `bringBackAfterBoot` above for why this has to happen here and not only at an
+      // active start.
+      bringBackAfterBoot();
+      if (!registerPoll) registerPoll = startSessionRegister();
+      if (role !== 'active') console.log('[beadcause] promoted to active — polling');
+      role = 'active';
+      return reply({ ok: true, role, reaping: reaper !== null });
+    case '/internal/standby':
+      if (poller) clearInterval(poller);
+      poller = null;
+      if (reaper) clearInterval(reaper);
+      reaper = null;
+      if (registerPoll) clearInterval(registerPoll);
+      registerPoll = null;
+      slack?.stop();
+      slack = null;
+      if (role !== 'standby') console.log('[beadcause] stood down — poller stopped');
+      role = 'standby';
+      return reply({ ok: true, role, reaping: reaper !== null });
+    case '/internal/release':
+      // The router is about to drain and kill this process, and an attached terminal
+      // socket is the one thing behind its proxy that would never end on its own. So
+      // it is ended here, with a close frame the phone can act on — see
+      // `releaseSockets`, and `release` in bin/router.js for why the alternative
+      // (waiting the socket out) is worse than closing it.
+      //
+      // Separate from `/internal/standby` on purpose: standing down happens *before*
+      // the new backend is promoted, so a phone that reconnected on the strength of it
+      // would race back to this same doomed process. Retirement is after.
+      return reply({ ok: true, closed: releaseSockets(wss) });
+    default:
+      res.writeHead(404, { 'content-type': 'application/json' });
+      return res.end('{"error":"no such control"}');
+  }
+};
+
+const handler = (req, res) => {
+  inflight++;
+  res.on('close', () => inflight--);
+  if (req.url.startsWith('/internal/')) return control(req, res);
+  return app.handler(req, res);
+};
+
+/**
+ * `BEADCAUSE_START_DELAY_MS` — wait this long before binding. Test-only, and the mirror
+ * image of `healthTimeoutMs` in bin/router.js, which exists "for one reason that is not
+ * tuning — a test needs a window it can guarantee will expire".
+ *
+ * It turns out the window was only half of that guarantee. `test/outagepush.mjs` set the
+ * window to 250ms on the reasoning that nothing starts in a quarter of a second, and on
+ * this laptop, with several real beads workspaces to open, nothing does. A CI runner with
+ * one empty workspace came up well inside it (bc-rcrt), the router never saw an outage,
+ * and a suite about what the phone is told when nothing is being served asserted nothing
+ * at all. A missed window needs a slow *start* as well as a short window, and only one of
+ * those was under the test's control.
+ *
+ * Named on the environment rather than in config.json because it is the backend the
+ * router spawns — it inherits this, and a knob in the config file would be one more line
+ * for a person reading their own settings to wonder about.
+ */
+const startDelayMs = Number(process.env.BEADCAUSE_START_DELAY_MS) || 0;
+if (startDelayMs > 0) {
+  console.error(`[beadcause] holding the bind for ${startDelayMs}ms — BEADCAUSE_START_DELAY_MS`);
+  await new Promise((resolve) => setTimeout(resolve, startDelayMs));
+}
+
+/**
+ * What to do when the tailnet address turns up after we gave up on binding it.
+ *
+ * Only `npm run start:bare` ever reaches this: behind the router this process is handed
+ * `host: '127.0.0.1'` and has no tailnet address to fail on, and the router runs its own
+ * copy of exactly this dance. Binding the socket is `listen()`'s half; the half that is
+ * ours is that the socket has to be *joined up* — an `upgrade` handler for the terminal,
+ * and a renewal loop that has the certificate on it — and neither happens by itself.
+ *
+ * Which means the watcher can beat us to it. `listen()` runs first and the arrival can
+ * land on the next 5s tick, while everything between here and `armLateBind` below —
+ * `attachTerminalSocket`, which dynamically imports `ws` — is ordinary startup that can
+ * outlast a tick on a loaded Mac. So an early arrival is *remembered* rather than
+ * dropped, and `armLateBind` runs it if it has already happened. Getting this wrong
+ * would be the original bug with extra steps: an address that came back, a daemon that
+ * noticed, and still nothing serving the phone. bin/router.js says the same thing about
+ * its own copy, and it is the same trap.
+ */
+let armedLateBind = null;
+let lateArrived = null;
+const onLateBind = (late) => {
+  if (armedLateBind) return armedLateBind(late);
+  lateArrived = [...(lateArrived || []), ...late];
+};
+const armLateBind = (fn) => {
+  armedLateBind = fn;
+  if (!lateArrived) return;
+  const late = lateArrived;
+  lateArrived = null;
+  fn(late);
+};
+
+const servers = listen(
+  // Behind the router this binds loopback only. The tailnet reaches the router; an
+  // internal backend that also bound the tailnet IP would be answerable directly,
+  // skipping every cutover guarantee the router exists to provide.
+  internalPort ? { ...cfg, port: internalPort, host: '127.0.0.1' } : cfg,
+  handler,
+  { onLateBind }
+);
+
+// `listen()` is the one place a certificate can *appear* — it is what calls
+// `tailscale cert` — so the URL is asked again now that it has. Only when we own the
+// real port: a backend behind the router binds loopback, never fetches anything, and
+// must not be the process that decides what the phone is told. Persisted, because the
+// next `npm run qr` is a different process and reads this off disk.
+if (!internalPort) reconcileBaseUrl(cfg, { persist: true });
+
+// The in-app terminal rides the same servers, on the HTTP upgrade path. Awaited
+// because `ws` is imported dynamically — an install that hasn't run `npm install`
+// since this landed loses the terminal and keeps everything else.
+//
+// The handle is kept because retirement needs it: `/internal/release` closes these
+// sockets when the router is replacing this process. Null when terminals are off or
+// `ws` is missing, which `releaseSockets` treats as nothing to release.
+const wss = await attachTerminalSocket(cfg, servers);
+/**
+ * Keep the tailnet certificate alive under `npm run start:bare` — and get one, if
+ * `listen()` came up without.
+ *
+ * A no-op in the installed configuration and by design: behind the router this process
+ * binds loopback only, so nothing here terminates TLS and `startRenewal` returns null.
+ * The router runs its own — it is the one holding the certificate on the port.
+ *
+ * `onAcquired` is the same `reconcileBaseUrl` as above, made again at the moment the
+ * socket stops being plain http, under the same condition: only the process that owns
+ * the real port may decide what the phone is told.
+ */
+const renewalOptions = {
+  notify: (state) => pushCertificate(cfg, state),
+  onAcquired: () => {
+    if (!internalPort) reconcileBaseUrl(cfg, { persist: true });
+  },
+};
+let certRenewal = startRenewal(cfg, servers, renewalOptions);
+
+/**
+ * And the other half of a deferred tailnet bind: join the late socket up to everything
+ * a socket bound at startup got, so a daemon that came up before Tailscale ends in the
+ * same place as one that came up after it — with no `launchctl kickstart` in between.
+ *
+ * Three things, and each of them is load-bearing on its own.
+ *
+ * **The terminal**, through `attachUpgrade` rather than a second `attachTerminalSocket`.
+ * That call builds a whole new `WebSocketServer`, and `wss` above is the only handle
+ * `/internal/release` has — so a phone attached over the late address would be invisible
+ * to `releaseSockets` and get 1006 mid-keystroke on the next swap instead of a close
+ * frame it can act on. One socket server, one client set.
+ *
+ * **The renewal loop**, rebuilt rather than left alone, because `startRenewal` filters
+ * the array it is handed *once*, at call time, and returns null when none of them are
+ * TLS. A daemon that came up loopback-only therefore has no renewal at all, and the late
+ * bind is the first moment there is anything to renew. Clearing the old timer first is
+ * what keeps that idempotent when Tailscale goes down and comes back more than once.
+ *
+ * **The URL the phone is handed**, which names the address until there is a certificate
+ * — so it moves when the address does, under the same guard as everywhere else here:
+ * only the process that owns the real port may decide what the phone is told.
+ */
+armLateBind((late) => {
+  attachUpgrade(cfg, wss, late);
+  if (certRenewal) clearInterval(certRenewal);
+  certRenewal = startRenewal(cfg, servers, renewalOptions);
+  if (!internalPort) reconcileBaseUrl(cfg, { persist: true });
+});
+// Terminals that were running when the last daemon went away. Nothing is spawned
+// here — they come back as offers to resume, and the first attach is what starts a
+// process. Before the reaper, so a restore is subject to the same idle clock.
+if (terminalsEnabled(cfg)) restoreTerminals(cfg);
+// And the Claude Code windows that were on this Mac's *screen* when it went down —
+// bc-5to5r. `bringBackAfterBoot` above is the argument; a standby runs it at promotion
+// instead, which under the router is the only way it ever runs (bc-5to5r.1).
+if (!startStandby) {
+  bringBackAfterBoot();
+  registerPoll = startSessionRegister();
+}
+/**
+ * The reaper is the active backend's alone — a standby must never run it.
+ *
+ * It is not a timer that merely thinks: `reapTerminals` calls `closeTerminal` on any
+ * terminal past the idle window with no clients attached, and `closeTerminal` on a
+ * `resumable` one writes `status: 'exited'` to the record on disk. A standby has
+ * restored those same records and sees zero clients on every one of them forever,
+ * because the router sends it no traffic — so left running, its reaper would mark
+ * the *active* process's live terminals as ended, in a file they both write.
+ *
+ * Started on promotion and stopped on stand-down, so exactly one process is ever
+ * sweeping, the same way exactly one is ever polling.
+ */
+let reaper = !startStandby && terminalsEnabled(cfg) ? startTerminalReaper(cfg) : null;
+
+/**
+ * The orphan guard: an active backend nobody is steering shuts itself down.
+ *
+ * If the router is SIGKILLed — crash, `kill -9`, a botched launchctl bootout — its
+ * children are not killed with it. A stranded backend still holds a poller, and the
+ * replacement router starts a fresh one, which is exactly the double-notify this
+ * design exists to prevent. The router touches `/internal/state` every few seconds,
+ * so silence for a minute means there is no longer anyone to serve.
+ *
+ * Only armed behind a router: an unsupervised server has no control plane and must
+ * stay up forever.
+ */
+const ORPHAN_MS = 60000;
+let lastContact = Date.now();
+if (internalPort) {
+  setInterval(() => {
+    if (Date.now() - lastContact < ORPHAN_MS) return;
+    console.error(`[beadcause] no router contact in ${ORPHAN_MS / 1000}s — exiting rather than polling unsupervised`);
+    // A deliberate exit, so nothing a teardown knocks over is a bug worth filing — the
+    // same reason `shutdown` says it. Not a duplicate of that one: this path bypasses it.
+    beginShutdown();
+    process.exit(0);
+  }, 5000).unref();
+}
+
+console.log(`[beadcause] config      ${CONFIG_PATH}`);
+console.log(`[beadcause] workspaces  ${cfg.workspaces.map((w) => w.name).join(', ')}`);
+// And, for a workspace that is more than one repo, which checkouts it may be worked in
+// — printed even when nothing is configured, because the line that says "every
+// workspace is one repo" is the one that tells you the block exists at all.
+console.log(`[beadcause] repos       ${repoStatusLine(cfg)}`);
+// The three ways an approved list goes wrong on disk — a repo that is not cloned, one
+// that declares no service token, and two that declare the same one. All of them are
+// silent otherwise: they present as a bead resolving to nothing, at whatever hour the
+// advocate got to it. `console.warn` so they are not read as part of the tidy block.
+for (const w of repoWarnings(cfg)) console.warn(`[repos] ${w}`);
+// First thing in the log, and unmissable, because the mistake it guards against is
+// believing you are in it when you are not — and the evidence of *that* arrives
+// thirty seconds later as two Claude windows you did not ask for.
+if (OBSERVING) {
+  console.log('[beadcause] ─────────────────────────────────────────────────────');
+  console.log('[beadcause] OBSERVING — this instance watches and never acts.');
+  console.log('[beadcause]   no sessions · no proposals · no worktree sweeps');
+  console.log('[beadcause]   no session logs · no reply agents · no ntfy push');
+  console.log('[beadcause]   the terminal, the chat session and answering still work');
+  console.log('[beadcause] ─────────────────────────────────────────────────────');
+}
+// Say it at startup, in the log launchd keeps: an advocate opens Claude sessions
+// on this Mac without being asked, so which repos have one — and how many windows
+// each may open — is the first thing anyone reading this log wants to know.
+const advocated = advocatedWorkspaces(cfg).map((w) => `${w.name}\u00d7${workerLimit(cfg, w.name).limit}`);
+console.log(
+  `[beadcause] advocates   ${
+    advocated.length
+      ? `${advocated.join(', ')} ${OBSERVING ? '(observing — they survey, they open nothing)' : `(max ${globalWorkerCap(cfg)} sessions in total)`}`
+      : '(none — advocates.workspaces is empty)'
+  }`
+);
+console.log(`[beadcause] ntfy topic  ${cfg.ntfy.enabled ? cfg.ntfy.topic : '(disabled)'}`);
+// The other delivery surface, said in the same block and for the same reason: a
+// half-configured one — enabled with a bot token and no app token — posts questions
+// whose buttons do nothing, and there is no way to find that out by looking at Slack.
+console.log(`[beadcause] slack       ${slackStatusLine(cfg)}`);
+// And the one thing about those tokens the `.key` naming cannot promise: that the file
+// is not readable by every account on this Mac. `console.warn` so it is not read as part
+// of the tidy startup block above it.
+for (const w of slackTokenWarnings(cfg)) console.warn(`[slack] ${w}`);
+// Whether the address in that URL is on this Mac at all — said in the startup block
+// and in `--status`, next to the URL it decides the fate of, because it is the one fact
+// neither of them used to carry. A phone that cannot load the app is indistinguishable,
+// from up here, from a daemon that is perfectly healthy; this is the line that tells
+// them apart. `console.warn` when it is a problem, so it does not read as part of the
+// tidy block. bc-b4fs, and lib/tailnet.js says what the states mean.
+const tailnet = internalPort ? null : tailnetState(cfg.host);
+if (!tailnet) console.log('[beadcause] tailnet     behind the router — it holds the tailnet address, this process binds loopback');
+else (tailnet.ok ? console.log : console.warn)(`[beadcause] tailnet     ${describeTailnet(tailnet)}`);
+console.log(`[beadcause] phone URL   ${cfg.baseUrl}/?t=${cfg.token}`);
+// And the one to click from this Mac — bc-c7nj3. The line above is labelled for the
+// phone and is right to be: it carries the token, and the tailnet name is the only
+// address that reaches here from somewhere else. But it was also the only URL in this
+// block, so the address a person sitting at this keyboard should open was the address
+// that fails for them — MagicDNS does not resolve with Tailscale stopped, which is the
+// state a laptop spends plenty of time in. No token on it: a browser on this Mac either
+// has one in localStorage already or is one click from the line above.
+console.log(`[beadcause] local URL   ${localBaseUrl(cfg)}`);
+console.log(`[beadcause] build       ${build} (${role}${internalPort ? `, internal :${internalPort}` : ', standalone'})`);
+
+/**
+ * Say it, at startup, when launchd is running this file instead of the router.
+ *
+ * Only when launchd started us — `process.ppid === 1`, which is how a LaunchAgent's
+ * child arrives and how nothing a person types does. `npm run start:bare` is a
+ * deliberate choice and gets no lecture; a router-spawned backend has `--port` and is
+ * excluded before we look at anything.
+ *
+ * Last in the startup block on purpose. This is the line that was missing for three
+ * days: every other line above was correct, the README described a hot-swap, and the
+ * process printing them was the plain server launchd had been restarting all along.
+ */
+if (!internalPort && process.ppid === 1) {
+  const problem = hotSwapProblem({ loadedProgram: process.argv[1] });
+  if (problem) for (const line of problemBanner(problem)) console.error(line);
+}
+
+/**
+ * And, once ever, fill in the one deploy this daemon does not have to be told: its own.
+ *
+ * Here rather than in `loadConfig()`, where the other one-time config move lives, for
+ * two reasons. It is the daemon that has a deploy — `beadcause-ask`, `--url` and the
+ * rest are short-lived CLIs with no business rewriting the config, and the two that
+ * print something have already exited above. And it depends on lib/service.js reading
+ * a plist off disk, which is a startup question, not a per-process one.
+ *
+ * Every guard that matters is in `declareOwnDeploy`, including the one that makes this
+ * silent forever after the first write. See lib/deploy.js.
+ */
+if (!OBSERVING) {
+  const declared = declareOwnDeploy(cfg);
+  if (declared) console.log(`[beadcause] ${declared}`);
+}
+
+const shutdown = () => {
+  // Before anything is closed, and this is the whole of one of bc-p38c.4's edge cases:
+  // tearing down servers, terminals and a git flush makes things in flight reject, and
+  // every one of those would otherwise file a P0 bug about a daemon doing exactly as it
+  // was told. The router SIGTERMs a backend on every hot swap — which is to say on every
+  // deploy — so a crash handler that filed during shutdown would file on every deploy.
+  beginShutdown();
+  // Guarded, not bare: a standby has no poller to clear.
+  if (poller) clearInterval(poller);
+  if (reaper) clearInterval(reaper);
+  if (certRenewal) clearInterval(certRenewal);
+  // Otherwise the reconnect timer keeps the loop alive past the exit we are asking for,
+  // and a socket left open is one Slack goes on handing interactions to.
+  slack?.stop();
+  // A pty that outlived the daemon has nothing left to relay it anywhere, and it
+  // holds a Claude session open against the tracker. Outliving a *socket* is the
+  // point; outliving the process that owns the registry is just a leak.
+  shutdownTerminals();
+  // `closeServer` rather than `close()`: a TLS listener is a net.Server in front of an
+  // https.Server, and it is the front that holds the port.
+  servers.forEach(closeServer);
+  // State written in the last couple of seconds has a snapshot scheduled and not
+  // yet taken, and the most interesting write in a log is usually the last one
+  // before the process went away. Bounded: a git that hangs must not be able to
+  // stop the daemon exiting, so the snapshot gets two seconds and no more.
+  Promise.race([flush(), new Promise((r) => setTimeout(r, 2000))]).finally(() => process.exit(0));
+};
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);

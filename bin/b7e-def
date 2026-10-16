@@ -1,0 +1,643 @@
+#!/usr/bin/env node
+/**
+ * Where a symbol is defined, in one call instead of four failed greps.
+ *
+ *   b7e-def <name>              every definition of <name>, with its doc comment
+ *   b7e-def <name> --callers    the above, plus one line per call site
+ *
+ * bc-khoe.27.5 is the audit that filed this: four sessions each hand-rolled the
+ * same `grep -n | cut -d: -f1 | sed -n '<n>,+50p'` dance against lib/server.js
+ * (10,560 lines), public/app.js (10,380) and lib/bd.js — and it broke a different
+ * way each time. `sed -n "$(grep ... | cut -d: -f1),+50p"` fails outright when the
+ * grep comes back empty (`sed: 1: ",+50p": invalid command code ,`), and even when
+ * it doesn't, the name searched for is often only *imported* where you looked —
+ * bc-r2b5.1 spent four calls finding that `loadBead` is imported into
+ * lib/server.js at line 12 and actually defined in lib/verdict.js:297. This
+ * answers both questions in one call: where a name is bound, and — if that binding
+ * is an import — where the real definition lives.
+ *
+ * A name can have more than one definition (the same method name on two different
+ * classes, say). That is reported as two, not silently narrowed to the first
+ * match — see the acceptance criteria on bc-khoe.27.5.
+ *
+ * WHAT THIS DOES NOT PARSE. Definitions and call sites are found by matching each
+ * *line*, not by a real JS parser, so a match inside a multi-line string or a
+ * comment that happens to look like a definition is not filtered out. Where a
+ * definition *ends*, though, is measured over `blankForBraceWalk(text)` — the file
+ * with every comment, string, template and regex literal spaced out off a real
+ * `acorn` parse — so the hand-rolled brace walk below cannot desync on a quote
+ * inside a regex or an escaped backtick in a nested template (bc-3rjan). When
+ * `acorn` cannot parse the file, or is not installed at all, that falls back to
+ * the raw text and the walk is exactly as good as it was before. Good enough for
+ * the application code in this repo; not a substitute for reading the file when
+ * the shape is unusual.
+ *
+ * The grant argument, as it was made when this tool was added — moved here verbatim from
+ * lib/tooldecl.js by bc-fmk4v, so the reason sits beside the declaration it argues for and
+ * adding a tool appends to no shared file. "This list" is DEFAULT_TOOL_LIST; "above",
+ * "below" and "beside" name the order lib/tooldecl.js kept these in, which
+ * `git show 7c47d7d77:lib/tooldecl.js` still reads whole.
+ *
+ * Read-only by construction — it only ever runs `fs.readdirSync`/`readFileSync`
+ * over lib/, bin/, public/, scripts/ and test/, and prints what it found. bc-khoe.27.5
+ * is the whole argument: an agent that cannot look up where a symbol is defined
+ * reaches for `grep`+`sed` instead, and several sessions broke doing that by hand
+ * against files too big to read (lib/server.js, public/app.js). See bin/b7e-def.
+ *
+ * @grant read
+ */
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+/**
+ * Optional on purpose. `acorn` is a devDependency, and this command is on the
+ * default tool list — an agent may well run it from a fresh worktree that has no
+ * `node_modules` yet. Without it `blankForBraceWalk` hands back the raw text and
+ * every walk below behaves exactly as it did before bc-3rjan; with it they stop
+ * meeting quotes, backticks and slashes altogether.
+ */
+let acorn = null;
+try {
+  acorn = await import('acorn');
+} catch {
+  /* no parse available — the raw-text fallback is the whole contingency */
+}
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const ROOT = path.join(HERE, '..');
+const SEARCH_DIRS = ['lib', 'bin', 'public', 'scripts', 'test'];
+const EXCLUDE_DIR_NAMES = new Set(['node_modules', '.git', 'vendor', 'coverage']);
+const CODE_EXT = new Set(['.js', '.mjs', '.cjs']);
+
+/* ------------------------------------------------------------------- argv */
+
+const argv = process.argv.slice(2);
+const CALLERS = argv.includes('--callers');
+const positional = argv.filter((a) => !a.startsWith('-'));
+const NAME = positional[0];
+
+const HELP = argv.includes('--help') || argv.includes('-h');
+if (!NAME || HELP) {
+  const out = HELP ? console.log : console.error;
+  out(
+    [
+      'b7e-def <name>              every definition of <name>, with its doc comment',
+      'b7e-def <name> --callers    the above, plus one line per call site',
+      '',
+      `searches: ${SEARCH_DIRS.join(', ')} (recursively, .js/.mjs/.cjs and shebang'd extensionless files)`,
+    ].join('\n'),
+  );
+  process.exit(HELP ? 0 : 1);
+}
+
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/* -------------------------------------------------------------- file walk */
+
+function listFiles() {
+  const files = [];
+  const walk = (dir) => {
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      if (e.name.startsWith('.')) continue;
+      if (EXCLUDE_DIR_NAMES.has(e.name)) continue;
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        walk(full);
+        continue;
+      }
+      if (!e.isFile()) continue;
+      const ext = path.extname(e.name);
+      if (CODE_EXT.has(ext)) {
+        files.push(full);
+        continue;
+      }
+      // Extensionless commands (bin/beadcause-memory and friends) — only worth
+      // opening if they are actually a node script, not a binary or a symlink
+      // to one.
+      if (!ext) {
+        try {
+          const fd = fs.openSync(full, 'r');
+          const buf = Buffer.alloc(32);
+          const n = fs.readSync(fd, buf, 0, 32, 0);
+          fs.closeSync(fd);
+          if (buf.subarray(0, n).toString('utf8').startsWith('#!/usr/bin/env node')) files.push(full);
+        } catch {
+          /* not readable, not ours to search */
+        }
+      }
+    }
+  };
+  for (const d of SEARCH_DIRS) walk(path.join(ROOT, d));
+  return files;
+}
+
+/* ------------------------------------------------- blanking, off a real parse */
+
+let lastBlanked = { text: null, scan: null };
+
+/**
+ * Three lists of `[start, end)` char ranges off one `acorn` parse of `text`, or
+ * `null` when `acorn` is missing or cannot parse it.
+ *
+ * `blank` is every comment, every string literal and every template-literal
+ * *chunk* — never the `${ … }` expression between two chunks, which is real code
+ * with balanced braces. `ticks` is the two backticks of each template, and
+ * `regex` every regex literal.
+ */
+function blankRanges(text) {
+  if (!acorn) return null;
+  const comments = [];
+  let ast;
+  try {
+    ast = acorn.parse(text, { ecmaVersion: 2022, sourceType: 'module', allowHashBang: true, onComment: comments });
+  } catch {
+    return null;
+  }
+  const blank = comments.map((c) => [c.start, c.end]);
+  const regex = [];
+  const ticks = [];
+  const seen = new Set();
+  const isNode = (v) => v && typeof v === 'object' && typeof v.type === 'string';
+  const walk = (node) => {
+    if (!isNode(node) || seen.has(node)) return;
+    seen.add(node);
+    if (node.type === 'Literal' && node.regex) {
+      regex.push([node.start, node.end]);
+      return;
+    }
+    if (node.type === 'Literal' && typeof node.value === 'string') {
+      blank.push([node.start, node.end]);
+      return;
+    }
+    if (node.type === 'TemplateElement') {
+      blank.push([node.start, node.end]);
+      return;
+    }
+    if (node.type === 'TemplateLiteral') {
+      // the backticks themselves; the chunks between them are TemplateElements and
+      // the `${ … }` expressions are real code with balanced braces
+      ticks.push([node.start, node.start + 1], [node.end - 1, node.end]);
+    }
+    for (const key of Object.keys(node)) {
+      if (key === 'loc' || key === 'range') continue;
+      const val = node[key];
+      if (Array.isArray(val)) for (const item of val) walk(item);
+      else if (isNode(val)) walk(val);
+    }
+  };
+  walk(ast);
+  return { blank, regex, ticks };
+}
+
+/** `text` with every `[start, end)` in `ranges` spaced out, `\n` left where it was. */
+function spaceOut(text, ranges) {
+  const out = text.split('');
+  for (const [s, e] of ranges) {
+    for (let i = s; i < e; i += 1) if (out[i] !== '\n') out[i] = ' ';
+  }
+  return out.join('');
+}
+
+/**
+ * `text`, same length and same line numbers, with every comment, string, template
+ * and regex literal replaced by spaces — the input `definitionsFor`'s brace walk
+ * runs over, and the only pass that wants it.
+ *
+ * The point is that the walk should never meet a quote, a backtick or a `/` at
+ * all. Every way it was seen to go wrong on this tree is one of those characters
+ * not meaning what it looked like: the `"` inside `/^["']|["']$/` (real,
+ * lib/beadfiles.js:130) is read by `skipString` as a string opener, so the string
+ * "closes" at some later unrelated quote and `matchBrace` ran `normalizeEntry`'s
+ * end from line 136 out to line 525; a `{2,3}` quantifier unbalances the brace
+ * count the same way; and an escaped backtick in a nested template (real in
+ * lib/amendment.js) ends `skipString` in the wrong place again. Blanking the
+ * delimiters costs the walk nothing, because it only ever needed them to get
+ * *past* what they wrapped. Measured over the five directories this command
+ * searches: with the walk reading the raw text, 82 of 3,118 top-level function
+ * declarations got an end line `acorn` disagreed with; over the blanked copy,
+ * none do — pinned in test/b7edef.mjs. bc-3rjan.
+ *
+ * Head matching still runs over the *raw* lines, so a definition that only looks
+ * like one inside a template literal is reported exactly as it was: only where a
+ * definition ends is measured here.
+ */
+function blankForBraceWalk(text) {
+  // One slot, because every caller walks a file at a time and asks about several
+  // names in it — `definitionsFor` runs once per name per file, and lib/server.js
+  // alone holds a few hundred. Re-parsing it per name cost test/b7edef.mjs's
+  // whole-tree check 52 seconds where one slot costs it 20.
+  if (lastBlanked.text === text) return lastBlanked.scan;
+  const ranges = blankRanges(text);
+  const scan = ranges === null ? text : spaceOut(text, [...ranges.blank, ...ranges.regex, ...ranges.ticks]);
+  lastBlanked = { text, scan };
+  return scan;
+}
+
+/* --------------------------------------------------- string/comment aware scan */
+
+/** Advance past a quoted string (', ", or `) starting at text[i], respecting `\`. */
+function skipString(text, i) {
+  const q = text[i];
+  i += 1;
+  while (i < text.length) {
+    if (text[i] === '\\') {
+      i += 2;
+      continue;
+    }
+    if (text[i] === q) return i + 1;
+    i += 1;
+  }
+  return i;
+}
+
+/**
+ * From `fromIndex` (just past a definition's name), find where its body starts.
+ *
+ * Non-strict (the default — function/class/const heads, which a keyword anchor
+ * already disambiguates from a call): the first `{` seen at parenthesis/bracket
+ * depth 0, *however far away it is* — which is what lets a destructured default
+ * parameter (`function f({ a, b } = {}) {`) not get mistaken for the body.
+ *
+ * Strict (`{ strict: true }` — the two head shapes with no keyword anchor,
+ * property function and method: a bare `name(` at the start of a trimmed line is
+ * syntactically ambiguous between a method-shorthand definition and a call, and
+ * only the very next token *immediately* after the name's own `(...)` closes —
+ * not the first `{` found anywhere afterward at depth 0 — disambiguates it
+ * correctly. Without this, a call whose own closing `)` is followed by unrelated
+ * code that happens to contain a `{` (an object-literal argument to an
+ * *enclosing* call, a following `if`/block, ...) gets misread as a definition,
+ * with that unrelated code read as its body (bc-dgx7.36).
+ *
+ * Either way, returns `{ type: 'brace', index }` for a block body, or
+ * `{ type: 'semi', index }` when a top-level `;` is hit first (a bare statement —
+ * a call, not a definition), or null when nothing qualifies.
+ */
+function findBody(text, fromIndex, { strict = false } = {}) {
+  let i = fromIndex;
+  let depth = 0;
+  while (i < text.length) {
+    const c = text[i];
+    if (c === '/' && text[i + 1] === '/') {
+      const nl = text.indexOf('\n', i);
+      if (nl === -1) return null;
+      i = nl;
+      continue;
+    }
+    if (c === '/' && text[i + 1] === '*') {
+      const end = text.indexOf('*/', i + 2);
+      if (end === -1) return null;
+      i = end + 2;
+      continue;
+    }
+    if (c === "'" || c === '"' || c === '`') {
+      i = skipString(text, i);
+      continue;
+    }
+    if (c === '(' || c === '[') {
+      depth += 1;
+      i += 1;
+      continue;
+    }
+    if (c === ')' || c === ']') {
+      depth -= 1;
+      i += 1;
+      if (strict && depth === 0) return bodyImmediatelyAfter(text, i);
+      continue;
+    }
+    if (c === '{' && depth === 0) return { type: 'brace', index: i };
+    if (c === ';' && depth === 0) return { type: 'semi', index: i };
+    i += 1;
+  }
+  return null;
+}
+
+/**
+ * text[i] is just past the point where a definition head's own `(...)` closed.
+ * Strict mode (see findBody) requires the very next non-whitespace,
+ * non-comment token to be `{` or `;` — anything else means the head matched a
+ * call, not a definition, however far away a `{` might appear later in the file.
+ */
+function bodyImmediatelyAfter(text, i) {
+  while (i < text.length) {
+    const c = text[i];
+    if (c === ' ' || c === '\t' || c === '\n' || c === '\r') {
+      i += 1;
+      continue;
+    }
+    if (c === '/' && text[i + 1] === '/') {
+      const nl = text.indexOf('\n', i);
+      if (nl === -1) return null;
+      i = nl;
+      continue;
+    }
+    if (c === '/' && text[i + 1] === '*') {
+      const end = text.indexOf('*/', i + 2);
+      if (end === -1) return null;
+      i = end + 2;
+      continue;
+    }
+    if (c === '{') return { type: 'brace', index: i };
+    if (c === ';') return { type: 'semi', index: i };
+    return null;
+  }
+  return null;
+}
+
+/** text[openIndex] is '{'; returns the index of its matching '}'. */
+function matchBrace(text, openIndex) {
+  let depth = 1;
+  let i = openIndex + 1;
+  while (i < text.length && depth > 0) {
+    const c = text[i];
+    if (c === '/' && text[i + 1] === '/') {
+      const nl = text.indexOf('\n', i);
+      if (nl === -1) return text.length - 1;
+      i = nl;
+      continue;
+    }
+    if (c === '/' && text[i + 1] === '*') {
+      const end = text.indexOf('*/', i + 2);
+      if (end === -1) return text.length - 1;
+      i = end + 2;
+      continue;
+    }
+    if (c === "'" || c === '"' || c === '`') {
+      i = skipString(text, i);
+      continue;
+    }
+    if (c === '{') depth += 1;
+    else if (c === '}') depth -= 1;
+    i += 1;
+  }
+  return i - 1;
+}
+
+/** Builds a lookup from char index -> 1-based line number. */
+function lineIndexer(text) {
+  const starts = [0];
+  for (let i = 0; i < text.length; i += 1) if (text[i] === '\n') starts.push(i + 1);
+  return (charIndex) => {
+    let lo = 0;
+    let hi = starts.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (starts[mid] <= charIndex) lo = mid;
+      else hi = mid - 1;
+    }
+    return lo + 1;
+  };
+}
+
+/** Walks upward from `startLine` (1-based) over a contiguous // or /** *​/ block. */
+function docCommentStart(lines, startLine) {
+  let li = startLine - 2; // 0-based index of the line above startLine
+  while (li >= 0) {
+    const t = lines[li].trim();
+    if (t.startsWith('//') || t.startsWith('/*') || t.startsWith('*') || t.endsWith('*/')) {
+      li -= 1;
+      continue;
+    }
+    break;
+  }
+  return li + 2; // back to 1-based, first comment line
+}
+
+/* -------------------------------------------------------- definition finder */
+
+/**
+ * Every definition of `name` found in `text` (one file's contents). Six head
+ * shapes: exported/plain function, exported/plain class, exported/plain
+ * const|let|var, and — checked last, and only kept when a `{` body actually
+ * follows — a bare `name(` head, which covers class methods, object-literal
+ * shorthand methods and getters/setters/generators without a separate pattern
+ * for each. That last check is what tells `name(args);` (a call site) apart from
+ * `name(args) {` (a definition).
+ */
+function definitionsFor(name, file, text) {
+  // Every head below requires the name somewhere in the line, so a file that does
+  // not contain the string at all has no definition in it and does not need to be
+  // parsed. Weaker than the \b…\b the heads apply, so it can never drop a real
+  // match — and it is what keeps one `acorn` parse per candidate file rather than
+  // one per file in the tree (b7e-def loadBead: 1.8s down to 0.5s).
+  if (!text.includes(name)) return [];
+  // Heads are matched against the raw lines; where a definition ENDS is measured
+  // over the blanked copy, which is the same length and the same line numbers.
+  const scan = blankForBraceWalk(text);
+  const wb = `\\b${escapeRe(name)}\\b`;
+  const heads = [
+    { re: new RegExp(`^export\\s+default\\s+(async\\s+)?function\\*?\\s+${wb}\\s*\\(`), label: 'export default function' },
+    { re: new RegExp(`^export\\s+(async\\s+)?function\\*?\\s+${wb}\\s*\\(`), label: 'export function' },
+    { re: new RegExp(`^export\\s+class\\s+${wb}\\b`), label: 'export class' },
+    { re: new RegExp(`^export\\s+(const|let|var)\\s+${wb}\\s*=`), label: 'export' },
+    { re: new RegExp(`^(async\\s+)?function\\*?\\s+${wb}\\s*\\(`), label: 'function' },
+    { re: new RegExp(`^class\\s+${wb}\\b`), label: 'class' },
+    { re: new RegExp(`^(const|let|var)\\s+${wb}\\s*=`), label: 'variable' },
+    { re: new RegExp(`^${wb}\\s*:\\s*(async\\s+)?function\\*?\\s*\\(`), label: 'property function', verifyBody: true },
+    { re: new RegExp(`^(static\\s+)?(async\\s+)?(get\\s+|set\\s+)?\\*?${wb}\\s*\\(`), label: 'method', verifyBody: true },
+  ];
+  const lines = text.split('\n');
+  const idx = lineIndexer(text);
+  const out = [];
+  let charOffset = 0;
+  for (let li = 0; li < lines.length; li += 1) {
+    const line = lines[li];
+    const trimmed = line.trimStart();
+    const leadingWs = line.length - trimmed.length;
+    for (const head of heads) {
+      const m = head.re.exec(trimmed);
+      if (!m) continue;
+      const afterHeadChar = charOffset + leadingWs + m[0].length - 1; // just past the head match
+      const body = findBody(scan, afterHeadChar, { strict: Boolean(head.verifyBody) });
+      if (!body) continue;
+      if (head.verifyBody && body.type !== 'brace') continue; // it was a call, not a def
+      const endIndex = body.type === 'brace' ? matchBrace(scan, body.index) : body.index;
+      const startLine = li + 1;
+      const endLine = idx(endIndex);
+      const docStart = docCommentStart(lines, startLine);
+      out.push({
+        file,
+        startLine,
+        endLine,
+        docStart,
+        label: head.label,
+        text: lines.slice(docStart - 1, endLine).join('\n'),
+      });
+      break; // first matching head wins for this line
+    }
+    charOffset += line.length + 1; // +1 for the '\n' split away
+  }
+  return out;
+}
+
+/* --------------------------------------------------------------- imports */
+
+/** Every `import ... name ... from '<specifier>'` binding of `name` in `text`. */
+function importsFor(name, file, text) {
+  const idx = lineIndexer(text);
+  const out = [];
+  const re = /import\s+([^;]*?)\s+from\s+(['"])((?:(?!\2).)*)\2/gs;
+  let m;
+  while ((m = re.exec(text))) {
+    const clause = m[1];
+    const specifier = m[3];
+    const clauseStart = m.index + m[0].indexOf(clause);
+    const bindings = [];
+    const ns = clause.match(/\*\s+as\s+([A-Za-z_$][\w$]*)/);
+    if (ns) bindings.push({ local: ns[1], real: '*' });
+    const named = clause.match(/\{([\s\S]*)\}/);
+    if (named) {
+      for (const part of named[1].split(',')) {
+        const p = part.trim();
+        if (!p) continue;
+        const as = p.match(/^([A-Za-z_$][\w$]*)\s+as\s+([A-Za-z_$][\w$]*)$/);
+        if (as) bindings.push({ local: as[2], real: as[1] });
+        else bindings.push({ local: p, real: p });
+      }
+    }
+    const before = named ? clause.slice(0, named.index) : ns ? '' : clause;
+    const def = before.match(/^([A-Za-z_$][\w$]*)/);
+    if (def) bindings.push({ local: def[1], real: 'default' });
+
+    for (const b of bindings) {
+      if (b.local !== name) continue;
+      const localOffset = clause.search(new RegExp(`\\b${escapeRe(name)}\\b`));
+      const charIndex = localOffset >= 0 ? clauseStart + localOffset : m.index;
+      out.push({ file, line: idx(charIndex), specifier, real: b.real });
+    }
+  }
+  return out;
+}
+
+/* --------------------------------------------------------------- callers */
+
+function callersFor(name, file, text, skipLines) {
+  const wb = `\\b${escapeRe(name)}\\b`;
+  const re = new RegExp(`(^|[^.\\w$])${wb}\\s*\\(`);
+  const lines = text.split('\n');
+  const out = [];
+  for (let li = 0; li < lines.length; li += 1) {
+    const lineNo = li + 1;
+    if (skipLines.has(lineNo)) continue;
+    if (re.test(lines[li])) out.push({ file, line: lineNo, text: lines[li].trim() });
+  }
+  return out;
+}
+
+/* -------------------------------------------------------------------- run */
+
+const files = listFiles();
+const rel = (f) => path.relative(ROOT, f);
+const fileTexts = new Map();
+
+const directDefs = [];
+const allImports = [];
+for (const f of files) {
+  const text = fs.readFileSync(f, 'utf8');
+  fileTexts.set(f, text);
+  directDefs.push(...definitionsFor(NAME, rel(f), text));
+  allImports.push(...importsFor(NAME, rel(f), text));
+}
+
+/**
+ * Every import whose local name is NAME may point at a real definition —
+ * possibly under a different (aliased) name, possibly in a file that `listFiles`
+ * never visited (a specifier climbing out of SEARCH_DIRS, or `test/helpers/`
+ * under a dir this walk does cover but where the file itself was fine either
+ * way). Resolve each one and fold in whatever it finds.
+ */
+const resolvedDefs = [];
+for (const imp of allImports) {
+  if (imp.real === '*' || imp.real === 'default') continue; // nothing single to point at
+  if (!imp.specifier.startsWith('.')) continue; // not a repo-relative module
+  const fromDir = path.dirname(path.join(ROOT, imp.file));
+  const candidates = [imp.specifier, `${imp.specifier}.js`, `${imp.specifier}.mjs`, path.join(imp.specifier, 'index.js')];
+  let targetFile = null;
+  let targetText = null;
+  for (const c of candidates) {
+    const p = path.join(fromDir, c);
+    if (fileTexts.has(p)) {
+      targetFile = p;
+      targetText = fileTexts.get(p);
+      break;
+    }
+    try {
+      targetText = fs.readFileSync(p, 'utf8');
+      targetFile = p;
+      break;
+    } catch {
+      /* try next candidate */
+    }
+  }
+  if (!targetFile) continue;
+  const label = imp.real === NAME ? undefined : `as ${imp.real}`;
+  for (const d of definitionsFor(imp.real, rel(targetFile), targetText)) {
+    resolvedDefs.push(label ? { ...d, label } : d);
+  }
+}
+
+const seen = new Set();
+const allDefs = [];
+for (const d of [...directDefs, ...resolvedDefs]) {
+  const key = `${d.file}:${d.startLine}`;
+  if (seen.has(key)) continue;
+  seen.add(key);
+  allDefs.push(d);
+}
+allDefs.sort((a, b) => a.file.localeCompare(b.file) || a.startLine - b.startLine);
+
+/* ------------------------------------------------------------------ print */
+
+let exitCode = 0;
+
+if (allImports.length) {
+  for (const i of allImports) {
+    const alias = i.real !== NAME && i.real !== 'default' ? `, as ${i.real}` : '';
+    console.log(`imported at ${i.file}:${i.line} (from '${i.specifier}'${alias})`);
+  }
+  if (allDefs.length) console.log('');
+}
+
+if (allDefs.length) {
+  for (const d of allDefs) {
+    console.log(`${d.file}:${d.startLine}-${d.endLine}${d.label ? `  (${d.label})` : ''}`);
+    console.log(d.text);
+    console.log('');
+  }
+} else {
+  console.log(`no definition of '${NAME}' found in ${SEARCH_DIRS.join(', ')}${allImports.length ? ' — only the import(s) above' : ''}`);
+  exitCode = 1;
+}
+
+if (CALLERS) {
+  const skipByFile = new Map();
+  for (const d of allDefs) {
+    const set = skipByFile.get(d.file) || new Set();
+    for (let l = d.docStart; l <= d.endLine; l += 1) set.add(l);
+    skipByFile.set(d.file, set);
+  }
+  for (const i of allImports) {
+    const set = skipByFile.get(i.file) || new Set();
+    set.add(i.line);
+    skipByFile.set(i.file, set);
+  }
+  const callers = [];
+  for (const f of files) {
+    const r = rel(f);
+    callers.push(...callersFor(NAME, r, fileTexts.get(f), skipByFile.get(r) || new Set()));
+  }
+  if (callers.length) {
+    console.log(`callers (${callers.length}):`);
+    for (const c of callers) console.log(`  ${c.file}:${c.line}: ${c.text}`);
+  } else {
+    console.log('callers: none found');
+  }
+}
+
+process.exit(exitCode);

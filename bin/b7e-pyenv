@@ -1,0 +1,145 @@
+#!/usr/bin/env node
+/**
+ * `b7e-pyenv` — which local Python environment already has the packages a probe needs,
+ * and which model weights are already sitting in the shared Hugging Face cache.
+ *
+ *     b7e-pyenv -w loremia --need torch,diffusers,transformers
+ *     b7e-pyenv -w loremia --need fal_client
+ *     b7e-pyenv -w loremia --model IP-Adapter
+ *     b7e-pyenv -w loremia --json
+ *     b7e-pyenv -w loremia --dir /path/to/checkout
+ *
+ * bc-dgx7.180: five loremia sessions (lm-52r.55, lm-52r.61, lm-52r.56, lm-52r.57,
+ * lm-52r.62) each found this out by hand, a different way each time — one built a venv
+ * in a scratchpad that vanished with the session, another `du -sh`'d the Hugging Face
+ * cache repeatedly to answer a question this command answers once. `lib/pyenv.js` does
+ * the real work; this is the argv and the printing around it.
+ *
+ * It never installs anything, and it never writes anywhere — every candidate
+ * interpreter and every cache entry it reports on is one that already existed before
+ * this ran.
+ *
+ * Exit codes: `0` always, whether or not anything was found — "nothing here has what
+ * you need yet" is itself a real, useful answer and not a refusal. `2` a bad invocation
+ * (no `-w`, or a workspace lib/config.js's own loadConfig() does not know).
+ *
+ * The grant argument: reads local Python interpreters and the shared Hugging Face cache;
+ * never writes.
+ *
+ * @grant read
+ */
+import { loadConfig } from '../lib/config.js';
+import { probeAll, satisfiesAll, hfCacheEntries, defaultRepoRoot } from '../lib/pyenv.js';
+
+const USAGE = `usage: b7e-pyenv -w <workspace> [--need mod1,mod2,...] [--model <substring>] [--dir <path>] [--json]
+
+  -w, --workspace <n>   which repo to look for local envs under (required)
+  --need <mods>         comma-separated module names to probe each interpreter for
+  --model <substring>   only show Hugging Face cache entries whose org/repo name
+                        contains this (case-insensitive)
+  --dir <path>          the repo checkout to use instead of ~/projects/<n>
+  --json                the machine-readable form instead of the printed report
+  -h, --help            this text`;
+
+function fail(msg, code) {
+  console.error(`b7e-pyenv: ${msg}`);
+  process.exit(code);
+}
+
+const argv = process.argv.slice(2);
+if (argv.includes('-h') || argv.includes('--help')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+
+let wsName = null;
+let needArg = '';
+let modelGlob = null;
+let dirArg = null;
+let jsonMode = false;
+
+for (let i = 0; i < argv.length; i += 1) {
+  const a = argv[i];
+  if (a === '-w' || a === '--workspace') {
+    wsName = argv[i + 1];
+    i += 1;
+  } else if (a === '--need') {
+    needArg = argv[i + 1] || '';
+    i += 1;
+  } else if (a === '--model') {
+    modelGlob = argv[i + 1] || '';
+    i += 1;
+  } else if (a === '--dir') {
+    dirArg = argv[i + 1] || '';
+    i += 1;
+  } else if (a === '--json') {
+    jsonMode = true;
+  } else {
+    fail(`unrecognized argument "${a}"\n${USAGE}`, 2);
+  }
+}
+
+if (!wsName) fail(`-w/--workspace is required\n${USAGE}`, 2);
+
+const cfg = loadConfig();
+const ws = cfg.workspaces.find((w) => w.name === wsName);
+if (!ws && !dirArg) {
+  console.error(`b7e-pyenv: no such workspace "${wsName}"`);
+  console.error(`workspaces: ${cfg.workspaces.map((w) => w.name).join(', ')}`);
+  process.exit(2);
+}
+
+const needs = needArg
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+const opts = dirArg ? { repoRoot: dirArg } : {};
+const rows = probeAll(wsName, needs, opts);
+const winner = satisfiesAll(rows, needs);
+const cache = hfCacheEntries(modelGlob ? { modelGlob } : {});
+
+if (jsonMode) {
+  console.log(
+    JSON.stringify(
+      {
+        workspace: wsName,
+        repoRoot: dirArg || defaultRepoRoot(wsName),
+        needs,
+        interpreters: rows,
+        satisfiesAll: winner ? winner.label : needs.length ? null : undefined,
+        cache,
+      },
+      null,
+      2,
+    ),
+  );
+  process.exit(0);
+}
+
+console.log(`Python environments${needs.length ? ` (need: ${needs.join(', ')})` : ''}:`);
+if (!rows.length) {
+  console.log('  (none found)');
+} else {
+  for (const row of rows) {
+    const version = row.version ? `python ${row.version}` : 'unresponsive';
+    const modParts = needs.map((m) => `${m}=${row.modules[m] || 'missing'}`);
+    const mpsPart = row.mps === null ? '' : ` mps=${row.mps}`;
+    console.log(`  ${row.label}  (${version})${modParts.length ? `  ${modParts.join(' ')}` : ''}${mpsPart}`);
+  }
+}
+if (needs.length) {
+  console.log(`Satisfies all of ${needs.join(', ')}: ${winner ? winner.label : 'none'}`);
+}
+
+console.log('');
+console.log(`Hugging Face cache${modelGlob ? ` (matching "${modelGlob}")` : ''}:`);
+if (!cache.length) {
+  console.log('  (none found)');
+} else {
+  for (const entry of cache) {
+    console.log(`  ${entry.name}  ${entry.sizeLabel}`);
+  }
+}
+
+process.exit(0);

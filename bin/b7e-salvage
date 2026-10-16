@@ -1,0 +1,176 @@
+#!/usr/bin/env node
+/**
+ * `b7e-salvage` — a dead attempt's worktree, read from the inside: what it holds
+ * uncommitted, and whether anybody is still in it.
+ *
+ *     b7e-salvage -w beadcause -b bc-dgx7.134
+ *     b7e-salvage -w beadcause -b bc-dgx7.134 --diff
+ *     b7e-salvage -w beadcause -b bc-dgx7.134 --diff lib/foo.js --json
+ *     b7e-salvage -w loremia -b lm-gr6.36 --all --patch-dir
+ *
+ * bc-dgx7.134: four sessions read an earlier attempt's worktree by hand, four
+ * different ways — `cd` into a guessed path (usually wrong: the directory is the
+ * slug, the branch is `worktree-<slug>`), `git status --short`, several `git diff`
+ * calls, a hash-and-resample to guess whether anybody was still in it. See
+ * lib/salvage.js for the design and what it reuses; this file is only the argv
+ * parsing and the printing around it, same split as `bin/b7e-prior`.
+ *
+ * **This is not `b7e-prior`, which says where work is sitting.** This says what is
+ * *in* the tree — the uncommitted part `b7e-prior` cannot see at all — and whether the
+ * worktree is safe to read from: occupied (a live session's `cwd` inside it, or a lock
+ * naming a pid `ps` still knows) or frozen (neither, and nothing under it has moved
+ * recently).
+ *
+ * `--diff [<path>]` adds the applicable patch for what is uncommitted, per worktree —
+ * scoped to one repo-relative path when given. Writes nothing to any worktree it reads.
+ *
+ * Exit codes: `0` ran to completion, whether or not anything was found. `2` bad usage.
+ * `4` `-w`/`-b` named something this checkout's tracker does not have.
+ *
+ * The grant argument, as it was made when this tool was added — moved here verbatim from
+ * lib/tooldecl.js by bc-fmk4v, so the reason sits beside the declaration it argues for and
+ * adding a tool appends to no shared file. "This list" is DEFAULT_TOOL_LIST; "above",
+ * "below" and "beside" name the order lib/tooldecl.js kept these in, which
+ * `git show 7c47d7d77:lib/tooldecl.js` still reads whole.
+ *
+ * read a dead attempt's worktree from the inside, uncommitted content included, without editing
+ * it See bin/b7e-salvage.
+ *
+ * @grant read
+ */
+import { loadConfig } from '../lib/config.js';
+import { Bd } from '../lib/bd.js';
+import { resolveSessionDir } from '../lib/session.js';
+import { salvageFor, describeSalvage, defaultPatchDir } from '../lib/salvage.js';
+
+const argv = process.argv.slice(2);
+const has = (f) => argv.includes(f);
+const value = (...names) => {
+  for (const f of names) {
+    const inline = argv.find((a) => a.startsWith(`${f}=`));
+    if (inline) return inline.slice(f.length + 1);
+    const at = argv.indexOf(f);
+    if (at > -1) return argv[at + 1];
+  }
+  return undefined;
+};
+
+const USAGE = `usage: b7e-salvage -w <workspace> -b <bead> [--all] [--worktree <name>] [--diff [<path>]] [--patch-dir [<dir>]] [--no-pr] [--json]
+
+A dead attempt's worktree, read from the inside: what it holds uncommitted, and
+whether anybody is still in it. One block per worktree owning the bead's tag, live or
+retired: path, branch, lock state with the lock's pid resolved against \`ps\`, whether a
+live session's cwd is inside it, minutes since anything under it was touched, and
+what \`git status --short\` finds.
+
+  -w, --workspace <name>   which tracker (required; one of the configured workspaces)
+  -b, --bead <id>          the bead whose worktrees to read (required)
+  --diff [<path>]          also emit the applicable uncommitted patch, per worktree,
+                            scoped to <path> when given
+  --all                    read every worktree but the main checkout, whatever it is named
+  --worktree <name>        also read this worktree, by directory name or branch name
+                            (repeatable)
+  --patch-dir [<dir>]      write one whole-tree patch per worktree holding uncommitted
+                            work (staged-only files in full); default a temp dir
+  --no-pr                  skip the pull-request lookup
+  --json                   the machine-readable form instead of the printed report
+
+Besides worktrees whose branch name carries the bead's tag, a worktree is read when a
+commit off main names the bead, or the bead's own text names it. A bead with a clean
+tree everywhere gets an explicit "nothing to salvage" verdict and exit 0.`;
+
+if (has('--help') || has('-h')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+
+const wsName = value('-w', '--workspace');
+const beadId = value('-b', '--bead');
+const JSON_MODE = has('--json');
+
+// `--diff` takes an OPTIONAL path, so it cannot use `value()` (which would swallow a
+// following `--json` as the path). Read it by hand: present with no following
+// non-flag token means "every file"; present with one means "scoped to that file".
+const DIFF = has('--diff');
+let diffPath;
+if (DIFF) {
+  const at = argv.indexOf('--diff');
+  const next = argv[at + 1];
+  if (next && !next.startsWith('-')) diffPath = next;
+}
+
+let patchDir = null;
+if (has('--patch-dir')) {
+  const next = argv[argv.indexOf('--patch-dir') + 1];
+  patchDir = next && !next.startsWith('-') ? next : '';
+}
+const wtNames = [];
+argv.forEach((a, i) => {
+  if (a === '--worktree' && argv[i + 1]) wtNames.push(argv[i + 1]);
+  else if (a.startsWith('--worktree=')) wtNames.push(a.slice(11));
+});
+
+function fail(msg, code = 2) {
+  console.error(`b7e-salvage: ${msg}`);
+  process.exit(code);
+}
+
+if (!wsName) fail(`-w/--workspace is required\n${USAGE}`);
+if (!beadId) fail(`-b/--bead is required\n${USAGE}`);
+
+const cfg = loadConfig();
+const ws = cfg.workspaces.find((w) => w.name === wsName);
+if (!ws) {
+  fail(`no workspace named "${wsName}"\nconfigured workspaces: ${cfg.workspaces.map((w) => w.name).join(', ') || 'none'}`, 4);
+}
+
+const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me });
+
+let row;
+try {
+  row = await bd.show(ws, beadId);
+} catch (err) {
+  fail(`${ws.name} has no bead ${beadId}: ${String(err?.message || err).split('\n')[0]}`, 4);
+}
+if (!row) fail(`${ws.name} has no bead ${beadId}`, 4);
+
+let dir;
+try {
+  dir = resolveSessionDir(cfg, ws, row);
+} catch (err) {
+  fail(`could not resolve a checkout for ${ws.name}: ${String(err?.message || err).split('\n')[0]}`, 4);
+}
+
+// The bead's own text and comments can name a worktree its branch never did.
+let hints = '';
+try {
+  const full = (await bd.showWithComments(ws, beadId)) || row;
+  hints = [full.description, full.notes, full.design, ...(full.comments || []).map((c) => c.text || c.body || '')].filter(Boolean).join('\n');
+} catch {
+  hints = [row.description, row.notes].filter(Boolean).join('\n');
+}
+
+if (patchDir === '') patchDir = defaultPatchDir(beadId);
+const found = await salvageFor(dir, beadId, {
+  cfg,
+  withDiff: DIFF,
+  diffPath,
+  all: has('--all'),
+  names: wtNames,
+  hints,
+  patchDir,
+  withPrs: !has('--no-pr'),
+});
+
+// `process.exitCode`, not `process.exit(0)`: a big `--json` or `--diff` run can exceed
+// a pipe's buffer, and exiting immediately after the write has cut output short before
+// (bc-dgx7.45, on b7e-prior's own --json path). Falling off the end flushes instead.
+if (JSON_MODE) {
+  console.log(JSON.stringify({ workspace: ws.name, ...found }, null, 2));
+} else if (!found.worktrees.length) {
+  console.log(`b7e-salvage ${beadId} · ${ws.name}: no worktree owns this bead — nothing to read. (--all reads every worktree.)`);
+} else {
+  console.log(`b7e-salvage ${beadId} · ${ws.name}\n`);
+  for (const line of describeSalvage(found)) console.log(line);
+}
+process.exitCode = 0;

@@ -1,0 +1,220 @@
+#!/usr/bin/env node
+/**
+ * The standing brief a session gets instead of "read this repo's CLAUDE.md" — beadcause
+ * has none.
+ *
+ *   b7e-brief                    the whole brief
+ *   b7e-brief --section spec     just: no CLAUDE.md, README.md + docs/ are the spec, the index
+ *   b7e-brief --section worktree just: what a fresh worktree needs before anything else
+ *   b7e-brief --section gate     just: how the suite is actually run here
+ *   b7e-brief --section owed     just: what a public/ change owes (the sw-cache question)
+ *   b7e-brief --dir <root>       another tree's specification and suite list — testing only
+ *
+ * bc-ka5y.15 is the session audit naming the same first call eight times over: every
+ * worker brief says "read this repo's CLAUDE.md and follow it", and beadcause has never
+ * had one — README.md is the spec, and it is over 2MB. Eight sessions
+ * (bc-ka5y.15.5, bc-zjab.5, bc-khoe.30.6, bc-zjab.4, bc-ka5y.15.4, bc-khoe.30.7,
+ * bc-khoe.29, bc-khoe.30.4) each burned a call discovering the absence, no two the same
+ * way, and five of them burned a second call guessing at which memory-store keys held
+ * the facts they actually needed. This prints all of it in the one call those eight
+ * calls were reaching for.
+ *
+ * TWO KINDS OF FACT, ON PURPOSE. The README index (`spec`) is parsed out of README.md at
+ * run time — a retitled heading shows up in the next call with no edit here — using the
+ * same fence-aware heading scan `b7e-readme` and `test/anchors.mjs` already share
+ * (`lib/readme.js`), so a `#` at the start of a line inside a shell snippet is never
+ * mistaken for a heading (README.md carries plenty of those — a naive `grep -n "^# "`
+ * finds seven, of which six are comments inside example config fences, not real
+ * headings). Everything else quoted below — worktree setup, how the gate runs, the
+ * sw-cache-bump question — is read live off this repo's own memory store
+ * (`beadcause-memory notes`, agent `worker`, the agent that actually hits these), under
+ * a fixed set of keys named below. QUOTED, not summarised: a correction filed with
+ * `beadcause-memory note <key> "..."` changes this command's output on the next call, no
+ * edit to this file required. That set of keys is a hard-coded list — the honest
+ * alternative to "read every note this agent has ever written", most of which is about
+ * something else entirely — and a key that gets renamed or retired just drops out of the
+ * section it belonged to rather than printing an empty heading.
+ *
+ * WHY THIS DOES NOT ALSO PRINT THE "SHIPPING A NEW b7e-* COMMAND" CHECKLIST (two bin
+ * registrations, a grants classification, DEFAULT_TOOL_LIST, a README section, a
+ * test/<name>.mjs): that checklist is for the rare session extending the toolset, not
+ * the ordinary one using it, and bc-dgx7.2 is where it belongs. Baking it in here would
+ * make an unrelated session's brief longer for a case it is not in.
+ *
+ * Exit codes: `0` always, once argv parses — there is no "found nothing" here, only
+ * sections that are shorter because a key is not currently set. `2` bad usage
+ * (an unrecognised --section value).
+ *
+ * The grant argument, as it was made when this tool was added — moved here verbatim from
+ * lib/tooldecl.js by bc-fmk4v, so the reason sits beside the declaration it argues for and
+ * adding a tool appends to no shared file. "This list" is DEFAULT_TOOL_LIST; "above",
+ * "below" and "beside" name the order lib/tooldecl.js kept these in, which
+ * `git show 7c47d7d77:lib/tooldecl.js` still reads whole.
+ *
+ * Read-only in the same construction sense as b7e-def/b7e-owes/b7e-affected/b7e-readme
+ * above: it reads the specification and this repo's own memory store (a fixed set of standing
+ * notes keys, quoted verbatim) and prints a brief — the "read this repo's CLAUDE.md"
+ * instruction has no target here, and this is what an agent gets instead. It shells out
+ * to `node scripts/test.mjs --list` for a live suite count, and only ever `--list` —
+ * that flag's own header comment guarantees it "creates nothing", unlike b7e-gate below,
+ * which actually runs the suites and is deliberately not on this list. bc-ka5y.15.15 is
+ * the session audit: eight sessions each burned a call discovering there is no CLAUDE.md
+ * here, no two the same way. See bin/b7e-brief.
+ *
+ * @grant read
+ */
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { analyzeSet } from '../lib/readme.js';
+import { notes } from '../lib/memory.js';
+import { discoverSuites } from '../lib/gate.js';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const ROOT = path.join(HERE, '..');
+
+const AGENT = 'worker';
+
+/** Which memory-store keys back which section — see the header for why this is a fixed
+ * list rather than "everything worker has ever noted". A key with no note today is
+ * silently skipped, never printed as an empty quote. */
+const STANDING_KEYS = {
+  spec: ['no-claude-md-readme-is-the-spec'],
+  worktree: ['worktree-setup', 'fresh-worktree-fails-pagealias-without-vendor'],
+  gate: ['the-gate-is-one-command-now-bin-b7e-gate', 'b7e-gate-is-the-gate-not-npm-test'],
+  owed: ['sw-cache-bump-rule', 'swbump-check-scope'],
+};
+
+const SECTION_TITLES = {
+  spec: 'There is no CLAUDE.md here — README.md and docs/ are the spec',
+  worktree: 'A fresh worktree, before anything else',
+  gate: 'How the suite is actually run here',
+  owed: 'What a change under public/ owes',
+};
+
+const SECTIONS = ['spec', 'worktree', 'gate', 'owed'];
+
+/* ------------------------------------------------------------------------------ argv */
+
+const argv = process.argv.slice(2);
+const has = (f) => argv.includes(f);
+const value = (f) => {
+  const at = argv.indexOf(f);
+  return at === -1 ? null : (argv[at + 1] ?? null);
+};
+
+const HELP = has('--help') || has('-h');
+const USAGE = [
+  'b7e-brief                     the whole brief',
+  'b7e-brief --section <name>    just one part: spec, worktree, gate, owed',
+  'b7e-brief --dir <root>        another tree — this is how it is tested',
+].join('\n');
+
+if (HELP) {
+  console.log(USAGE);
+  process.exit(0);
+}
+
+const DIR = value('--dir');
+const SECTION = value('--section');
+if (SECTION !== null && !SECTIONS.includes(SECTION)) {
+  console.error(`--section must be one of: ${SECTIONS.join(', ')}\n\n${USAGE}`);
+  process.exit(2);
+}
+const wanted = SECTION ? [SECTION] : SECTIONS;
+
+const root = DIR ? path.resolve(DIR) : ROOT;
+
+/* ------------------------------------------------------------------------- house facts */
+
+/** The value under `key` in worker's notes on this repo, or `null` if there is none —
+ * `notes()` resolves the store from `process.cwd()` the same way every other reader of
+ * it does (see lib/memory.js), so this reflects whichever checkout the caller is
+ * standing in, worktree or main. */
+async function houseNote(key) {
+  try {
+    return await notes(AGENT, key);
+  } catch {
+    // Not standing in a git repo at all — nowhere for a note to live. Degrade to
+    // "nothing to quote" rather than take the whole brief down over it.
+    return null;
+  }
+}
+
+async function quotedFacts(keys) {
+  const found = [];
+  for (const key of keys) {
+    const value = await houseNote(key);
+    if (value) found.push(`[${key}]\n${value}`);
+  }
+  return found;
+}
+
+/* --------------------------------------------------------------------------- spec */
+
+function specBody() {
+  // bc-28jtc: indexing `README.md` alone would now describe an 83-line summary as the
+  // whole specification — the one fact this section exists to give a session, wrong by two
+  // orders of magnitude, and wrong in the direction that stops it looking any further. The
+  // index is per document, and the sizes are the set's.
+  let docs;
+  try {
+    docs = analyzeSet(root);
+  } catch (err) {
+    return [`could not read the specification under ${root}: ${err.message}`];
+  }
+  if (!docs.length) return [`no specification found under ${root}`];
+
+  const totalLines = docs.reduce((n, d) => n + d.analysis.totalLines, 0);
+  const totalBytes = docs.reduce((n, d) => n + Buffer.byteLength(d.analysis.lines.join('\n'), 'utf8'), 0);
+  const mb = (totalBytes / (1024 * 1024)).toFixed(2);
+  const chapters = docs.filter((d) => d.file !== 'README.md');
+
+  // A tree with no `docs/` is not a broken one — the suite's fixtures are a README and
+  // little else — so say "README.md is it" there rather than "plus 0 documents".
+  const scale = chapters.length
+    ? `The specification is README.md plus ${chapters.length} documents under docs/: ` +
+      `${mb}MB, ${totalLines} lines in total. README.md is the summary and the index; the chapter ` +
+      'is where the detail is.'
+    : `README.md is it: ${mb}MB, ${totalLines} lines.`;
+  const lines = [
+    `beadcause has no CLAUDE.md — not in the root, not anywhere. ${scale} ` +
+      'Never go hunting for a CLAUDE.md here; this is the whole of the answer.',
+    '',
+    'The specification index (document, lines, top-level sections), derived just now:',
+  ];
+  for (const { file, analysis } of docs) {
+    const top = analysis.headings.filter((h) => h.level <= 2);
+    lines.push(`  ${file} — ${analysis.totalLines} lines`);
+    for (const h of top) {
+      lines.push(`  ${String(h.line).padStart(6)}  ${'  '.repeat(h.level - 1)}${'#'.repeat(h.level)} ${h.title}`);
+    }
+  }
+  return lines;
+}
+
+/* --------------------------------------------------------------------------- gate */
+
+function gateFacts() {
+  try {
+    const suites = discoverSuites(root);
+    return [`\`scripts/test.mjs --list\` finds ${suites.length} suites here right now (this repo grows a few a week, so this is counted, not remembered).`];
+  } catch (err) {
+    return [`(could not run \`scripts/test.mjs --list\` to count suites live: ${err.message})`];
+  }
+}
+
+/* --------------------------------------------------------------------------- render */
+
+async function renderSection(name) {
+  const out = [`## ${SECTION_TITLES[name]}`, ''];
+  if (name === 'spec') out.push(...specBody(), '');
+  if (name === 'gate') out.push(...gateFacts(), '');
+  const facts = await quotedFacts(STANDING_KEYS[name]);
+  if (facts.length) out.push(...facts.flatMap((f) => [f, '']));
+  else if (name !== 'spec' && name !== 'gate') out.push('(nothing standing noted under this section right now)', '');
+  return out;
+}
+
+const rendered = [];
+for (const name of wanted) rendered.push(...(await renderSection(name)));
+console.log(rendered.join('\n').replace(/\n+$/, '\n'));

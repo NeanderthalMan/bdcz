@@ -1,0 +1,95 @@
+#!/usr/bin/env node
+/**
+ * `b7e-xbead` — show a bead from any tracker by its id, from whatever directory this runs in.
+ *
+ *     b7e-xbead bc-irzp7 lm-vary
+ *     b7e-xbead beadcause/bc-irzp7 --comments
+ *     b7e-xbead lm-vary --json
+ *
+ * bc-dgx7.192: eight loremia sessions read `bc-irzp7` from a loremia directory and
+ * hand-rolled `cd ~ && zsh -c 'bd show …'`, which picks the tracker before the inner `cd`
+ * runs and answers a false "no issue found". The tracker comes from the id's prefix (or an
+ * explicit `<workspace>/`), and `Bd` sets BEADS_DIR itself. lib/xbead.js does the deciding.
+ *
+ * Exit 0 every id found, 2 bad usage, 3 a prefix matches no tracker, 4 a known tracker has
+ * no such id (it says which one was searched), 5 a tracker could not be read.
+ *
+ * @grant read
+ */
+import { loadConfig } from '../lib/config.js';
+import { Bd } from '../lib/bd.js';
+import { prefixesInUse } from '../lib/newspace.js';
+import { resolveTarget, shape, render, EXIT } from '../lib/xbead.js';
+
+const argv = process.argv.slice(2);
+const has = (f) => argv.includes(f);
+const USAGE = 'usage: b7e-xbead <id|workspace/id> [<id>...] [--comments] [--json]';
+
+if (has('--help') || has('-h')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+const unknownFlag = argv.find((a) => a.startsWith('-') && !['--comments', '--json'].includes(a));
+if (unknownFlag) {
+  console.error(`b7e-xbead: unrecognised flag: ${unknownFlag}\n${USAGE}`);
+  process.exit(EXIT.usage);
+}
+const ids = argv.filter((a) => !a.startsWith('-'));
+if (!ids.length) {
+  console.error(USAGE);
+  process.exit(EXIT.usage);
+}
+
+const cfg = loadConfig();
+const workspaces = cfg.workspaces || [];
+const prefixes = prefixesInUse(workspaces);
+const known = workspaces.map((w) => w.name);
+const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me });
+const MISSING = /no issue found|not found|does not exist/i;
+const withComments = has('--comments');
+
+// An unknown prefix outranks everything else (spec: exit 3 if any prefix matches no
+// tracker); among the rest the larger code wins.
+const RANK = { [EXIT.ok]: 0, [EXIT.usage]: 1, [EXIT.missing]: 2, [EXIT.unreadable]: 3, [EXIT.unknown]: 4 };
+let code = 0;
+const worse = (c) => {
+  if (RANK[c] > RANK[code]) code = c;
+};
+const records = [];
+const blocks = [];
+
+for (const raw of ids) {
+  const t = resolveTarget(raw, prefixes, known);
+  if (t.error) {
+    worse(t.error === 'usage' ? EXIT.usage : EXIT.unknown);
+    records.push({ id: raw, error: t.error, reason: t.reason });
+    blocks.push(`b7e-xbead: ${raw}: ${t.reason}`);
+    continue;
+  }
+  const ws = workspaces.find((w) => w.name === t.workspace);
+  try {
+    const row = await bd.showWithComments(ws, t.id);
+    if (!row) throw new Error(`no issue found matching "${t.id}"`);
+    const children = await bd.children(ws, t.id);
+    const rec = shape(ws.name, row, children, { comments: withComments ? row.comments || [] : null });
+    records.push(rec);
+    blocks.push(render(rec, { comments: withComments }));
+  } catch (err) {
+    const msg = String(err?.message || err).split('\n')[0];
+    if (MISSING.test(msg)) {
+      worse(EXIT.missing);
+      const reason = `${t.id} is not in the ${ws.name} tracker (searched ${ws.name}, ${ws.dir})`;
+      records.push({ id: t.id, tracker: ws.name, error: 'missing', reason });
+      blocks.push(`b7e-xbead: ${reason}`);
+    } else {
+      worse(EXIT.unreadable);
+      const reason = `could not read ${ws.name} — ${msg}`;
+      records.push({ id: t.id, tracker: ws.name, error: 'unreadable', reason });
+      blocks.push(`b7e-xbead: ${t.id}: ${reason}`);
+    }
+  }
+}
+
+if (has('--json')) console.log(JSON.stringify(records, null, 2));
+else console.log(blocks.join('\n\n'));
+process.exit(code);

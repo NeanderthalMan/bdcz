@@ -1,0 +1,88 @@
+#!/usr/bin/env node
+/**
+ * `b7e-turn` — whose move is this bead, an agent's or Adam's, in one call.
+ *
+ *     b7e-turn -w beadcause -b bc-dgx7.193
+ *     b7e-turn -w loremia -b lm-dbaoa --siblings
+ *     b7e-turn -w loremia -b lm-s1etp --json
+ *
+ * bc-dgx7.193: eight windows opened on beads whose next move was Adam's and each worked
+ * that out by hand. lib/turn.js holds the rules, so the advocate can call the same function.
+ * Prints `<id>: agent|adam — <rule> (<reason>)` and the newest comment that counts as
+ * Adam's input. `--siblings` also answers for the bead's siblings under its parent, and
+ * marks the ones that are Adam's but carry no `human` label.
+ *
+ * Exit 0 answered (whatever the verdict), 2 bad usage, 3 unknown workspace, 4 no such bead,
+ * 1 the tracker could not be read.
+ *
+ * @grant read
+ */
+import { loadConfig, loadState } from '../lib/config.js';
+import { Bd } from '../lib/bd.js';
+import { turn, render } from '../lib/turn.js';
+
+const argv = process.argv.slice(2);
+const has = (f) => argv.includes(f);
+const value = (...names) => {
+  for (const f of names) {
+    const inline = argv.find((a) => a.startsWith(`${f}=`));
+    if (inline) return inline.slice(f.length + 1);
+    const at = argv.indexOf(f);
+    if (at > -1) return argv[at + 1];
+  }
+  return undefined;
+};
+const USAGE = 'usage: b7e-turn -w <workspace> -b <bead> [--siblings] [--json]';
+const fail = (msg, code = 2) => {
+  console.error(`b7e-turn: ${msg}`);
+  process.exit(code);
+};
+if (has('--help') || has('-h')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+const wsName = value('-w', '--workspace');
+const beadId = value('-b', '--bead');
+if (!wsName || !beadId) fail(`-w and -b are required\n${USAGE}`);
+
+const cfg = loadConfig();
+const ws = cfg.workspaces.find((w) => w.name === wsName);
+if (!ws) fail(`no workspace named "${wsName}"\nconfigured: ${cfg.workspaces.map((w) => w.name).join(', ') || 'none'}`, 3);
+const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me });
+const answered = loadState().answered || {};
+
+const MISSING_RE = /no issues? found/i;
+async function read(id) {
+  try {
+    return await bd.showWithComments(ws, id);
+  } catch (err) {
+    if (MISSING_RE.test(String(err?.message || ''))) return null;
+    throw err;
+  }
+}
+
+try {
+  const row = await read(beadId);
+  if (!row) fail(`${wsName} has no bead ${beadId}`, 4);
+  const out = { bead: beadId, ...turn(wsName, row, { answered }) };
+  const siblings = [];
+  if (has('--siblings')) {
+    const parent = row.parent || (row.dependencies || []).find((d) => d.type === 'parent-child')?.depends_on_id;
+    if (parent) {
+      for (const kid of await bd.children(ws, parent)) {
+        if (kid.id === beadId) continue;
+        const full = await read(kid.id);
+        siblings.push({ bead: kid.id, ...turn(wsName, full, { answered }), human: (full?.labels || []).includes('human') });
+      }
+    }
+  }
+  if (has('--json')) console.log(JSON.stringify({ ...out, siblings }, null, 2));
+  else {
+    for (const l of render(beadId, out)) console.log(l);
+    for (const s of siblings) {
+      console.log(`  sibling ${render(s.bead, s)[0]}${s.turn === 'adam' && !s.human ? '  [no human label]' : ''}`);
+    }
+  }
+} catch (err) {
+  fail(`${beadId} — ${String(err?.message || err).split('\n')[0]}`, 1);
+}

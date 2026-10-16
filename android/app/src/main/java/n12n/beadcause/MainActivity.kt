@@ -1,0 +1,494 @@
+package n12n.beadcause
+
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.provider.Settings
+import android.view.View
+import android.webkit.JavascriptInterface
+import android.webkit.WebResourceError
+import android.webkit.WebResourceRequest
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.widget.Toast
+import androidx.activity.OnBackPressedCallback
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
+import n12n.beadcause.databinding.ActivityMainBinding
+import org.json.JSONObject
+
+/**
+ * The app is the PWA.
+ *
+ * Every hard-won behaviour — the two-tap confirm, per-keystroke draft persistence,
+ * the render deferral that stops the list rebuilding under a half-typed answer,
+ * markdown, mermaid, the document reader — already exists in `public/app.js` and is
+ * one WebView away. Re-implementing that in Compose would have meant maintaining
+ * two of everything and re-learning the same UX lessons the hard way.
+ *
+ * What this class adds is the part a web page cannot do: notifications with a typed
+ * reply, a share target, and a watcher that survives the tab being killed.
+ */
+class MainActivity : AppCompatActivity() {
+
+    companion object {
+        const val EXTRA_KEY = "key"
+
+        /**
+         * Which page to open, for a notification that is not about a bead in the inbox.
+         *
+         * [EXTRA_KEY] deep-links to a question by moving the hash, which is right for
+         * everything the app has ever notified about — those are all rows in one list.
+         * A merge landing and a release are not: the question they raise is "has it
+         * reached the running build", and that is the pull request board's, which is
+         * where the ntfy push they replace also pointed. Absent means the inbox, so
+         * every existing caller is unchanged.
+         */
+        const val EXTRA_PATH = "path"
+    }
+
+    private lateinit var binding: ActivityMainBinding
+    private var serverHost: String? = null
+    private var loaded = false
+    /** The microphone behind the answer box's mic button. See Dictation. */
+    private lateinit var dictation: Dictation
+
+    private val pairing = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        if (Prefs.isLive(this)) startUp() else finish()
+    }
+
+    /**
+     * RECORD_AUDIO, asked for on the first tap of the mic rather than at startup.
+     *
+     * Registered here because a launcher has to be created before the activity is
+     * STARTED, which rules out asking from inside [Dictation] at the moment the tap
+     * happens — so the activity owns the dialog and hands the answer back.
+     */
+    private val microphonePermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            dictation.onPermission(granted)
+        }
+
+    private val notificationPermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            if (!granted) {
+                // Not fatal — the app still works, it just can't be the thing that
+                // tells you a decision is waiting, which is most of the point.
+                binding.banner.text = getString(R.string.notifications_denied)
+                binding.banner.visibility = View.VISIBLE
+            }
+        }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        binding = ActivityMainBinding.inflate(layoutInflater)
+        setContentView(binding.root)
+        Notifications.ensureChannels(this)
+        configureWebView()
+        dictation = Dictation(this, binding.webView) { microphonePermission.launch(Manifest.permission.RECORD_AUDIO) }
+
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (binding.webView.canGoBack()) binding.webView.goBack() else finish()
+            }
+        })
+
+        // A pairing saved against the old cleartext URL takes the same road as no
+        // pairing at all — the QR screen — but says so on arrival rather than looking
+        // like the app lost its token. See Prefs.needsRepair.
+        if (Prefs.isLive(this)) {
+            startUp()
+        } else {
+            pairing.launch(
+                Intent(this, PairActivity::class.java)
+                    .putExtra(PairActivity.EXTRA_STALE, Prefs.needsRepair(this))
+            )
+        }
+    }
+
+    private fun startUp() {
+        askForNotifications()
+        WatchService.start(this)
+        // Everything the updater does is drawn by the page — the button in the top bar,
+        // the ask once the download has landed. This is the one wire between them, and it
+        // is pushed rather than polled because a download finishing is an event the page
+        // has no other way to hear. See public/update.js and Updater.
+        Updater.watch(::tellPage)
+        load(intent.getStringExtra(EXTRA_KEY), intent.getStringExtra(EXTRA_PATH))
+    }
+
+    /** Hand the updater's state to the page, whichever page is loaded. */
+    private fun tellPage(json: String) {
+        val quoted = JSONObject.quote(json)
+        runOnUiThread {
+            binding.webView.evaluateJavascript(
+                "window.beadcause && window.beadcause.update && window.beadcause.update.native($quoted);",
+                null,
+            )
+        }
+    }
+
+    private fun askForNotifications() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        val granted = ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
+        if (!granted) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+    }
+
+    /* -------------------------------------------------------------- webview */
+
+    private fun configureWebView() = with(binding.webView.settings) {
+        javaScriptEnabled = true
+        // localStorage is where the token and — more importantly — every in-progress
+        // answer draft lives. Without this, backgrounding the app loses answers.
+        domStorageEnabled = true
+        loadWithOverviewMode = true
+        useWideViewPort = true
+        mediaPlaybackRequiresUserGesture = false
+        // Links open via shouldOverrideUrlLoading instead of spawning WebViews we'd
+        // have to manage; the PWA's target=_blank links become DocActivity or a
+        // Custom Tab, both of which sit on top of this one and hand it back intact.
+        setSupportMultipleWindows(false)
+        javaScriptCanOpenWindowsAutomatically = false
+        cacheMode = WebSettings.LOAD_DEFAULT
+        userAgentString = "$userAgentString Beadcause/${BuildConfig.VERSION_NAME}"
+
+        // Named so it can't be confused with `window.beadcause`, which is the page's
+        // own export in the other direction.
+        binding.webView.addJavascriptInterface(Bridge(), "BeadcauseNative")
+        binding.webView.webViewClient = Client()
+        if (BuildConfig.DEBUG) WebView.setWebContentsDebuggingEnabled(true)
+    }
+
+    private inner class Client : WebViewClient() {
+        override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+            val url = request.url
+            val isOurs = url.host != null && url.host == serverHost
+            return when {
+                // The detail drawer loads /doc and /graph into an iframe over the tab
+                // you were on (public/drawer.js), and a subframe load arrives here
+                // exactly like a tap would. Left alone, or the reader below would open
+                // on top of a drawer that stayed empty behind it.
+                !request.isForMainFrame -> false
+                // The reader tab. Opening it on top keeps your place in the list —
+                // and any answer you'd started typing — exactly where it was.
+                isOurs && url.path?.startsWith("/doc") == true -> {
+                    startActivity(Intent(this@MainActivity, DocActivity::class.java).setData(url))
+                    true
+                }
+                isOurs -> false
+                // Anything off the server is a link out of a brief. `Links` keeps
+                // web pages inside the app in a Custom Tab — signed in, and back
+                // returns you to this card — and lets the system have the rest.
+                else -> {
+                    Links.open(this@MainActivity, url)
+                    true
+                }
+            }
+        }
+
+        override fun onPageFinished(view: WebView, url: String?) {
+            binding.progress.visibility = View.GONE
+            loaded = true
+        }
+
+        override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
+            if (!request.isForMainFrame) return
+            binding.progress.visibility = View.GONE
+            // The overwhelmingly likely cause is being off the tailnet; say that
+            // rather than surfacing a WebView error code.
+            binding.banner.text = getString(R.string.cannot_reach_server, Prefs.baseUrl(this@MainActivity).orEmpty())
+            binding.banner.visibility = View.VISIBLE
+        }
+    }
+
+    /** What the page can call back into. Deliberately tiny. */
+    private inner class Bridge {
+        /**
+         * The page just closed a question. Clear its notification now rather than
+         * waiting for the poll — otherwise answering in the app leaves a live
+         * notification whose buttons would answer an already-closed bead.
+         */
+        @JavascriptInterface
+        fun answered(key: String) {
+            Notifications.cancel(this@MainActivity, key)
+        }
+
+        @JavascriptInterface
+        fun version(): String = BuildConfig.VERSION_NAME
+
+        /* ------------------------------------------------------ replacing the shell */
+
+        /**
+         * Which build this is, as a number the daemon can compare against.
+         *
+         * public/update.js asks this before it asks for anything else, and an APK that
+         * predates the feature simply does not have the method — so the page finds no
+         * version, concludes it cannot tell, and never offers an update. That is the
+         * right behaviour for an old shell: it would not know how to install one either.
+         */
+        @JavascriptInterface
+        fun updateVersion(): Int = Updater.installedVersion()
+
+        /** What the shell is doing about the update, for a page that has just loaded. */
+        @JavascriptInterface
+        fun updateState(): String = Updater.state()
+
+        /**
+         * A deploy rebuilt the APK — go and see.
+         *
+         * The argument is deliberately ignored. The page knows *that* something was
+         * published; what it is, and whether it is newer than this build, [Updater] reads
+         * from `/api/update` itself over the paired connection. A bridge that installed
+         * whatever the WebView named would be one URL in one rendered page away from
+         * installing something else.
+         */
+        @JavascriptInterface
+        fun downloadUpdate(@Suppress("UNUSED_PARAMETER") ignored: String?) {
+            Updater.download(this@MainActivity)
+        }
+
+        /** Apply it. This is the tap that restarts the app, so it is never called unasked. */
+        @JavascriptInterface
+        fun installUpdate() {
+            // startActivity — for the platform's confirm screen, and for the settings
+            // screen when the permission is missing — wants the main thread, and a
+            // @JavascriptInterface method arrives on the JavaBridge one.
+            runOnUiThread { Updater.install(this@MainActivity) }
+        }
+
+        /**
+         * Whether the answer box draws a mic at all.
+         *
+         * Asked at render time by public/dictate.js, once per card. False on a device
+         * with no recognition service, and on a shell too old to have this method —
+         * which the page detects by the method simply not being there, so an APK that
+         * predates dictation keeps working with no mic rather than a broken one.
+         */
+        @JavascriptInterface
+        fun dictationAvailable(): Boolean = dictation.available()
+
+        /**
+         * Open the microphone and push what it hears into the page.
+         *
+         * Everything about *where* the words go — which box, which caret, which draft
+         * — stays in the page, which is the only side that knows. This is the audio
+         * and nothing else. See Dictation for the five events that come back.
+         */
+        @JavascriptInterface
+        fun startDictation() {
+            // SpeechRecognizer is main-thread-only and a @JavascriptInterface method
+            // arrives on the JavaBridge thread — the same reason openInBrowser hops.
+            runOnUiThread { dictation.start() }
+        }
+
+        @JavascriptInterface
+        fun stopDictation() {
+            runOnUiThread { dictation.stop() }
+        }
+
+        /**
+         * Hand the page you are looking at to Chrome.
+         *
+         * There is otherwise no way out. `shouldOverrideUrlLoading` returns false for
+         * our own host on purpose — the console *is* this app — so a link to it, from
+         * anywhere inside here, only ever reloads this WebView. That is right for
+         * everyday use and wrong for the times the console wants a real browser: the
+         * wide layouts a phone never triggers (the split card, the proposal beside the
+         * conversation, the drawer as a panel), a terminal with more than forty
+         * columns, a graph with room to be read.
+         *
+         * **The URL is rebuilt here rather than accepted from the page.** Host and
+         * token come from [Prefs] and only the path, query and fragment of what the
+         * WebView is showing are carried over, so the bridge cannot be talked into
+         * launching an arbitrary intent, and Chrome opens on the card you had open
+         * rather than at the top of the list.
+         *
+         * The token has to ride in the URL. Chrome is a different storage context —
+         * its localStorage is not this WebView's — so without `?t=` the page would
+         * greet you with the token prompt. It is the same shape `npm run qr` prints,
+         * and `bootToken()` in app.js strips it back out of the address bar on
+         * arrival.
+         */
+        @JavascriptInterface
+        fun openInBrowser() {
+            // A @JavascriptInterface method runs on the JavaBridge thread, and both
+            // `webView.url` and `startActivity` want the main one.
+            runOnUiThread {
+                val conn = Prefs.connection(this@MainActivity) ?: return@runOnUiThread
+                // A toast rather than the banner: the banner is for a state you are in
+                // — notifications off, server unreachable — and stays until something
+                // clears it. This is one tap that found nothing, and it should pass.
+                if (!Links.openInChrome(this@MainActivity, externalUrl(conn))) {
+                    Toast.makeText(this@MainActivity, R.string.no_browser, Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+
+        /**
+         * Android's own notification settings screen for this app — the volume,
+         * vibration, importance and schedule picker per channel that [Notifications]
+         * publishes, so beadcause never has to build or keep in sync a second copy of it.
+         *
+         * [Settings.ACTION_APP_NOTIFICATION_SETTINGS] lands on the whole-app screen
+         * rather than one channel's own — deliberately, over the alternative of five
+         * deep links (one per [Notifications] channel) that would have to be kept in
+         * step with that file by hand. The app screen already lists every channel as
+         * its own tappable row, so "one tap from the app" is satisfied by landing here;
+         * a typo in a hand-maintained channel id would instead open a settings screen
+         * on nothing.
+         */
+        @JavascriptInterface
+        fun openNotificationSettings() {
+            // A @JavascriptInterface method runs on the JavaBridge thread, and
+            // `startActivity` wants the main one — same reason openInBrowser hops.
+            runOnUiThread {
+                startActivity(
+                    Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                        .putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+                )
+            }
+        }
+
+        /**
+         * The Decisions channel's own buzz, fired outside a channel — bc-ka5y.15.18.
+         *
+         * `Notifications.SMALLEST_BUZZ` is the pattern a channel is actually cut with,
+         * so this is not an approximation of it, it is the same array. Firing it from
+         * here spends no channel and changes nothing about `answers_v1` — it is a way
+         * to feel the existing buzz beside the alternative below, nothing more.
+         */
+        @JavascriptInterface
+        fun feelBuzz() {
+            runOnUiThread { vibrate(VibrationEffect.createWaveform(longArrayOf(0, 20), -1)) }
+        }
+
+        /**
+         * The other side of the comparison: a true single tick, which a channel's
+         * `vibrationPattern` has no way to express — that field is durations only, with
+         * no amplitude, so the smallest it can ask for is [feelBuzz]'s floor. `EFFECT_TICK`
+         * is a device-tuned haptic primitive rather than a raw motor pulse, which is the
+         * whole reason bc-ka5y.15.6 called it worth feeling before spending a channel on
+         * it. Below API 29 there is no predefined effect to ask for, so this falls back to
+         * a 1ms pulse — the closest a plain waveform gets, and clearly still not the same
+         * primitive, which the fallback does not pretend otherwise about.
+         */
+        @JavascriptInterface
+        fun feelTick() {
+            runOnUiThread {
+                vibrate(
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        VibrationEffect.createPredefined(VibrationEffect.EFFECT_TICK)
+                    } else {
+                        VibrationEffect.createOneShot(1, VibrationEffect.DEFAULT_AMPLITUDE)
+                    }
+                )
+            }
+        }
+    }
+
+    /** Behind [Bridge.feelBuzz] and [Bridge.feelTick] — fires and forgets. */
+    private fun vibrate(effect: VibrationEffect) {
+        ContextCompat.getSystemService(this, Vibrator::class.java)?.vibrate(effect)
+    }
+
+    /**
+     * Where this WebView is, addressed so that a browser with none of its state can
+     * arrive at the same place.
+     *
+     * Every query parameter but the token is carried across, because the page may be
+     * a terminal (`/terminal?id=…`) or a graph centred on a bead (`/graph?ws=&id=`),
+     * and dropping those lands Chrome on a different screen than the one you asked to
+     * see. The token is then appended from prefs — replacing, not duplicating, the one
+     * this WebView was launched with.
+     */
+    private fun externalUrl(conn: Conn): Uri {
+        val base = Uri.parse(conn.baseUrl)
+        val here = Uri.parse(binding.webView.url ?: conn.baseUrl)
+        val out = Uri.Builder()
+            .scheme(base.scheme)
+            .encodedAuthority(base.encodedAuthority)
+            .encodedPath(here.encodedPath?.takeIf { it.isNotEmpty() } ?: "/")
+        for (name in here.queryParameterNames) {
+            if (name == "t") continue
+            here.getQueryParameters(name).forEach { out.appendQueryParameter(name, it) }
+        }
+        out.appendQueryParameter("t", conn.token)
+        here.encodedFragment?.let { out.encodedFragment(it) }
+        return out.build()
+    }
+
+    /* ----------------------------------------------------------------- load */
+
+    private fun load(key: String?, path: String? = null) {
+        val conn = Prefs.connection(this) ?: return
+        serverHost = Uri.parse(conn.baseUrl).host
+        binding.banner.visibility = View.GONE
+        binding.progress.visibility = View.VISIBLE
+        // The `?t=` is the same pairing URL shape the QR carries; `bootToken()` in
+        // app.js stores it and strips it back out of the address bar.
+        val fragment = key?.let { "#" + Uri.encode(it) }.orEmpty()
+        // A single leading-slash path off the same origin, or the inbox. Taken apart and
+        // rebuilt rather than concatenated: an intent extra is not a place to trust a
+        // string from, and the only thing this is allowed to choose is which page of
+        // this server to open.
+        val page = path?.trim()?.takeIf { it.matches(Regex("^/[a-z0-9-]{1,32}$")) } ?: "/"
+        binding.webView.loadUrl("${conn.baseUrl}$page?t=${Uri.encode(conn.token)}$fragment")
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        // A page rather than a bead: there is no hash to move to, so it is a load either
+        // way. Ahead of the key check below because a news card carries no key at all.
+        intent.getStringExtra(EXTRA_PATH)?.let { return load(null, it) }
+        val key = intent.getStringExtra(EXTRA_KEY) ?: return
+        if (!loaded) return load(key)
+        // Reloading would throw away scroll position and any draft in a textarea, so
+        // move the hash instead and let the page's own hashchange handler scroll to it.
+        val quoted = JSONObject.quote(key)
+        binding.webView.evaluateJavascript(
+            "(function(){var h='#'+encodeURIComponent($quoted);" +
+                "if(location.hash===h){location.hash='';}location.hash=h;})();",
+            null,
+        )
+    }
+
+    override fun onResume() {
+        super.onResume()
+        binding.webView.onResume()
+        // "Beadcause updated — tap to reopen" has done its job the moment this is on
+        // screen, whether the tap or the relaunch got us here. See UpdateReceiver for why
+        // it is posted even when the relaunch is expected to work.
+        Notifications.clearUpdated(this)
+        // Came back from the shade or from a doc; pull fresh questions. `refresh` is
+        // exported by app.js for exactly this. It's a no-op if a card is mid-answer.
+        if (loaded) binding.webView.evaluateJavascript("window.beadcause && window.beadcause.refresh();", null)
+    }
+
+    override fun onPause() {
+        // The screen you were dictating into is no longer in front of you, and an app
+        // that goes on holding the microphone from the background is the one thing a
+        // feature like this must never do.
+        dictation.stop()
+        binding.webView.onPause()
+        super.onPause()
+    }
+
+    override fun onDestroy() {
+        dictation.destroy()
+        // The updater outlives this activity — a download runs on its own scope, and an
+        // install deliberately survives the process — so what is dropped here is only the
+        // wire to a WebView that is about to stop existing.
+        Updater.unwatch()
+        binding.webView.destroy()
+        super.onDestroy()
+    }
+}

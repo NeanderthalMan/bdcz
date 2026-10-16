@@ -1,0 +1,151 @@
+#!/usr/bin/env node
+/**
+ * `b7e-remerge` — re-queue a stale merge card: is its conflict gone, where is the branch,
+ * and what is the delivery call.
+ *
+ *     b7e-remerge -w loremia lm-5i2.200
+ *     b7e-remerge -w loremia lm-5i2.200 --merge --worktree /abs/path/to/worktree
+ *     b7e-remerge -w loremia lm-5i2.200 --json
+ *
+ * bc-dgx7.191: four sessions opened on a stalled `Merge #N — …` card and each rebuilt this
+ * by hand. See lib/remerge.js for the rule; the branch facts are lib/prbranch.js's.
+ *
+ * Reads the card, the pull request's current head, every copy of its branch, and a dry-run
+ * merge of origin/main into the newest. With `--merge --worktree <abs>` it also performs
+ * that merge, in that worktree only, and only when the dry run was clean. The delivery is
+ * printed, never run.
+ *
+ * Exit codes: `0` readable (and merged if asked). `1` diverged, conflicted, or a refused
+ * --merge. `2` bad usage. `4` the workspace, card or pull request is not there.
+ *
+ * @grant read
+ */
+import { execFileSync } from 'node:child_process';
+import { loadConfig } from '../lib/config.js';
+import { Bd } from '../lib/bd.js';
+import { resolveSessionDir } from '../lib/session.js';
+import { mainCheckout } from '../lib/gitref.js';
+import * as pr from '../lib/pr.js';
+import { prBranch, describePrBranch } from '../lib/prbranch.js';
+import { cardPlan, deliverCommand, mergeTarget } from '../lib/remerge.js';
+
+const argv = process.argv.slice(2);
+const has = (f) => argv.includes(f);
+const value = (...names) => {
+  for (const f of names) {
+    const inline = argv.find((a) => a.startsWith(`${f}=`));
+    if (inline) return inline.slice(f.length + 1);
+    const at = argv.indexOf(f);
+    if (at > -1) return argv[at + 1];
+  }
+  return undefined;
+};
+
+const USAGE = `usage: b7e-remerge -w <workspace> <merge-bead> [--worktree <abs path>] [--merge] [--json]
+
+Re-queue a stalled merge card. Reads the card, the pull request's head, every copy of its
+branch and a dry-run merge of origin/main into the newest; prints the delivery call
+(the WORK bead with --branch <pr-head> — deliver.js supersedes the card itself).
+
+  -w, --workspace <name>   which tracker (required)
+  <merge-bead>             the card, "Merge #N — <work-bead>: …"
+  --merge                  merge origin/main into --worktree, only if the dry run is clean
+  --worktree <abs path>    the one worktree --merge may touch (must hold the newest copy)
+  --json                   the machine-readable form
+
+Exit 0 ok. Exit 1 diverged / conflicted / --merge refused. Exit 4 not found.`;
+
+if (has('--help') || has('-h')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+const fail = (msg, code = 2) => {
+  console.error(`b7e-remerge: ${msg}`);
+  process.exit(code);
+};
+
+const wsName = value('-w', '--workspace');
+const worktree = value('--worktree');
+const flagValues = new Set([wsName, worktree]);
+const cardId = argv.find((a) => !a.startsWith('-') && !flagValues.has(a));
+if (!wsName) fail(`-w/--workspace is required\n${USAGE}`);
+if (!cardId) fail(`a merge-bead id is required\n${USAGE}`);
+if (has('--merge') && !worktree) fail('--merge needs --worktree <absolute path>');
+if (worktree && !worktree.startsWith('/')) fail('--worktree must be an absolute path');
+
+const cfg = loadConfig();
+const ws = cfg.workspaces.find((w) => w.name === wsName);
+if (!ws) fail(`no workspace named "${wsName}"\nconfigured workspaces: ${cfg.workspaces.map((w) => w.name).join(', ') || 'none'}`, 4);
+
+const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me });
+let row = null;
+try {
+  row = await bd.show(ws, cardId);
+} catch (err) {
+  fail(`${ws.name} has no bead ${cardId}: ${String(err?.message || err).split('\n')[0]}`, 4);
+}
+const plan = cardPlan(row);
+if (!plan.ok) fail(plan.reason, 4);
+
+let dir;
+try {
+  dir = resolveSessionDir(cfg, ws, row);
+} catch (err) {
+  fail(`could not resolve a checkout for ${ws.name}: ${String(err?.message || err).split('\n')[0]}`, 4);
+}
+let found;
+try {
+  found = await pr.view(dir, String(plan.number));
+} catch (err) {
+  fail(`no such pull request #${plan.number}: ${String(err?.message || err).split('\n')[0]}`, 4);
+}
+const state = found.state;
+const branch = found.branch || plan.branch;
+const result = await prBranch(dir, { branch, prSha: found.headSha || null, base: found.base || plan.base });
+const main = await mainCheckout(dir);
+const root = new URL('..', import.meta.url).pathname.replace(/\/$/, '');
+const deliver = state === 'OPEN' ? deliverCommand({ root, workspace: ws.name, bead: plan.bead, branch }) : null;
+
+let merged = null;
+let refused = null;
+if (has('--merge')) {
+  const t = mergeTarget(result.copies, result.newest, worktree, main);
+  if (result.diverged) refused = 'the branch has diverged';
+  else if (!t.ok) refused = t.reason;
+  else if (!result.merge.ran || !result.merge.clean) refused = 'the dry-run merge is not clean';
+  else {
+    try {
+      execFileSync('git', ['-C', worktree, 'merge', '--no-edit', result.merge.base], { encoding: 'utf8', stdio: 'pipe' });
+      merged = execFileSync('git', ['-C', worktree, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+    } catch (err) {
+      refused = `git merge failed: ${String(err?.stderr || err?.message || err).split('\n')[0]}`;
+    }
+  }
+}
+
+const out = {
+  workspace: ws.name,
+  card: cardId,
+  pr: { number: found.number, url: found.url, state, headSha: found.headSha || null },
+  workBead: plan.bead,
+  ...result,
+  merged,
+  refused,
+  deliver,
+  needsTap: state === 'OPEN' && !plan.bead,
+};
+if (has('--json')) console.log(JSON.stringify(out, null, 2));
+else {
+  console.log(`b7e-remerge ${cardId} · #${found.number} · ${branch} · ${state} · work bead ${plan.bead || '(none)'}\n`);
+  for (const line of describePrBranch(result)) console.log(line);
+  if (merged) console.log(`\nmerged ${result.merge.base} into ${worktree}: now ${merged.slice(0, 9)} (not pushed — deliver.js pushes)`);
+  if (refused) console.log(`\n--merge refused: ${refused}`);
+  console.log('');
+  if (state !== 'OPEN') console.log(`#${found.number} is ${state}: nothing to re-queue.`);
+  else if (out.needsTap) console.log("the card names no work bead, so deliver.js has nothing to deliver against: a re-queue needs Adam's tap (bin/merge.js is classifier-gated).");
+  else {
+    console.log(`re-queue, from a worktree whose HEAD contains origin/${branch} (deliver.js pushes HEAD there):`);
+    console.log(`  ${deliver}`);
+  }
+}
+process.exitCode = result.diverged || refused || (result.merge.ran && !result.merge.clean) ? 1 : 0;

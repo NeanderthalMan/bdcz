@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b0f14" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f6f7f9" media="(prefers-color-scheme: light)">
+  <title>Beadcause · graph</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body class="doc-body graph-body">
+  <header class="topbar">
+    <div class="brand">
+      <span class="dot"></span>
+      <h1 id="graph-title">Loading…</h1>
+    </div>
+    <button id="graph-close" class="icon-btn" aria-label="Close tab">✕</button>
+  </header>
+
+  <nav class="scope" id="scope" hidden>
+    <button data-scope="bead" class="scope-btn">This bead</button>
+    <button data-scope="all" class="scope-btn">Whole workspace</button>
+  </nav>
+
+  <main id="graph-main" class="graph-main">
+    <svg id="canvas" aria-label="Dependency graph"></svg>
+
+    <!-- Growth counter. Doubles as the loading line, so the screen is never blank. -->
+    <div id="growth" class="growth" hidden>
+      <span id="growth-text">asking bd for the graph…</span>
+      <button id="growth-pause" class="growth-btn" hidden>Pause</button>
+    </div>
+
+    <div id="empty" class="empty" hidden></div>
+
+    <!-- Which bead is under the glass. The brackets frame it; this names it,
+         because a node truncates its title to twenty characters. -->
+    <div id="reticle-label" class="reticle-label" hidden></div>
+
+    <!-- The tapped bead, big enough to read. -->
+    <div id="card" class="node-card" hidden>
+      <div class="node-card-meta">
+        <span class="pill id" id="card-id"></span>
+        <span class="pill" id="card-status"></span>
+        <span class="pill" id="card-priority"></span>
+      </div>
+      <p class="node-card-title" id="card-title"></p>
+      <!-- What is happening to it right now. Hidden when nothing is. -->
+      <p class="node-card-live" id="card-live" hidden></p>
+      <p class="node-card-deps" id="card-deps"></p>
+      <div class="node-card-row">
+        <button class="primary" id="card-details">Details</button>
+        <button class="secondary" id="card-dismiss">Dismiss</button>
+      </div>
+    </div>
+  </main>
+
+  <!-- Detail drawer: a sheet by default, full screen on ⤢. -->
+  <section id="sheet" class="sheet" hidden aria-label="Bead details">
+    <div class="sheet-grip"></div>
+    <header class="sheet-head">
+      <span class="pill id" id="sheet-id"></span>
+      <div class="sheet-actions">
+        <!-- What is about the bead, left of the two that are about the sheet. The popover
+             itself is inserted into this wrap on tap, never rendered with the head — see
+             `openSheetMenu`, which is the inbox card's `state.menu` surgery a second time. -->
+        <div class="menu-wrap">
+          <button id="sheet-menu" class="kebab" aria-haspopup="true" aria-expanded="false"
+            aria-label="More actions">⋮</button>
+        </div>
+        <button id="sheet-expand" class="icon-btn" aria-label="Full screen">⤢</button>
+        <button id="sheet-close" class="icon-btn" aria-label="Close details">✕</button>
+      </div>
+    </header>
+    <div class="sheet-body" id="sheet-body"></div>
+  </section>
+
+  <!-- Every error this page hits, sent back to the daemon as a P0 bead: an uncaught
+       exception, a rejected promise, a failed fetch, any red toast. Ahead of every
+       other script, because it can only catch what loads after it — and it is purely
+       additive, so a page that fails to load it behaves exactly as it did before. -->
+  <script src="/report.js"></script>
+  <!-- The beads that go round the brand dot while this page is fetching. Loaded on
+       every page that has a dot to put them on, and driven from report.js's own count of
+       what is in flight rather than from anything this view says. See public/orbit.js. -->
+  <script src="/orbit.js"></script>
+  <!-- Whether what you are looking at is current, and the banner that says when it is
+       not. Loaded on every page with a top bar, because the state it reports is a page
+       that has stopped repainting — which no page can report from inside its own render.
+       Before stream.js, which stamps it on every answer. See public/freshness.js. -->
+  <script src="/freshness.js"></script>
+  <!-- The app menu — the mark in a gear at the left of the top bar, and everything the
+       bar used to hold loose behind it: this page's own top-right buttons, Admin, and
+       which of your lives every screen is about. Before the page's own script, because
+       it *moves* those buttons rather than copying them: a page that wires one by id
+       afterwards is still wiring the element the thumb lands on. See
+       public/accountbar.js. -->
+  <script src="/accountbar.js"></script>
+  <script src="/vendor/d3.js"></script>
+  <script src="/vendor/marked.js"></script>
+  <script src="/vendor/purify.js"></script>
+  <script src="/presence.js"></script>
+  <script src="/graph.js"></script>
+  <!-- Same as doc.html: only the in-the-drawer half of this ever runs here, and only
+       when the graph is what a drawer is showing. -->
+  <script src="/drawer.js"></script>
+</body>
+</html>

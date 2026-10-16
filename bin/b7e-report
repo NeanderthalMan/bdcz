@@ -1,0 +1,229 @@
+#!/usr/bin/env node
+/**
+ * `b7e-report` — land a relay reviewer subagent's report in the repo verbatim, or say it
+ * died. bc-dgx7.148, filed by the session audit against five relay sessions that each
+ * answered "did the checker finish, and what did it say" a different way for the same
+ * relay shape: a scratchpad extraction script, an
+ * inline `python3 - <<EOF` heredoc once per report, hand-retyping both reports with
+ * `Write`, and — worst — a session that found out its subagent had died on a rate limit
+ * only much later, by which point it had already hand-written the other role's report
+ * and run the dead one inline instead, which its own debrief says makes that check not
+ * independent of the one writing the fix.
+ *
+ *   b7e-report <agent-id> --role <role>                  print the report to stdout
+ *   b7e-report <agent-id> --role <role> --to <path>       write it there instead
+ *   b7e-report <agent-id> --role <role> --wait            block until the subagent finishes
+ *   b7e-report <agent-id> --role <role> --timeout <secs>  give up after that long (implies --wait)
+ *
+ * `<role>` is any role a relay declares — in this checkout's `.beadcause/relays.yaml` or in
+ * the config's `relays` (lib/relaydefs.js). beadcause ships none, so with nothing declared
+ * every role is refused.
+ *
+ * `<agent-id>` is the id an `Agent` tool call backgrounds under — the same id
+ * `bin/b7e-await` takes, and resolved the identical way: `lib/taskfile.js`'s
+ * `resolveTaskFile`, which tries this process's own cwd first and falls back across
+ * every sibling cwd-slug carrying the same `$CLAUDE_CODE_SESSION_ID`, so a worktree
+ * entered *after* the subagent was launched still resolves it (bc-dgx7.99's own reason
+ * for that fallback, reused rather than reimplemented).
+ *
+ * **Why this cannot just tail the file like `b7e-await` does.** A subagent's
+ * `<task-id>.output` is not raw stdout+stderr with a bash-style `[exited with code N]`
+ * trailer — it is the session's own JSONL transcript, and the report is one `text`
+ * content block inside one `assistant` event, not the whole file. `lib/relayreport.js`
+ * has the parsing, the heading match (`# Editor...`, `## Critic...` — the `#` depth varies
+ * in real reports, so this matches "some `#`s then the role name", not a fixed string),
+ * and the three-way "found / died on an API error / still running" read. See its header
+ * for the full shape, worked out by inspecting real relay transcripts rather than from
+ * any doc — there is none for this format.
+ *
+ * **`--wait` / `--timeout`, and why they are two flags.** The ordinary case is "the
+ * subagent already finished, hand me its report" — a single read, no blocking, which is
+ * why plain `b7e-report <id> --role <role>` with neither flag does not wait at all: not
+ * found yet reads as "still running" and exits immediately. `--wait` is for a caller
+ * that is not sure yet and is willing to block; `--timeout <secs>` bounds that wait (and
+ * implies it even without `--wait` — the same shape `b7e-await` uses, since a caller
+ * asking for a bound has already said they want to wait).
+ *
+ * Exit codes: `0` found the matching report — printed or written. `2` bad usage.
+ * `124` still running (no task by that id has even turned up yet counts as "still
+ * running") and `--timeout` ran out, or nothing was found with no wait requested at all
+ * (a zero-length wait is still a timeout). `125` the subagent's run ended in an API
+ * error (most often a rate limit) before it ever produced a matching report — the reason
+ * is on stderr and nothing is written. `126` the subagent finished (a `SubagentStop` was
+ * seen) but nothing in its transcript matched the expected heading — wrong role, or it
+ * answered some other way.
+ *
+ * b7e-report (bc-dgx7.148) is deliberately NOT on `DEFAULT_TOOL_LIST` — `@grant
+ * excluded` rather than `@grant read`, because unlike `b7e-await`'s argv this one's
+ * `--to <path>` names a real path it writes to.
+ *
+ * **Not `@grant write` either.** `KINDS` in lib/tooldecl.js lists `write` as a real
+ * option and this tool is exactly the shape it names, but `lib/grants.js`'s
+ * `grantProblems` requires a `why` and a `granted` allowlist on every non-`read`
+ * entry, and the declaration a `@grant` header produces (`{ kind }`,
+ * nothing else — see `B7E_GRANTS` in lib/tooldecl.js) has nowhere to carry either. Hand-
+ * writing that metadata into lib/grants.js's `GRANTS` object is not an option either:
+ * test/tooldecl.mjs refuses a name that is both declared in bin/ and written out there
+ * as a collision. So `write` is currently unusable by any `@grant` header at all — filed
+ * as a follow-up rather than solved here — and `excluded` is the same choice every other
+ * tool in this family that always or conditionally writes has made (b7e-apply, b7e-take,
+ * b7e-swbump, b7e-fresh, b7e-asset): off `DEFAULT_TOOL_LIST`, on PATH for a worker
+ * session's already-unrestricted Bash.
+ *
+ * @grant excluded
+ */
+import fs from 'node:fs';
+import path from 'node:path';
+
+import { execFileSync } from 'node:child_process';
+
+import { resolveTaskFile } from '../lib/taskfile.js';
+import { parseEvents, reportIn } from '../lib/relayreport.js';
+import { relaysIn } from '../lib/relaydefs.js';
+import { rolesOf } from '../lib/relay.js';
+import { CONFIG_PATH } from '../lib/config.js';
+
+/**
+ * Every role a relay declares, from where a session here can see one: this checkout's own
+ * `.beadcause/relays.yaml`, and every workspace's entry in the config's `relays`. Read
+ * straight off the file rather than through `loadConfig`, which reconciles and writes —
+ * a read-only tool has no business doing either.
+ */
+function knownRoles() {
+  const roles = new Set();
+  let root = process.cwd();
+  try {
+    root = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim() || root;
+  } catch {
+    /* not a checkout — the cwd is the only place to look */
+  }
+  for (const def of Object.values(relaysIn(root).relays)) for (const r of rolesOf(def)) roles.add(r);
+  try {
+    const cfg = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+    for (const def of Object.values(cfg?.relays || {})) for (const r of rolesOf(def)) roles.add(r);
+  } catch {
+    /* no config, or one that will not parse — only the checkout's roles count */
+  }
+  return [...roles].sort();
+}
+
+const USAGE = `usage: b7e-report <agent-id> --role <role> [--to <path>] [--wait] [--timeout <seconds>] [--dir <path>]
+
+Reads a backgrounded Agent (subagent) call's transcript and, once it has produced its
+final report, writes that report verbatim to <path> (or prints it to stdout with no
+--to). --wait blocks until the subagent finishes; --timeout <seconds> bounds that wait
+(and implies --wait on its own). --dir <path> looks for <agent-id>.output directly under
+<path>, skipping the usual session/cwd search.`;
+
+function arg(name) {
+  const eq = process.argv.find((a) => a.startsWith(`${name}=`));
+  if (eq) return eq.slice(name.length + 1);
+  const i = process.argv.indexOf(name);
+  if (i === -1) return undefined;
+  return process.argv[i + 1];
+}
+const has = (name) => process.argv.includes(name) || process.argv.some((a) => a.startsWith(`${name}=`));
+
+if (has('--help') || has('-h')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+
+const positional = process.argv.slice(2).filter((a, i, all) => {
+  if (a.startsWith('-')) return false;
+  const prev = all[i - 1];
+  return !(prev === '--role' || prev === '--to' || prev === '--timeout' || prev === '--dir');
+});
+const agentId = positional[0];
+
+const role = arg('--role');
+const toPath = arg('--to');
+const explicitDir = arg('--dir');
+
+const timeoutRaw = arg('--timeout');
+const timeoutMs = timeoutRaw !== undefined ? Number(timeoutRaw) * 1000 : undefined;
+
+if (!agentId || !role) {
+  console.log(USAGE);
+  process.exit(2);
+}
+const ROLES = knownRoles();
+if (!ROLES.includes(String(role).trim().toLowerCase())) {
+  console.error(
+    `b7e-report: --role must be one of ${ROLES.length ? ROLES.join(', ') : '(none — no relay here declares any roles)'}, got ${JSON.stringify(role)}`
+  );
+  process.exit(2);
+}
+if (timeoutRaw !== undefined && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) {
+  console.error(`b7e-report: --timeout <seconds> must be a positive number, got ${JSON.stringify(timeoutRaw)}`);
+  process.exit(2);
+}
+
+const waiting = has('--wait') || timeoutMs !== undefined;
+const POLL_MS = 300;
+
+const EXIT_TIMEOUT = 124;
+const EXIT_ERROR = 125;
+const EXIT_NO_ANSWER = 126;
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function land(text) {
+  if (toPath) {
+    fs.mkdirSync(path.dirname(toPath), { recursive: true });
+    fs.writeFileSync(toPath, text);
+    const words = text.trim().split(/\s+/).filter(Boolean).length;
+    const heading = text.split('\n', 1)[0].trim();
+    console.log(`${toPath}  ${words} words  ${heading}`);
+  } else {
+    process.stdout.write(text.endsWith('\n') ? text : `${text}\n`);
+  }
+  process.exit(0);
+}
+
+async function main() {
+  const start = Date.now();
+  const deadline = timeoutMs !== undefined ? start + timeoutMs : undefined;
+
+  let file = null;
+  for (;;) {
+    if (!file) {
+      const resolved = resolveTaskFile(agentId, { dir: explicitDir });
+      if (resolved.noSession) {
+        console.error(
+          'b7e-report: $CLAUDE_CODE_SESSION_ID is not set, so there is no session to search — pass --dir <path> pointing at the tasks directory directly.'
+        );
+        process.exit(2);
+      }
+      file = resolved.file;
+      if (!file) {
+        if (!waiting || (deadline !== undefined && Date.now() >= deadline)) process.exit(EXIT_TIMEOUT);
+        await sleep(POLL_MS);
+        continue;
+      }
+    }
+
+    const events = parseEvents(fs.readFileSync(file, 'utf8'));
+    const result = reportIn(events, role, { roles: ROLES });
+
+    if (result.status === 'found') land(result.text);
+
+    if (result.status === 'error') {
+      const kind = result.reason === 'rate_limit' ? 'hit a rate limit' : `ended in an API error (${result.reason})`;
+      const status = result.apiErrorStatus !== undefined ? ` (HTTP ${result.apiErrorStatus})` : '';
+      console.error(`b7e-report: ${agentId} ${kind}${status} before producing a report`);
+      process.exit(EXIT_ERROR);
+    }
+
+    if (result.status === 'no-answer') {
+      console.error(`b7e-report: ${agentId} finished but nothing in its transcript matched the "${role}" report shape`);
+      process.exit(EXIT_NO_ANSWER);
+    }
+
+    // result.status === 'running'
+    if (!waiting || (deadline !== undefined && Date.now() >= deadline)) process.exit(EXIT_TIMEOUT);
+    await sleep(POLL_MS);
+  }
+}
+
+await main();

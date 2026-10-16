@@ -1,0 +1,125 @@
+#!/usr/bin/env node
+/**
+ * `b7e-taken` — is this command name free? In `bin/`, in the two registration files, in
+ * the docs, on `origin/main`, in an open pull request, in a live worktree, and in the
+ * tracker.
+ *
+ *     b7e-taken b7e-covers                     check against this checkout and origin/main
+ *     b7e-taken b7e-covers -w beadcause         and the beadcause tracker too
+ *     b7e-taken b7e-covers b7e-dup -w beadcause one verdict per name
+ *     b7e-taken b7e-covers --json               one object per name instead
+ *     b7e-taken b7e-covers --dir /path/to/repo  another checkout entirely
+ *
+ * bc-dgx7.135: four sessions each asked "is this name already taken?" and each answered
+ * from a different subset of the seven places a name can already be claimed — see
+ * lib/taken.js's header for the case each one missed and what it cost. `-w` is
+ * repeatable, for a name that could collide across more than one tracker.
+ *
+ * Exit codes: `0` every name is free. `3` at least one name is taken — every claimant is
+ * printed either way. `2` bad usage. `4` `-w` named a workspace this checkout's config
+ * does not have. `5` a named tracker could not be read at all.
+ *
+ * @grant read
+ */
+import { loadConfig } from '../lib/config.js';
+import { Bd } from '../lib/bd.js';
+import { checkNames, loadTrackerRows, describeClaim, isValidName } from '../lib/taken.js';
+
+const argv = process.argv.slice(2);
+const has = (f) => argv.includes(f);
+const values = (...names) => {
+  const out = [];
+  for (let i = 0; i < argv.length; i += 1) {
+    if (names.includes(argv[i])) {
+      const inline = argv[i + 1];
+      if (inline !== undefined) out.push(inline);
+    } else {
+      for (const n of names) {
+        if (argv[i].startsWith(`${n}=`)) out.push(argv[i].slice(n.length + 1));
+      }
+    }
+  }
+  return out;
+};
+const value = (...names) => values(...names).at(-1);
+
+const USAGE = `usage: b7e-taken <name>... [-w <workspace>]... [--json] [--dir <root>]
+
+One verdict per name: free, or taken with every claimant listed and located — the bin/
+file, the package.json and package-lock.json registration, the README/docs section, the
+path on origin/main, any open pull request whose head branch already has it, any live
+worktree that already holds it, and (with -w) any open bead in that tracker naming it.
+
+  -w, --workspace <name>   a tracker to also search (repeatable)
+  --dir <root>             the checkout to check, instead of the current directory
+  --json                   one object per name instead of the printed report
+
+Exits 0 when every name is free, 3 when at least one is taken, 2 on bad usage, 4 when a
+named workspace does not exist, 5 when a named tracker could not be read.`;
+
+if (has('--help') || has('-h')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+
+const dir = value('--dir') || process.cwd();
+const jsonMode = has('--json');
+const wsNames = values('-w', '--workspace');
+const dirFlagValues = new Set(['--dir', '-w', '--workspace']);
+const names = argv.filter((a, i) => {
+  if (a.startsWith('-')) return false;
+  if (dirFlagValues.has(argv[i - 1])) return false;
+  return true;
+});
+
+if (!names.length) {
+  console.error('b7e-taken: name at least one command to check');
+  console.error(USAGE);
+  process.exit(2);
+}
+const bad = names.filter((n) => !isValidName(n));
+if (bad.length) {
+  console.error(`b7e-taken: not a plausible command name: ${bad.join(', ')}`);
+  process.exit(2);
+}
+
+const cfg = loadConfig();
+const workspaces = [];
+for (const wsName of wsNames) {
+  const ws = (cfg.workspaces || []).find((w) => w.name === wsName);
+  if (!ws) {
+    console.error(`b7e-taken: no workspace named ${wsName}`);
+    process.exit(4);
+  }
+  workspaces.push(ws);
+}
+// A tracker read failure has to stop the run rather than read as "nothing named it" —
+// the same distinction b7e-dup's own `tracker()` helper draws for a Dolt lock. Fetched
+// once here, per workspace, and handed to `checkNames` rather than re-fetched per name.
+let trackerRowsByWorkspace = new Map();
+if (workspaces.length) {
+  const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me });
+  try {
+    trackerRowsByWorkspace = await loadTrackerRows(bd, workspaces);
+  } catch (err) {
+    console.error(`b7e-taken: could not read ${err.workspace || 'the tracker'} — ${String(err?.message || err).split('\n')[0]}`);
+    process.exit(5);
+  }
+}
+
+const results = await checkNames(dir, names, { workspaces, trackerRowsByWorkspace });
+
+if (jsonMode) {
+  for (const r of results) console.log(JSON.stringify(r));
+} else {
+  for (const r of results) {
+    if (r.free) {
+      console.log(`${r.name}: free — nothing in bin/, the registrations, the docs, origin/main, an open pull request, a live worktree${workspaces.length ? ' or the tracker' : ''} names it.`);
+      continue;
+    }
+    console.log(`${r.name}: taken —`);
+    for (const claim of r.claims) console.log(describeClaim(claim));
+  }
+}
+
+process.exit(results.some((r) => !r.free) ? 3 : 0);

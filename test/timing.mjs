@@ -1,0 +1,711 @@
+#!/usr/bin/env node
+/**
+ * Per-request timing: the attribution, and the two things it must not get wrong.
+ *
+ *     npm test
+ *     node test/timing.mjs
+ *
+ * lib/timing.js exists so that "the app feels slow" can be answered with a route name
+ * and a number. Two of its claims are the kind that look right in every manual check and
+ * are wrong under load, so they are checked here against a real server rather than
+ * argued:
+ *
+ * 1. **Two requests in flight do not charge each other's subprocesses.** The context is
+ *    an `AsyncLocalStorage` entered with `enterWith`, which is the one shape in that API
+ *    with a real footgun — set the store on the wrong async resource and every figure is
+ *    plausible and none is true. So a `bd`-spawning route and a route that spawns nothing
+ *    are fired *together*, and the one that spawns nothing has to come back warm with a
+ *    subprocess count of zero. That is the assertion the whole file exists for.
+ * 2. **A streamed response is still timed.** Static files and `/api/asset` never return
+ *    through the handler — they hand a read stream to the socket — so a `try`/`finally`
+ *    around the dispatch would have missed every page load in the app. The close is
+ *    hung off `finish`/`close` on the response instead, and this checks that a real
+ *    static GET lands in the table.
+ *
+ * The rest is unit work over the module with no server at all: warm against cold, the
+ * long-poll exclusion (a parked `/api/poll` must never reach the slow log or the
+ * over-budget list — it would outweigh a hundred real requests), the slow-log threshold,
+ * and the route-table ceiling that stops a 404 scan from growing the map without bound.
+ */
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import http from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { boundPort } from './helpers/net.mjs';
+import { cleanupTmp } from './helpers/tmp.mjs';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const LIB = (f) => path.join(HERE, '..', 'lib', f);
+
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'beadcause-timing-'));
+process.env.BEADCAUSE_CONFIG_DIR = path.join(tmp, 'config');
+fs.mkdirSync(process.env.BEADCAUSE_CONFIG_DIR, { recursive: true });
+
+let failures = 0;
+let ran = 0;
+const ok = (name) => {
+  ran += 1;
+  console.log(`  \x1b[32m✓\x1b[0m ${name}`);
+};
+const bad = (name, detail) => {
+  ran += 1;
+  failures += 1;
+  console.log(`  \x1b[31m✗\x1b[0m ${name}`);
+  if (detail) console.log(`      ${detail}`);
+};
+const check = (fn, name) => {
+  try {
+    fn();
+    ok(name);
+  } catch (err) {
+    bad(name, err.message);
+  }
+};
+
+const timing = await import(LIB('timing.js'));
+
+/**
+ * A child process that started `ago` ms ago and has just this moment finished.
+ *
+ * `spend` takes the *interval* rather than a duration, because the whole subprocess
+ * question here is about overlap — so a fabricated child has to be fabricated as an
+ * interval too. Several of these in a row all end now, which is exactly the shape a
+ * fanned-out sweep has.
+ */
+const child = (kind, ago) => timing.spend(kind, process.hrtime.bigint() - BigInt(Math.round(ago * 1e6)));
+
+/* ------------------------------------------------------------ warm, cold, and where */
+
+console.log('\nwhat a request is charged for\n');
+
+timing.reset();
+timing.configure({ slowMs: 0 });
+
+/**
+ * Subprocess time with no request in scope, and it has to be checked **first**.
+ *
+ * `begin` uses `enterWith`, which sets the store for the remainder of the async resource
+ * it was called on — for an HTTP request that is exactly the wanted scope, and in a
+ * linear script it is the whole rest of the file. So there is no way back to "no request
+ * in scope" once one has begun here, and a background check written further down would
+ * be charging the last record instead and passing for the wrong reason.
+ */
+{
+  child('bd', 1200);
+  const snap = timing.snapshot();
+  check(() => assert.equal(snap.routes.length, 0), 'a poll-cycle sweep invents no route');
+  check(() => assert.ok(Math.abs(snap.background.ms - 1200) < 15, `${snap.background.ms}ms`), "and lands in `background` — the daemon's own load");
+  check(() => assert.equal(snap.background.byKind.bd.calls, 1), 'broken out by which binary it was');
+  timing.reset();
+}
+
+{
+  const rec = timing.begin('GET /api/nothing');
+  timing.end(rec, 200);
+  const snap = timing.snapshot();
+  const row = snap.routes.find((r) => r.route === 'GET /api/nothing');
+  check(() => assert.ok(row, `no row for it in ${snap.routes.map((r) => r.route).join(', ')}`), 'a request with no subprocess is recorded');
+  check(() => assert.ok(row.warm && !row.cold, 'it landed cold'), 'and counted as warm, because nothing was spawned for it');
+}
+
+/**
+ * Three children, all still running when the last one finished — which is what a sweep of
+ * nine workspaces looks like, and the shape that made the first version of this module
+ * report an "ours" of minus four seconds on a real request.
+ */
+{
+  const rec = timing.begin('GET /api/spawns');
+  // The request started before its children did, which is the only order that can
+  // happen for real — a child whose interval predates the record is clamped, deliberately.
+  rec.t0 -= 500_000_000n;
+  child('bd', 400);
+  child('bd', 100);
+  child('gh', 250);
+  timing.end(rec, 200);
+  const row = timing.snapshot().routes.find((r) => r.route === 'GET /api/spawns');
+  check(() => assert.ok(row.cold && !row.warm, 'it landed warm'), 'a request that spawned something is counted as cold');
+  check(() => assert.equal(row.cold.calls, 3), 'with the number of child processes it paid for');
+  check(
+    () => assert.ok(Math.abs(row.cold.childWorkMs - 750) < 20, `${row.cold.childWorkMs}ms`),
+    'the child work summed is what the request cost the machine'
+  );
+  check(
+    () => assert.ok(Math.abs(row.cold.subMs - 400) < 20, `${row.cold.subMs}ms`),
+    'while the subprocess share counts the overlap once — three parallel children, one wait'
+  );
+  check(() => assert.ok(row.cold.subShare <= 1, `subShare ${row.cold.subShare}`), 'so the share can never exceed the request');
+  check(() => assert.ok(row.cold.oursMs >= 0, `oursMs ${row.cold.oursMs}`), 'and our own half can never come out negative');
+  check(() => assert.ok(Math.abs(row.cold.fanout - 1.9) < 0.3, `fanout ${row.cold.fanout}`), 'the ratio between the two is the fan-out');
+  check(
+    () => assert.deepEqual(Object.keys(row.cold.statuses), ['200']),
+    'and the status it answered with, so a table of fast 500s cannot read as health'
+  );
+}
+
+/**
+ * The third state, which is the whole of what bc-1kwl.2 changed here.
+ *
+ * The derivation is a default, not a rule. A stale-while-revalidate hit answers out of
+ * memory *and* spawns a refresh behind it — filed as `cold` it would make the fastest
+ * kind of request there is look like the slowest, and make the cache the epic is about
+ * look like it had done nothing at all. Filed as `warm` it would be honest about the
+ * speed and dishonest about the cost, which is the same problem pointed the other way:
+ * the sweep did happen, somebody's tracker did queue behind it, and a column that hides
+ * it is how a "cache" that quietly asks `bd` on every single request goes unnoticed.
+ *
+ * So: its own bucket, and the refresh charged to `background` — which is only true if
+ * lib/cache.js starts it inside `detached`, and this is the check that says so.
+ */
+{
+  timing.reset();
+  const rec = timing.begin('GET /api/swr');
+  rec.t0 -= 1_000_000_000n;
+  // The refresh, started behind the response the way lib/cache.js starts one.
+  timing.detached(() => child('bd', 900));
+  timing.cache('stale');
+  timing.end(rec, 200);
+  const snap = timing.snapshot();
+  const row = snap.routes.find((r) => r.route === 'GET /api/swr');
+  check(() => assert.ok(row.stale && !row.cold && !row.warm, `landed in ${JSON.stringify({ cold: !!row.cold, warm: !!row.warm })}`), 'a stale-served request is counted as stale — neither cold nor warm');
+  check(() => assert.equal(row.stale.calls, 0), 'and it is charged for no child process of its own');
+  check(() => assert.ok(Math.abs(row.stale.subMs) < 20, `${row.stale.subMs}ms`), 'so its subprocess share is nothing, which is the claim the P0 is judged by');
+  check(() => assert.ok(Math.abs(snap.background.ms - 900) < 20, `${snap.background.ms}ms`), "while the refresh it started lands in the daemon's own column");
+  check(() => assert.equal(snap.requests, 1), 'and the request is still counted exactly once overall');
+}
+
+/** The other two words still override the derivation, and a fourth is ignored. */
+{
+  timing.reset();
+  const warm = timing.begin('GET /api/said-warm');
+  warm.t0 -= 1_000_000_000n;
+  child('bd', 300);
+  timing.cache('warm');
+  timing.end(warm, 200);
+  const row = timing.snapshot().routes.find((r) => r.route === 'GET /api/said-warm');
+  check(() => assert.ok(row.warm && !row.cold), 'a route that says it was warm is believed over the derivation');
+
+  const odd = timing.begin('GET /api/said-nonsense');
+  timing.cache('tepid');
+  timing.end(odd, 200);
+  const row2 = timing.snapshot().routes.find((r) => r.route === 'GET /api/said-nonsense');
+  check(() => assert.ok(row2.warm), 'and a word that is not one of the three is ignored rather than believed');
+}
+
+/**
+ * A request is as cold as its coldest read — bc-1kwl.22, and the reason it is here.
+ *
+ * `cache()` used to assign, which is right for a route that reads one key and wrong for
+ * every route this epic is actually about. One `/api/questions` calls the cache layer
+ * about thirty times — `questions:`, `foundation:` and `agentbeads:`, once each per
+ * workspace — so the word that survived was whichever read finished last. Off the live
+ * daemon on 2026-08-17 that produced `slow GET /api/questions 47842ms stale`, which is
+ * not a thing that can happen: a stale hit answers out of memory with its refresh
+ * already `detached`, so it cannot spend forty-seven seconds of the request's own wall
+ * clock. It had paid a cold producer on one key and been relabelled by a warmer one.
+ *
+ * The direction matters more than the fact. Mislabelling moved the *worst* samples out
+ * of `cold` and into `stale`, which the header above calls the fastest kind of request
+ * there is, and `overBudget` is filtered on those buckets — so the fan-out that made a
+ * route slow was also what excused it. These checks fire the reads in the order that
+ * used to lose: coldest first, warmest last.
+ */
+{
+  timing.reset();
+  const rec = timing.begin('GET /api/fanned-out');
+  rec.t0 -= 3_000_000_000n;
+  child('bd', 2900);
+  timing.cache('cold'); // one key had nothing kept, and this request paid the producer
+  timing.cache('stale'); // …and the other twenty-nine were served from memory
+  timing.cache('warm');
+  timing.end(rec, 200);
+  const row = timing.snapshot().routes.find((r) => r.route === 'GET /api/fanned-out');
+  check(
+    () => assert.ok(row.cold && !row.stale && !row.warm, `landed in ${JSON.stringify({ stale: !!row.stale, warm: !!row.warm })}`),
+    'a request that read one cold key and one stale key is recorded as cold, not stale'
+  );
+
+  // The other order, because a fix that only works when the cold read happens to come
+  // first is the same bug with a different seed.
+  const back = timing.begin('GET /api/fanned-out-backwards');
+  back.t0 -= 3_000_000_000n;
+  timing.cache('warm');
+  timing.cache('cold');
+  timing.end(back, 200);
+  const row2 = timing.snapshot().routes.find((r) => r.route === 'GET /api/fanned-out-backwards');
+  check(() => assert.ok(row2.cold && !row2.warm), 'whichever order the reads finish in — the coldest one names the request');
+
+  // Warm never wins over stale either, which is the pair that produced the 48s line.
+  const swr = timing.begin('GET /api/mostly-warm');
+  swr.t0 -= 1_000_000_000n;
+  timing.cache('stale');
+  timing.cache('warm');
+  timing.cache('warm');
+  timing.end(swr, 200);
+  const row3 = timing.snapshot().routes.find((r) => r.route === 'GET /api/mostly-warm');
+  check(() => assert.ok(row3.stale && !row3.warm), 'and a single stale key among warm ones still costs a refresh, so it is still stale');
+
+  // It only ever lowers: warm on its own is still warm, and repeating a word is inert.
+  const cool = timing.begin('GET /api/all-warm');
+  timing.cache('warm');
+  timing.cache('warm');
+  timing.end(cool, 200);
+  const row4 = timing.snapshot().routes.find((r) => r.route === 'GET /api/all-warm');
+  check(() => assert.ok(row4.warm && !row4.cold), 'a route whose every read was warm is not dragged colder by having read more than one');
+
+  check(
+    () => assert.deepEqual(timing.TEMPERATURES, ['cold', 'stale', 'warm']),
+    'and the ranking is the exported order, coldest first — reorder it and the comparison silently inverts'
+  );
+}
+
+/* ---------------------------------------------------------------- the slow log */
+
+console.log('\nthe slow log\n');
+
+{
+  timing.reset();
+  const lines = [];
+  timing.configure({ slowMs: 500, write: (l) => lines.push(l) });
+
+  const fast = timing.begin('GET /api/fast');
+  timing.end(fast, 200);
+  check(() => assert.deepEqual(lines, []), 'a request inside the threshold says nothing');
+
+  const slow = timing.begin('GET /api/slow');
+  slow.t0 -= 1_500_000_000n; // started 1.5s ago, without a real 1.5s wait
+  child('bd', 800);
+  timing.end(slow, 200);
+  check(() => assert.equal(lines.length, 1), 'one past it logs exactly one line');
+  check(() => assert.match(lines[0] || '', /GET \/api\/slow/), 'naming the route');
+  check(() => assert.match(lines[0] || '', /800ms of it waiting on 1 child/), 'and where the time went, which is the point of the line');
+  check(() => assert.match(lines[0] || '', /bd 800ms of work/), 'naming the binary that took it');
+  check(() => assert.match(lines[0] || '', /ours 7\d\dms/), 'and our own share, so a slow handler is not read as a slow tracker');
+  check(() => assert.match(lines[0] || '', /loop busy \d+ms/), 'and how long the loop was busy, so a starved request is not read as a slow one');
+
+  /**
+   * `/api/poll` parks for twenty-five seconds because that is what a long-poll is. A
+   * line about it every twenty-five seconds forever is a log nobody reads, and a parked
+   * poll in the over-budget list is a budget nobody believes.
+   */
+  const parked = timing.begin('GET /api/poll');
+  parked.t0 -= 25_000_000_000n;
+  timing.end(parked, 200);
+  check(() => assert.equal(lines.length, 1), 'a long-poll that parked for 25s logs nothing');
+  const snap = timing.snapshot();
+  check(() => assert.ok(snap.routes.find((r) => r.route === 'GET /api/poll')?.parked), 'it is still measured, and flagged as parked');
+  check(() => assert.ok(!snap.overBudget.includes('GET /api/poll')), 'and it is not counted against the budget');
+  check(() => assert.ok(snap.overBudget.includes('GET /api/slow')), 'while the route that really missed the budget is named');
+
+  timing.configure({ slowMs: 0, write: (l) => lines.push(l) });
+  const alsoSlow = timing.begin('GET /api/slow');
+  alsoSlow.t0 -= 5_000_000_000n;
+  child('bd', 4900);
+  timing.end(alsoSlow, 200);
+  check(() => assert.equal(lines.length, 1), 'slowRequestMs 0 turns the log off');
+  check(
+    () => assert.equal(timing.snapshot().routes.find((r) => r.route === 'GET /api/slow').cold.n, 2),
+    'and changes nothing about the counting, which is never off'
+  );
+}
+
+/* --------------------------------------------------------- ending twice, and the ceiling */
+
+console.log('\nthe things that would quietly corrupt the numbers\n');
+
+{
+  timing.reset();
+  timing.configure({ slowMs: 0 });
+  const rec = timing.begin('GET /api/once');
+  timing.end(rec, 200);
+  timing.end(rec, 200);
+  check(
+    () => assert.equal(timing.snapshot().routes.find((r) => r.route === 'GET /api/once').warm.n, 1),
+    "`finish` and `close` both firing counts one request, not two"
+  );
+}
+
+{
+  timing.reset();
+  for (let i = 0; i < 460; i += 1) timing.end(timing.begin(`GET /api/${i}`), 404);
+  const snap = timing.snapshot();
+  check(() => assert.ok(snap.routes.length <= 401, `the table grew to ${snap.routes.length}`), 'a scan of paths that do not exist cannot grow the table without bound');
+  check(() => assert.ok(snap.overflow > 0), 'and it says how many it folded away, rather than looking complete');
+  check(() => assert.ok(snap.routes.some((r) => r.route === 'other')), 'under one `other` key');
+}
+
+/* --------------------------------------------- the third number: starved or slow */
+
+/**
+ * Two requests that take the same time for opposite reasons.
+ *
+ * `total` and `children` cannot tell them apart — neither spawns anything, so both come
+ * out `all ours`, and that is what filed 132 static-asset requests on 2026-08-21 as
+ * though `/style.css` were a slow handler. The only difference between them is whether
+ * the loop was available while they waited, which is what `loopBusy` reads.
+ * Timed for real rather than fabricated: the whole claim is about a live event loop, and
+ * a rewound `t0` has no loop behind it to have been blocked.
+ */
+
+console.log('\nstarved rather than slow\n');
+
+const sleep = (msec) => new Promise((r) => setTimeout(r, msec));
+/** Hold the loop, the way a synchronous sweep across eleven workspaces does. */
+const hog = (msec) => {
+  const until = Date.now() + msec;
+  while (Date.now() < until);
+};
+
+{
+  timing.reset();
+  timing.configure({ slowMs: 0 });
+
+  // Nothing of its own to do, and its wait happens to span somebody else's synchronous
+  // work. This is the shape the bead is about.
+  const starvedRec = timing.begin('GET /style.css');
+  setTimeout(() => hog(300), 5);
+  await sleep(360);
+  const starved = timing.end(starvedRec, 200);
+
+  // The same wait on a quiet loop — a slow disk, a lock, a socket. Indistinguishable
+  // from the one above under the first two numbers, and a different bug with a
+  // different fix.
+  const patientRec = timing.begin('GET /api/patient');
+  await sleep(360);
+  const patient = timing.end(patientRec, 200);
+
+  check(() => assert.ok(starved.loopMs > 200, `loopMs ${starved.loopMs}`), 'a request that waited behind a busy loop is charged for the block');
+  check(() => assert.ok(starved.loopMs <= starved.ms, `${starved.loopMs} > ${starved.ms}`), 'and never for more of it than the request itself lasted');
+  check(() => assert.ok(patient.loopMs < 100, `loopMs ${patient.loopMs}`), 'while one that waited on a quiet loop is charged almost nothing');
+  check(
+    () => assert.ok(Math.abs(starved.ms - patient.ms) < 150, `${starved.ms}ms vs ${patient.ms}ms`),
+    'though the two took about the same time and spawned nothing — which is exactly what `total` and `children` could not tell apart'
+  );
+
+  const snap = timing.snapshot({ budgetMs: 100 });
+  const row = snap.routes.find((r) => r.route === 'GET /style.css');
+  check(() => assert.ok(row?.loopShare >= 0.5, `loopShare ${row?.loopShare}`), 'the route carries the share, which is the column the table prints');
+  check(() => assert.deepEqual(snap.starved, ['GET /style.css']), 'and the snapshot names it starved — over budget, no child, most of it behind the loop');
+  check(() => assert.ok(snap.overBudget.includes('GET /api/patient')), 'the patient one is over budget too, and still is');
+  check(() => assert.ok(!snap.starved.includes('GET /api/patient')), 'but is not called starved, because nothing was running while it waited');
+}
+
+{
+  // A route that paid for a child process has an ordinary explanation available, so it
+  // is never named starved however busy the loop was while it ran. The list is only
+  // worth reading if everything in it has no other reading.
+  timing.reset();
+  const rec = timing.begin('GET /api/sweeps');
+  setTimeout(() => hog(250), 5);
+  await sleep(300);
+  child('bd', 40);
+  timing.end(rec, 200);
+  const snap = timing.snapshot({ budgetMs: 100 });
+  check(() => assert.ok(snap.overBudget.includes('GET /api/sweeps')), 'a route that both spawned and waited is over budget');
+  check(() => assert.deepEqual(snap.starved, []), 'and is not in the starved list — a child process is an explanation, and that list is for routes with none');
+}
+
+/* --------------------------------------- the fourth number: joined, not running */
+
+/**
+ * A request that waited on a sweep another request had already started.
+ *
+ * The layer coalesces, so the second caller on a key with a producer in flight is handed
+ * that producer's promise and spawns nothing itself — and is charged nothing for the
+ * children, deliberately, because the sweep is already on somebody's bill and moving it
+ * would put the same 846 seconds on two requests. What was missing is that it waited at
+ * all: `children` is zero, the loop is idle, and the line came out `no subprocess, all
+ * ours`, which is the one reading the loop figure above exists to leave meaning *this
+ * handler really did run for a minute*. On 2026-08-21 that was the log's two worst
+ * samples — a `/api/prs` at 62.6s and a `/api/queues` at 64.3s, both queued behind the
+ * 73.7s board sweep with 102 children that a third request was paying for (bc-1kwl.33).
+ *
+ * The real path is checked against the real layer in test/cache.mjs, which is where the
+ * `running.get(key)` that decides it lives. What is here is the arithmetic and the two
+ * lists it changes.
+ */
+
+console.log('\njoined a sweep rather than ran for a minute\n');
+
+/**
+ * A wait on somebody else's producer, `msec` long and just finished.
+ *
+ * Fabricated by writing the interval, the way every block above fabricates a duration by
+ * rewinding `t0` — the figure *is* an interval, and `child` cannot stand in for it since
+ * a child process is precisely what this request did not have.
+ */
+const joinedWait = (rec, msec) => {
+  const at = Number(process.hrtime.bigint() - rec.t0) / 1e6;
+  rec.joinSpans.push([Math.max(0, at - msec), at]);
+  rec.joins += 1;
+};
+
+{
+  timing.reset();
+  const lines = [];
+  timing.configure({ slowMs: 500, write: (l) => lines.push(l) });
+
+  // The `/api/prs` shape: nothing of its own, all of it behind another request's sweep.
+  const rec = timing.begin('GET /api/prs');
+  rec.t0 -= 4_000_000_000n;
+  joinedWait(rec, 3900);
+  // What the layer says on the coalescing path: it did wait for a producer, which is what
+  // cold means — the derivation would call it warm, since it spawned nothing itself.
+  timing.cache('cold');
+  const done = timing.end(rec, 200);
+
+  check(() => assert.ok(Math.abs(done.joinedMs - 3900) < 30, `joinedMs ${done.joinedMs}`), 'the wait is charged to the request that waited');
+  check(() => assert.equal(done.wallMs, 0), 'and not as a child process, because it had none');
+  check(() => assert.ok(done.oursMs < 200, `oursMs ${done.oursMs}`), 'so what is left as ours is nearly nothing — which is the truth about it');
+  check(() => assert.match(lines[0] || '', /waiting on a sweep already running/), 'the slow line says so outright');
+  check(() => assert.doesNotMatch(lines[0] || '', /all ours/), 'and no longer claims the handler was busy');
+  check(() => assert.match(lines[0] || '', /ours \d+ms/), 'while still saying what was ours, which is now a number about something');
+  check(() => assert.match(timing.header(rec), /joined;dur=3\d\d\d/), 'and the header carries it beside total');
+
+  const row = timing.snapshot().routes.find((r) => r.route === 'GET /api/prs');
+  check(() => assert.ok(row.joinedShare >= 0.9, `joinedShare ${row.joinedShare}`), 'the route carries the share, which is the column the table prints');
+  check(() => assert.ok(Math.abs(row.cold.joinedMs - 3900) < 30, `joinedMs ${row.cold.joinedMs}`), 'and the bucket keeps the figure per request');
+  check(() => assert.ok(row.cold.oursMs >= 0), 'ours can never come out negative here either');
+}
+
+{
+  // Both at once, which is the `/api/queues` sample: eleven children of its own *and*
+  // sixty-two seconds behind the sweep it joined for another key. The two intervals
+  // overlap, so `ours` is what is left of the union and not of two subtractions — take
+  // each off in turn and the overlap goes twice and the number goes below zero.
+  timing.reset();
+  const lines = [];
+  timing.configure({ slowMs: 500, write: (l) => lines.push(l) });
+  const rec = timing.begin('GET /api/queues');
+  rec.t0 -= 4_000_000_000n;
+  child('bd', 3800);
+  joinedWait(rec, 3900);
+  const done = timing.end(rec, 200);
+
+  check(() => assert.ok(done.wallMs > 3700, `wallMs ${done.wallMs}`), 'a request that both spawned and joined keeps its children');
+  check(() => assert.ok(done.joinedMs > 3800, `joinedMs ${done.joinedMs}`), 'and its wait, which is a different fact and not a share of the same one');
+  check(() => assert.ok(done.oursMs >= 0 && done.oursMs < 300, `oursMs ${done.oursMs}`), 'with ours the remainder of the union of the two, never negative');
+  check(() => assert.match(lines[0] || '', /waiting on 1 child process\(es\)/), 'and the line names both — the children');
+  check(() => assert.match(lines[0] || '', /and \d+ms of it waiting on a sweep already running/), 'and the sweep it queued behind');
+}
+
+{
+  // The two lists must not overlap, and it is the loop that separates them: a joined wait
+  // sits on an *idle* loop, which is why the 2026-08-21 samples came in at a share of
+  // 0.15 while `/style.css` came in at 0.99. `joins === 0` on `starved` makes that a rule
+  // rather than a coincidence of the numbers.
+  timing.reset();
+  timing.configure({ slowMs: 0 });
+
+  const waiter = timing.begin('GET /api/prs');
+  waiter.t0 -= 3_000_000_000n;
+  joinedWait(waiter, 2900);
+  timing.end(waiter, 200);
+
+  await sleep(20);
+  const blocked = timing.begin('GET /style.css');
+  blocked.t0 -= 300_000_000n;
+  hog(900);
+  timing.end(blocked, 200);
+
+  const snap = timing.snapshot({ budgetMs: 100 });
+  check(() => assert.deepEqual(snap.joined, ['GET /api/prs']), 'the snapshot names the route that was queued behind a sweep');
+  check(() => assert.ok(!snap.starved.includes('GET /api/prs')), 'and does not also call it starved — it had an explanation, and the loop was free');
+  check(() => assert.deepEqual(snap.starved, ['GET /style.css']), 'while the route with no explanation at all is still the starved one');
+  check(() => assert.ok(!snap.joined.includes('GET /style.css')), 'and is not in the joined list');
+  check(() => assert.ok(snap.overBudget.includes('GET /api/prs')), 'both are over budget, which neither list is a substitute for');
+}
+
+{
+  // Off the request path it charges nothing. A background refresh that joins another
+  // background refresh is the daemon waiting on itself, and there is no request to bill.
+  timing.reset();
+  timing.detached(() => timing.joining()());
+  check(() => assert.equal(timing.snapshot().routes.length, 0), 'a wait with no request in scope invents no route');
+
+  // And the real closure, on a real wait, charges the record it was opened under — the
+  // shape lib/cache.js uses, without the cache.
+  const rec = timing.begin('GET /api/waited');
+  const waited = timing.joining();
+  await sleep(40);
+  waited();
+  const done = timing.end(rec, 200);
+  check(() => assert.ok(done.joinedMs > 30, `joinedMs ${done.joinedMs}`), 'while one opened inside a request is charged to it');
+  check(() => assert.ok(done.joinedMs <= done.ms, `${done.joinedMs} > ${done.ms}`), 'and never for longer than the request itself lasted');
+}
+
+/* ------------------------------------------------------------------- Server-Timing */
+
+{
+  timing.reset();
+  const rec = timing.begin('GET /api/hdr');
+  rec.t0 -= 200_000_000n;
+  child('bd', 120);
+  const h = timing.header(rec);
+  check(() => assert.match(h, /^total;dur=2\d\d\.\d/), `the header leads with the total — got ${h}`);
+  check(() => assert.match(h, /bd;dur=120\.0/), 'then each binary it waited on');
+  check(() => assert.match(h, /loop;dur=\d/), 'how long the loop was busy while it was open');
+  check(() => assert.match(h, /cache;desc=cold/), 'and whether it was warm or cold');
+  timing.end(rec, 200);
+}
+
+/* ------------------------------------------------------------- against a real server */
+
+console.log('\nagainst the real server\n');
+
+const ws = path.join(tmp, 'ws');
+const ws2 = path.join(tmp, 'ws2');
+for (const dir of [ws, ws2]) fs.mkdirSync(path.join(dir, '.beads'), { recursive: true });
+
+/**
+ * A `bd` that is slow on purpose, so "was this route's time really spent in a child
+ * process" is a question the figures can answer rather than a rounding argument.
+ */
+const FAKE = path.join(tmp, 'bd');
+fs.writeFileSync(FAKE, "#!/usr/bin/env node\nsetTimeout(() => process.stdout.write('[]'), 150);\n", { mode: 0o755 });
+
+const cfg = {
+  port: 0,
+  host: '127.0.0.1',
+  baseUrl: 'http://127.0.0.1',
+  token: 'timing-token',
+  actor: 'beadcause-test',
+  bdBin: FAKE,
+  // Two, not one, and that is the point: `/api/questions` sweeps them concurrently, so
+  // the summed child time runs past the request's own duration. One workspace could never
+  // catch the accounting bug that made `ours` negative on a real nine-workspace install.
+  workspaces: [
+    { name: 'demo', dir: ws },
+    { name: 'demo2', dir: ws2 },
+  ],
+  openSessions: false,
+  autoDispatch: false,
+  claudeSessions: false,
+  pollSeconds: 3600,
+  terminal: false,
+  slowRequestMs: 0,
+  ntfy: { enabled: false },
+  advocates: { enabled: false, workspaces: [] },
+};
+
+const { createApp, listen } = await import(LIB('server.js'));
+const app = createApp(cfg);
+const servers = listen(cfg, app.handler);
+const port = await boundPort(servers);
+
+const get = (pathname) =>
+  new Promise((resolve, reject) => {
+    const req = http.request(
+      { host: '127.0.0.1', port, path: pathname, method: 'GET', headers: { 'x-beadcause-token': cfg.token } },
+      (res) => {
+        let out = '';
+        res.setEncoding('utf8');
+        res.on('data', (c) => (out += c));
+        res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: out }));
+      }
+    );
+    req.on('error', reject);
+    req.end();
+  });
+
+/** Whatever `fn` returns once it returns something, or null after `ms`. No clock in a pass condition. */
+const until = async (fn, ms = 2000) => {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    const got = fn();
+    if (got) return got;
+    if (Date.now() > deadline) return null;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+};
+
+timing.reset();
+
+const health = await get('/api/health');
+check(() => assert.equal(health.status, 200), 'a request goes through');
+check(
+  () => assert.match(String(health.headers['server-timing'] || ''), /total;dur=/),
+  `every response carries Server-Timing — got ${health.headers['server-timing']}`
+);
+
+/**
+ * The assertion this file exists for. Both at once: one route that sweeps `bd` across the
+ * workspace and one that touches nothing. If the request context leaked, the cheap one
+ * comes back cold with somebody else's child process on its bill — and every figure in
+ * the table would be plausible and wrong.
+ */
+const [swept, cheap] = await Promise.all([get('/api/questions'), get('/api/health')]);
+check(() => assert.equal(swept.status, 200), 'a bd-sweeping route answers');
+check(() => assert.equal(cheap.status, 200), 'and so does a cheap one fired beside it');
+
+const snap = timing.snapshot();
+const rowFor = (route) => snap.routes.find((r) => r.route === route);
+
+const questions = rowFor('GET /api/questions');
+check(() => assert.ok(questions?.cold, `no cold row: ${JSON.stringify(questions)}`), '/api/questions is recorded cold — it paid for a sweep');
+check(() => assert.ok(questions.cold.calls >= 1, `calls: ${questions.cold.calls}`), 'with the bd calls it made');
+check(
+  () => assert.ok(questions.cold.subShare > 0.4, `subShare ${questions.cold.subShare}`),
+  'and most of its time attributed to the subprocess rather than to us'
+);
+/**
+ * The regression that the first real measurement found: two workspaces swept at once
+ * report more child time than the request took, so a share computed off the *sum* comes
+ * out over 1 and "ours" comes out negative. The union is what makes both honest.
+ */
+check(
+  () => assert.ok(questions.cold.childWorkMs >= questions.cold.subMs, `${questions.cold.childWorkMs} < ${questions.cold.subMs}`),
+  'the summed child work is at least the wall time waited — a fan-out cannot be under it'
+);
+check(() => assert.ok(questions.cold.subShare <= 1, `subShare ${questions.cold.subShare}`), 'the share stays inside the request');
+check(() => assert.ok(questions.cold.oursMs >= 0, `oursMs ${questions.cold.oursMs}`), 'and our own half is never negative');
+
+const healthRow = rowFor('GET /api/health');
+check(() => assert.ok(healthRow?.warm, `no warm row: ${JSON.stringify(healthRow)}`), '/api/health is recorded warm');
+check(
+  () => assert.equal(healthRow.warm.calls, 0, `it was charged ${healthRow.warm.calls} child processes`),
+  'and is charged nothing at all for the sweep running beside it'
+);
+check(() => assert.ok(!healthRow.cold, 'it has a cold bucket'), 'so it never appears as a cold route');
+
+/**
+ * The path that a `try`/`finally` would have missed entirely — and it is most of a page
+ * load. A static file is handed to the socket as a read stream; the handler returns long
+ * before the response ends.
+ *
+ * Waited for rather than read straight away, and the reason is a fact about the
+ * measurement worth knowing: the record closes on the response's own `finish`, which for
+ * a piped stream can land a tick *after* the client has all the bytes. A row that is
+ * absent the instant a client is satisfied is not a missing row.
+ */
+const page = await get('/index.html');
+const staticRow = await until(() => timing.snapshot().routes.find((r) => r.route === 'GET /index.html'));
+check(() => assert.ok(page.status === 200 || page.status === 302, `got ${page.status}`), 'a static file is served');
+check(() => assert.ok(staticRow, 'no row for the static GET'), 'and a streamed response is timed too — the handler never returns through the dispatch');
+
+const view = await get('/api/timings');
+check(() => assert.equal(view.status, 200), 'GET /api/timings answers');
+const payload = JSON.parse(view.body || '{}');
+check(() => assert.ok(Array.isArray(payload.routes) && payload.routes.length >= 3), 'with a row per route');
+check(() => assert.equal(payload.budgetMs, 1000), 'and the budget the routes are judged against');
+check(
+  () =>
+    assert.ok(
+      payload.routes.some((r) => r.route === 'GET /api/questions' && r.cold?.subShare > 0),
+      'the sweep is not in the payload'
+    ),
+  'and it is the same figures, over HTTP, which is where the phone reads them'
+);
+
+/* ---------------------------------------------------------------------- done */
+
+for (const s of servers) s.close();
+await cleanupTmp(tmp);
+
+console.log('');
+if (failures) {
+  console.log(`\x1b[31m${failures} of ${ran} checks failed\x1b[0m`);
+  process.exit(1);
+}
+console.log(`\x1b[32mall ${ran} checks passed\x1b[0m`);

@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b0f14" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f6f7f9" media="(prefers-color-scheme: light)">
+  <!-- "& sessions" because this page absorbed /sessions, and every path that view had
+       lands here: the title is what a bookmark of /sessions, the Android shell's
+       history and a desktop tab all read as, and there is room for the second word in
+       all three — which the bottom tab bar's 72px per label does not have.
+
+       "space" led it for a day, on the argument that the page was the details of the
+       one space the picker has selected — its settings among them. The settings are
+       /config now (bc-khoe.10), and what is left is what the page was always mostly
+       about: who is arguing for work here, what is running, and what is waiting to land.
+       So the noun goes back to the advocates, and the second word stays where it has
+       been, so a bookmark made under either name still reads as the page it opens. -->
+  <title>Beadcause · advocates &amp; sessions</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body class="doc-body">
+  <header class="topbar">
+    <div class="brand">
+      <span class="dot" id="pulse"></span>
+      <!-- One word, and the space picker two elements along says which space. There was
+           no title here at all for a day (bc-mtdb): the word was "Space", the picker
+           beside it already read "Personal" or the repo name, and a heading naming the
+           noun that the control next to it is an instance of spends the width a 360px
+           phone has least of on something the reader already knows. That argument is
+           about the word, not about having one — the other standing views keep theirs
+           (History, Endorse, Requirements) because those name the *page*, which is not
+           what the picker says. With the settings on /config this page is the advocates
+           and their sessions again, so the word names the page too, and it is the same
+           word as the pill that reaches it. -->
+      <h1>Advocates</h1>
+      <!-- Filled in only on an observer instance — see OBSERVING in lib/config.js.
+           It sits in `.brand` with the mark rather than in the actions, because it is a
+           fact about which daemon this is, not a control. That puts it beside the page
+           title, which is where every other page that carries it puts it — it sat beside
+           the picker only for as long as this page had no title. -->
+      <span class="observing" id="observing" hidden>⦿ observing</span>
+    </div>
+    <div class="sheet-actions">
+      <span class="mon-tally" id="tally"></span>
+      <!-- The gear: the admin screen, from the page you were looking at when you
+           decided something had to be stopped. An <a> rather than a button because it
+           is a navigation and should long-press, middle-click and open in a tab like
+           one. The Admin tab in the bottom bar stays — this is a second way in from
+           the one page whose settings sit beside it, not a replacement for it. -->
+      <!-- Hoisted into the mark's menu at load like every other icon button here, and
+           kept in the markup because it is *this page's* door: accountbar.js draws a
+           standing Admin row of its own on every page and stands down when it finds one
+           already hoisted, so what a person sees is one Admin row either way. -->
+      <a id="gear" class="icon-btn" href="/admin" aria-label="Admin — pause everything, terminals, sign out" title="Admin">⚙</a>
+      <button id="refresh" class="icon-btn" aria-label="Refresh">⟳</button>
+    </div>
+  </header>
+
+  <!-- The second row of tabs on this page, and the only page that has one. It swaps a
+       pane; the bar along the bottom moves between pages. That those two are still drawn
+       alike is the open complaint (bc-stci — the pair wants to be a segmented control,
+       now that bc-4aw has given this bar a selector of its own to be restyled through),
+       but which one the Mirror belongs on is settled: it is a pane (bc-3xb).
+
+       The Mirror is a mode of this page rather than a standing view — the same repos and
+       sessions seen from the phone instead of from this Mac — and it is the one surface
+       in the app that is meaningless on the device a bottom tab is tapped from, because
+       it follows *another* device and drops its own. So it lives here, which costs no
+       /mirror route and no mirror.html, and the swap below is one `hidden` attribute
+       against style.css's `.work[hidden]`. README, "The Mirror is a pane, not a tab",
+       has the reasoning and the reason that has since expired.
+
+       PRs is the third of them (bc-d4d5), and it is the same argument a second time: the
+       shipping screen is somewhere you glance and act on twice a day, which is why it is
+       not on the bottom bar — and it is *this* page's repos, so it is a mode of this page
+       rather than a URL with nothing pointing at it, which is what it had become. Its
+       pane is the whole of the old /prs, drawn by the same board script — which is named
+       once, on its own script tag below, because three suites find it in this file by
+       looking for the first mention of its path and prose ahead of the tag reads to them
+       as the tag being in the wrong place.
+
+       Config was the fourth of them for a day (bc-me2b) and it is not a chip any more:
+       the settings card left this page altogether in bc-khoe.10 and is /config, a pill on
+       the row above. The chip fixed the fold it was filed for — every advocate had been
+       below a screenful of switches you touch about once a month — and left the rest of
+       the complaint standing, that the way to a space's *configuration* was a second row
+       of controls on the one page that has one, drawn like the row above it and meaning
+       something else. What a space is and what it is doing are two screens now.
+
+       `data-pane` is the section a chip shows and `data-view` is what this device tells
+       public/presence.js it is looking at; public/montabs.js reads both and owns the
+       swap. Mirror's is empty on purpose — see that file. -->
+  <nav class="chip-row mon-tabs" id="mon-tabs" aria-label="Views">
+
+    <button class="chip" data-tab="advocates" data-pane="mon" data-view="sessions" aria-pressed="true">Advocates</button>
+    <button class="chip" data-tab="prs" data-pane="prs" data-view="prs" aria-pressed="false">PRs</button>
+    <button class="chip" data-tab="mirror" data-pane="mirror" data-view="" aria-pressed="false">Mirror<span class="tab-dot" id="mirror-dot" hidden></span></button>
+  </nav>
+
+  <main id="mon" class="work pagescroll">
+    <div class="empty">Asking every workspace…</div>
+  </main>
+
+  <!-- The pull request board. Everything /prs.html used to be, minus the chrome it had
+       as a page of its own: this page's top bar carries the pulse, the ⟳ and the
+       observer mark already, and the board's script shares all three rather than drawing
+       a second set. -->
+  <section id="prs" class="work pagescroll" hidden>
+    <div class="empty">Asking every repo…</div>
+  </section>
+
+  <section id="mirror" class="work pagescroll" hidden>
+    <div class="empty">Looking for a device…</div>
+  </section>
+
+  <!-- Before monitor.js, which reports through it on the way up. This page is the
+       sessions view now, and a phone sitting on it should be followable from a screen
+       with room — see the presence note at the foot of monitor.js for why a page that
+       is also a mirror can safely publish itself. -->
+  <!-- Every error this page hits, sent back to the daemon as a P0 bead: an uncaught
+       exception, a rejected promise, a failed fetch, any red toast. Ahead of every
+       other script, because it can only catch what loads after it — and it is purely
+       additive, so a page that fails to load it behaves exactly as it did before. -->
+  <script src="/report.js"></script>
+  <!-- The beads that go round the brand dot while this page is fetching. Loaded on
+       every page that has a dot to put them on, and driven from report.js's own count of
+       what is in flight rather than from anything this view says. See public/orbit.js. -->
+  <script src="/orbit.js"></script>
+  <!-- Whether what you are looking at is current, and the banner that says when it is
+       not. Loaded on every page with a top bar, because the state it reports is a page
+       that has stopped repainting — which no page can report from inside its own render.
+       Before stream.js, which stamps it on every answer. See public/freshness.js. -->
+  <script src="/freshness.js"></script>
+  <!-- The app menu — the mark in a gear at the left of the top bar, and everything the
+       bar used to hold loose behind it: this page's own top-right buttons, Admin, and
+       which of your lives every screen is about. Before the page's own script, because
+       it *moves* those buttons rather than copying them: a page that wires one by id
+       afterwards is still wiring the element the thumb lands on. See
+       public/accountbar.js. -->
+  <script src="/accountbar.js"></script>
+  <!-- What this page already has, from the last time you were on it: the payload it
+       boots from, and the reconciler that keeps a repaint from throwing away the DOM
+       it did not need to touch. First of the shared files a page draws with, because
+       every page script below asks it for a warm list before it asks the daemon for a
+       cold one. -->
+  <script src="/warm.js"></script>
+  <!-- The delta stream: one long poll on /api/poll, so this page learns what moved
+       instead of re-asking for everything on a clock. Beside warm.js because the two
+       are the same bargain at the two ends of a visit — one paints what you already
+       had, the other keeps it true. -->
+  <script src="/stream.js"></script>
+  <script src="/presence.js"></script>
+  <!-- What the URL hash means: a view, a card to open on Home, or nothing (bc-khoe.30.2).
+       Before viewbar.js and app.js because both read the answer out of it rather than
+       parsing the hash themselves, and a page that loaded them without it would have a
+       row that cannot say which view it is on and a notification tap that throws. -->
+  <script src="/hashroute.js"></script>
+  <script src="/viewbar.js"></script>
+  <!-- The app keeping itself in step with what was just deployed: reloads the page when
+       a deploy moved public/, and drives the Android shell's own update when one
+       rebuilt the APK. On every standing view, because the "Update app" button belongs to
+       the app rather than to a screen — and after stream.js, whose events it listens on
+       rather than opening a second parked poll of its own. -->
+  <script src="/update.js"></script>
+  <!-- The chip row above, and which of the three panes is up. Before every pane's own
+       script, because each of them registers on it — and it holds its first paint until
+       DOMContentLoaded, so the order among the three below does not matter. -->
+  <script src="/montabs.js"></script>
+  <!-- Which repo the advocates and sessions on this page belong to. Before monitor.js,
+       which registers its repaint on it. -->
+  <script src="/spacebar.js"></script>
+  <script src="/addspace.js"></script>
+  <script src="/vendor/marked.js"></script>
+  <script src="/vendor/purify.js"></script>
+  <script src="/monitor.js"></script>
+  <!-- Speaking into the box beside it instead of thumbing it. Before the page's
+       own script, which asks it at boot — or at render — whether a microphone can
+       work here at all; a page that drops it draws no mic rather than a dead one. -->
+  <script src="/dictate.js"></script>
+  <!-- The PRs pane. prcard.js first: it is the row, the lamps and the status ladder,
+       shared with the cards the inbox draws for the same pull requests, and prs.js takes
+       it apart at the top of its own IIFE and has no board to draw without it. -->
+  <script src="/prcard.js"></script>
+  <script src="/prs.js"></script>
+  <script src="/mirror.js"></script>
+  <!-- The advocates' rows all point into the graph; the drawer keeps them here. -->
+  <script src="/drawer.js"></script>
+</body>
+</html>

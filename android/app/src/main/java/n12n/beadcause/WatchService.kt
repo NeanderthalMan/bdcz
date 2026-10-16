@@ -1,0 +1,341 @@
+package n12n.beadcause
+
+import android.app.Service
+import android.content.Context
+import android.content.Intent
+import android.content.pm.ServiceInfo
+import android.os.Build
+import android.os.IBinder
+import android.util.Log
+import androidx.core.app.ServiceCompat
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.IOException
+import kotlin.math.min
+
+/**
+ * The whole point of going native: one connection, held open, so a question reaches
+ * the phone as a real notification without the ntfy relay in the middle.
+ *
+ * It parks on `/api/poll`, which returns the moment the server's poller sees a new
+ * question or an agent reply. Off the tailnet the poll simply fails and backs off,
+ * so walking out of range costs battery equal to one failed connect every couple of
+ * minutes, not a spin loop.
+ */
+class WatchService : Service() {
+
+    companion object {
+        private const val TAG = "Beadcause"
+        private const val WAIT_SECONDS = 25
+
+        /** Backoff ladder, in ms, for a server that isn't answering. */
+        private val BACKOFF = longArrayOf(2_000, 5_000, 15_000, 30_000, 60_000, 120_000)
+
+        fun start(ctx: Context) {
+            // isLive, not isPaired: a pairing left on the old cleartext URL cannot be
+            // polled at all — every request dies at the socket on the platform's
+            // cleartext policy — so starting would be a foreground notification that
+            // never hears anything. MainActivity sends that case to the QR screen.
+            if (!Prefs.isLive(ctx)) return
+            val intent = Intent(ctx, WatchService::class.java)
+            try {
+                ctx.startForegroundService(intent)
+            } catch (e: Exception) {
+                // Android 12+ refuses a foreground start from the background. Nothing
+                // is lost — the next time the app is opened it starts cleanly.
+                Log.w(TAG, "could not start watcher from background: ${e.message}")
+            }
+        }
+
+        fun stop(ctx: Context) = ctx.stopService(Intent(ctx, WatchService::class.java))
+    }
+
+    private val job = SupervisorJob()
+    private val scope = CoroutineScope(job + Dispatchers.IO)
+    private var loop: Job? = null
+
+    /** Keys currently showing a notification, so a resync can clear stale ones. */
+    private val showing = mutableSetOf<String>()
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        Notifications.ensureChannels(this)
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        goForeground("Connecting…")
+        if (loop?.isActive != true) loop = scope.launch { watch() }
+        // The watcher is the app's reason to exist — bring it back if we're killed.
+        return START_STICKY
+    }
+
+    override fun onDestroy() {
+        job.cancel()
+        super.onDestroy()
+    }
+
+    private fun goForeground(text: String) {
+        val notification = Notifications.service(this, text)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            ServiceCompat.startForeground(
+                this, Notifications.SERVICE_NOTIFICATION_ID, notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
+            )
+        } else {
+            startForeground(Notifications.SERVICE_NOTIFICATION_ID, notification)
+        }
+    }
+
+    private fun status(text: String) {
+        try {
+            goForeground(text)
+        } catch (e: Exception) {
+            Log.w(TAG, "status update dropped: ${e.message}")
+        }
+    }
+
+    private suspend fun watch() {
+        val conn = Prefs.connection(this) ?: return stopSelfSafely()
+        var since = Prefs.seq(this)
+        var failures = 0
+
+        // Cold start: read current state without an event backlog, exactly as the
+        // server's own poller does on boot. Otherwise a fresh install would fire a
+        // notification for every question already waiting — which on a normal day
+        // is nine at once.
+        if (since == 0L) {
+            try {
+                val cold = withContext(Dispatchers.IO) { Api.poll(conn, since = null, waitSeconds = 0) }
+                since = cold.seq
+                Prefs.setSeq(this, since)
+                status(idleText(cold.questions?.size, cold.requests?.size ?: 0))
+            } catch (e: Exception) {
+                Log.w(TAG, "cold start failed: ${e.message}")
+            }
+        }
+
+        var openCount: Int? = null
+        var requestCount = 0
+
+        while (scope.isActive) {
+            try {
+                val poll = withContext(Dispatchers.IO) { Api.poll(conn, since, WAIT_SECONDS) }
+                failures = 0
+                poll.questions?.let { openCount = it.size }
+                poll.requests?.let { requestCount = it.size }
+                handle(poll)
+                // Only persist on an actual move. A timed-out poll returns the same
+                // sequence every 25 seconds, and each write is a keystore-backed
+                // encrypt — not something to do 3,000 times a day for no change.
+                if (poll.seq != since) {
+                    since = poll.seq
+                    Prefs.setSeq(this, since)
+                }
+                status(idleText(openCount, requestCount))
+            } catch (e: Exception) {
+                if (Api.isUnauthorized(e)) {
+                    // The token was rotated or the config regenerated. Retrying forever
+                    // would just log 401s, and the failure is invisible otherwise —
+                    // questions would simply stop arriving — so say so out loud.
+                    Log.w(TAG, "token rejected — stopping watcher")
+                    Notifications.repairNeeded(this)
+                    status("Token rejected — tap to re-pair")
+                    return
+                }
+                failures++
+                val wait = BACKOFF[min(failures - 1, BACKOFF.size - 1)]
+                if (failures == 1) Log.i(TAG, "poll failed (${e.javaClass.simpleName}: ${e.message}) — backing off")
+                status(if (e is IOException) "Offline — retrying" else "Retrying: ${e.message}")
+                delay(wait)
+            }
+        }
+    }
+
+    /**
+     * The always-on line on the foreground-service row.
+     *
+     * Requests are counted apart, and named, for the same reason they are everywhere
+     * else: "2 questions open" while an agent is waiting to be told whether it may
+     * change is a status line that is true and still leaves out the thing that has
+     * been waiting longest.
+     */
+    private fun idleText(open: Int?, requests: Int = 0): String {
+        val asks = when (requests) {
+            0 -> ""
+            1 -> " · 1 foundation request"
+            else -> " · $requests foundation requests"
+        }
+        val work = when {
+            open == null -> "Watching for questions"
+            open == 0 -> if (asks.isEmpty()) "Watching · nothing waiting" else "Watching"
+            open == 1 -> "Watching · 1 question open"
+            else -> "Watching · $open questions open"
+        }
+        return work + asks
+    }
+
+    private fun handle(poll: Poll) {
+        // Both channels. They are drawn in different places and notified on different
+        // Android channels, but "is this bead still live, and what is it" is one
+        // question and answering it from one map is what keeps the two consistent.
+        val byKey = poll.allBeads.associateBy { it.key }
+
+        // Missed more than the server's event log holds, or the daemon restarted and
+        // its sequence went backwards. Either way the event stream can't be trusted,
+        // so reconcile against the question list instead of replaying.
+        //
+        // No `return` here (there used to be one): `poll.events` is always empty on a
+        // resync — the server never has any to replay either — so falling through to
+        // the loop below costs nothing, and `reconcileStuck` at the foot of this
+        // function must still run on exactly this poll. A resync is the daemon or the
+        // phone having lost its memory, which is the one moment bc-ka5y.15.8 is about.
+        if (poll.resync && poll.questions != null) {
+            dropStaleNotifications(byKey.keys.toSet())
+            showing.retainAll(byKey.keys)
+        }
+
+        for (event in poll.events) {
+            val key = event.key ?: continue
+            when (event.type) {
+                // A quiet bead still gets its card and its badge — the list came
+                // down with this poll — it just doesn't post a notification.
+                "question" -> byKey[key]?.let {
+                    if (event.quiet) {
+                        Log.i(TAG, "$key arrived quietly (${event.whyQuiet()})")
+                    } else {
+                        // `hushed` is the daemon saying this is one of a batch and not
+                        // the one that leads it (bc-obhx3): file it into the card, but
+                        // the card has already made its sound.
+                        Notifications.question(this, it, alert = !event.hushed)
+                        showing += key
+                    }
+                }
+                // The other channel. Quiet is respected on exactly the same terms:
+                // an agent asking to be different is not urgent enough to override a
+                // mute, and a mute that important things ignore is not a mute.
+                "foundation-request" -> byKey[key]?.let {
+                    if (event.quiet) {
+                        Log.i(TAG, "$key — a foundation request arrived quietly (${event.whyQuiet()})")
+                    } else {
+                        Notifications.foundationRequest(this, it)
+                        showing += key
+                    }
+                }
+                "foundation-reply" -> if (!event.quiet) Notifications.foundationReply(this, event)
+                "reply" -> if (!event.quiet) Notifications.reply(this, event)
+                // Answered here, on another device, or by an agent closing the bead.
+                // Either way the decision is made and the row should go.
+                "answered", "commented" -> {
+                    Notifications.cancel(this, key)
+                    showing -= key
+                }
+                // The filter was narrowed and you said to clear what it excludes.
+                //
+                // **Its own branch, not a third name on `answered` above.** The action
+                // happens to be identical — drop the row — but the fact is the opposite
+                // of an answer: this bead is still open, still waiting, and still in the
+                // inbox. Nothing was decided and `bd` was never told. Widen the filter
+                // and it is there again; if it says anything new it rings again. Folding
+                // it into `answered` would have made the shell's log, and any future
+                // client that treats `answered` as "this is settled", quietly wrong.
+                "dismissed" -> {
+                    Log.i(TAG, "$key cleared from the shade (${event.reason ?: "filtered"}) — the bead is untouched")
+                    Notifications.cancel(this, key)
+                    showing -= key
+                }
+                // The three sizes of good news, and the one card that is not news.
+                //
+                // **They are handled by type and not by payload**, which is the whole
+                // reason lib/news.js emits four types rather than one `news` type with a
+                // `kind` field: the phone has to be able to file an arrival — which card,
+                // which channel, does it expire — without asking the server a second
+                // question, and a `when` on `event.type` is that decision in one line.
+                //
+                // Quiet is respected on the same terms as everything above. A space you
+                // have muted for the evening should not chime because something in it
+                // merged; lib/news.js is explicit that a *blockage* is the one kind that
+                // is never quiet, so nothing here has to make that judgement twice.
+                "landed", "released", "epic-done" -> if (!event.quiet) Notifications.news(this, event)
+                // Both halves, and deliberately one branch. A `clear` is not a different
+                // event, it is this one saying the state it reported has ended, and
+                // [Notifications.stuck] is where that difference is read — putting it
+                // here would be a second place to get "which key does the clear cancel"
+                // wrong.
+                "stuck" -> Notifications.stuck(this, event)
+                // "created" is a question filed from this phone's own share sheet, and
+                // "activity" is an agent progress chip — neither is worth a buzz.
+                else -> Unit
+            }
+        }
+
+        reconcileStuck(poll.stuck)
+    }
+
+    /**
+     * Clear notifications for questions that are no longer open.
+     *
+     * This asks the system what's actually in the shade rather than trusting
+     * [showing], because that set is empty after a service restart — and a restart
+     * is exactly when a stale notification is most likely to be sitting there with
+     * buttons that would answer an already-closed bead.
+     */
+    private fun dropStaleNotifications(liveKeys: Set<String>) {
+        Tray.retain(this, liveKeys)
+    }
+
+    /**
+     * Restore a stuck card the Tray lost — a restart, a reboot — and take down one the
+     * daemon says has cleared while this phone was not there to hear the transition.
+     * bc-ka5y.15.8.
+     *
+     * The bead-deck twin of this is [dropStaleNotifications], and it cannot be reused
+     * here: [Tray.retain] only ever sweeps the bead decks, on purpose — a `stuck/…` key
+     * is never a bead's, so it is absent from every live bead set `retain` is handed,
+     * and sweeping [Tray.Chan.STUCK] the same way would clear it on the very first
+     * resync after it arrived.
+     *
+     * **Never re-notifies a key already in the shade** — that is the whole of "no
+     * second buzz for a state it was already showing" (the acceptance criterion this
+     * bead was filed against). A key arriving here that the shade has never heard of
+     * posts and knocks, which is correct: it is the first time *this instance* of the
+     * app has said so, whatever the daemon's own history of the same condition.
+     */
+    private fun reconcileStuck(current: List<Event>?) {
+        val stuck = current ?: return
+        val liveKeys = stuck.mapNotNull { it.key }.toSet()
+        val showingKeys = Tray.snapshot(Tray.Chan.STUCK).map { it.key }.toSet()
+        for (key in showingKeys - liveKeys) Tray.remove(this, key)
+        for (event in stuck) if (event.key != null && event.key !in showingKeys) Notifications.stuck(this, event)
+    }
+
+    private fun stopSelfSafely() {
+        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
+}
+
+/**
+ * Why the phone stayed dark for this one, for the log.
+ *
+ * Reasons that look identical in a logcat and are fixed differently: a mute ends on a
+ * clock, a filter ends when you press All, and an addressed question is somebody else's
+ * and never rings here however wide the filter goes. Falls back to the mute wording when
+ * the server didn't say, which is what an older daemon sends.
+ */
+private fun Event.whyQuiet(): String =
+    when (quietReason) {
+        "addressed" -> "addressed to somebody else"
+        "filtered" -> "outside the inbox filter"
+        // Held for its workspace's next ring — it will arrive again, loud, when the
+        // settle window lapses (bc-obhx3, lib/held.js on the daemon).
+        "held" -> "held for ${workspace ?: "its workspace"}'s next ring"
+        else -> "${space ?: "its space"} is muted"
+    }
