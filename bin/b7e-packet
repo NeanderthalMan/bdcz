@@ -64,6 +64,7 @@ import { loadConfig } from '../lib/config.js';
 import { beadRow, park, questionType } from '../lib/park.js';
 import { addresseeLabel, meHandles } from '../lib/addressee.js';
 import { bylineFor } from '../lib/byline.js';
+import { cfgForWorkspace } from '../lib/accounts.js';
 import { askTemplate, decisionTail } from '../lib/decision.js';
 import { packetFor, rolesOf } from '../lib/relay.js';
 import { relayDefFor } from '../lib/relaydefs.js';
@@ -133,7 +134,7 @@ if (!flag('--no-options', '--free-text')) {
   }
 }
 
-const byline = bylineFor(cfg);
+const byline = bylineFor(cfgForWorkspace(cfg, ws));
 const env = { ...process.env, BEADS_DIR: ws.dir, BEADS_ACTOR: byline };
 const bd = (args) =>
   execFileSync(cfg.bdBin, [...args, '--actor', byline], { env, cwd: ws.dir, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
@@ -167,7 +168,7 @@ if (def && role && !rolesOf(def).has(role)) {
 
 const type = questionType(target.issue_type);
 const packetLabels = packetFor(cfg, ws.name);
-const addressee = meHandles(cfg)[0] ?? '';
+const addressee = meHandles(cfgForWorkspace(cfg, ws))[0] ?? '';
 const forLabel = addresseeLabel(addressee);
 const allLabels = [...packetLabels, ...(forLabel ? [forLabel] : [])];
 

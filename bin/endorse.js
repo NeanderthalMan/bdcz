@@ -154,7 +154,7 @@ const ids = normalizeIds(positionals());
 const problem = idsProblem(ids);
 if (problem) die(problem);
 
-const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me });
+const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me, accounts: cfg.accounts });
 
 /**
  * Every named bead in one `bd` spawn.

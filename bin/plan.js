@@ -170,7 +170,7 @@ if (!wantsGroups && !wantsWhole) {
 
 // The same three the daemon builds it with, so a workspace on a Dolt server is reached the
 // same way from a pipe as from the daemon itself.
-const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me });
+const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me, accounts: cfg.accounts });
 
 const epic = await bd.show(ws, epicId);
 if (!epic) {

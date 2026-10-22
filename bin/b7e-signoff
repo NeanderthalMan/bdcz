@@ -188,7 +188,7 @@ function readField(p) {
 }
 
 async function main() {
-  const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me });
+  const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me, accounts: cfg.accounts });
   let bead;
   try {
     bead = await bd.show(ws, beadId);

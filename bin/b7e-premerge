@@ -139,7 +139,7 @@ if (!branches.length) {
       console.error(`b7e-premerge: no workspace ${wsName ? `named ${wsName}` : 'resolves for this checkout'} — pass -w explicitly`);
       process.exit(2);
     }
-    const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me });
+    const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me, accounts: cfg.accounts });
     const row = await bd.show(ws, beadId);
     if (!row) {
       console.error(`b7e-premerge: ${ws.name} has no bead ${beadId}`);

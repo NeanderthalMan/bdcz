@@ -90,7 +90,7 @@ if (!text) {
 const raw = parseAnswers(text);
 if (!raw) die('what was piped in is not YAML this can read — one list entry per comment, with `id`, `answer` and `note`');
 
-const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me });
+const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me, accounts: cfg.accounts });
 
 /**
  * Which bead the review is on — and the worker is allowed to name either.

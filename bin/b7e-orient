@@ -130,7 +130,7 @@ if (!ws) {
 // single-repo workspace that needs no bead to resolve, so it is tried before the
 // first `bd` call; a multi-repo workspace needs the bead's own repo label and is
 // retried once `row` is in hand, below.
-const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me });
+const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me, accounts: cfg.accounts });
 
 let dir = null;
 let dirErr = null;

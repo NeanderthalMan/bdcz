@@ -91,7 +91,7 @@ const driver = driverMod.driver || driverMod.default || driverMod;
 
 // The same three the daemon builds a `Bd` with, so a workspace on a Dolt server is reached
 // the same way from this pipe as from the daemon itself. See bin/promotework.js.
-const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me });
+const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me, accounts: cfg.accounts });
 
 const run = await carry(bd, ws, bead, driver, { actor: cfg.actor });
 

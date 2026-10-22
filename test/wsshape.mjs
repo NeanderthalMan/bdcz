@@ -195,6 +195,9 @@ const WANT_OBJECT = [
   // so it wants the object and merely survives a name. Passed as a property rather than
   // positionally, which is why it reads oddly here.
   'audit?.noteArchive',
+  // lib/accounts.js reads `.name` off an object and takes a bare name as-is (bc-va3pi), so
+  // either shape is correct; the object is what the advocate holds.
+  'cfgForWorkspace',
 ];
 
 /**

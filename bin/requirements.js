@@ -171,7 +171,7 @@ async function main() {
     // `Bd` takes four named fields, not the config object — `new Bd(cfg)` finds no `bin`
     // and dies inside `execFile` with "the file argument must be of type string", naming
     // neither the line nor the mistake (bc-eqn1.3.1, same bug hit in bin/controls.js).
-    const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me });
+    const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me, accounts: cfg.accounts });
     const issue = await bd.show(ws, bead);
     if (!issue) die(`${workspace}/${bead} not found`);
     const { candidates } = readRequirements(issue, c);

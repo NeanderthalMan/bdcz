@@ -1873,7 +1873,7 @@ async function armCrashHandlers() {
     const ws = cfg.workspaces.find((w) => w.name === ownWorkspace(cfg)) || cfg.workspaces[0];
     if (!ws) return warn('no beads workspace to file this router’s own crashes on — they stay log lines');
     c.installCrashHandlers(cfg, {
-      bd: new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me }),
+      bd: new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me, accounts: cfg.accounts }),
       workspace: ws,
       timeoutMs: CRASH_FILE_TIMEOUT_MS,
       where: () =>

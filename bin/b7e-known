@@ -166,7 +166,7 @@ try {
 const text = raw.trim();
 if (!text) fail('nothing to check — pipe prose in or pass --file');
 
-const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me });
+const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me, accounts: cfg.accounts });
 
 let row = null;
 if (beadId) {

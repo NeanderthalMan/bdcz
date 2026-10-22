@@ -116,7 +116,7 @@ if (!READ_VERBS.includes(verb)) {
   process.exit(3);
 }
 
-const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me });
+const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me, accounts: cfg.accounts });
 const bdArgs = [...rest, ...(jsonFlag ? ['--json'] : [])];
 
 try {

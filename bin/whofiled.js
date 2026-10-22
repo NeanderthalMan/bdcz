@@ -59,7 +59,7 @@ if (!wsName || !id) fail('both -w/--workspace and -b/--bead are required', 3);
 const ws = (cfg.workspaces || []).find((w) => w.name === wsName);
 if (!ws) fail(`no workspace named "${wsName}" — configured: ${(cfg.workspaces || []).map((w) => w.name).join(', ') || '(none)'}`, 4);
 
-const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me });
+const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me, accounts: cfg.accounts });
 const row = await bd.show(ws, id).catch(() => null);
 if (!row) fail(`${ws.name} has no bead ${id}`, 4);
 

@@ -59,13 +59,16 @@ const {
   accountSpaces,
   accountWorkspaces,
   activeAccount,
+  cfgForWorkspace,
   inAccount,
   repoInAccount,
   withAccount,
   withoutAccount,
 } = await import(LIB('accounts.js'));
 const { quietReasonFor } = await import(LIB('spaces.js'));
-const { ownAddresseeLabels } = await import(LIB('addressee.js'));
+const { addressedElsewhere, meHandles, ownAddresseeLabels } = await import(LIB('addressee.js'));
+const { agentByline, bylineFor } = await import(LIB('byline.js'));
+const { Bd } = await import(LIB('bd.js'));
 const { loadState, saveState, STATE_PATH } = await import(LIB('config.js'));
 
 let failures = 0;
@@ -257,6 +260,56 @@ check(() => {
   const outsider = { me: ['you@gmail.com'], accounts: [{ email: 'new@work.example', workspaces: ['architecture'] }] };
   assert.deepEqual(accountHandles(outsider, { account: 'new@work.example' }), ['new@work.example', 'you@gmail.com']);
 }, 'an account address missing from `me` is prepended rather than ignored');
+
+/* ------------------------------------------- and the workspace written into (bc-va3pi) */
+
+check(() => {
+  // Personal active, so `me` reads personal-first — and a write into the work graph still
+  // stamps the work address, because that graph belongs to the work account.
+  const cfg = { ...TWO, actor: 'beadcause', me: accountHandles(TWO, {}) };
+  assert.deepEqual(ownAddresseeLabels(cfgForWorkspace(cfg, { name: 'architecture' })), ['for:you@work.example']);
+  assert.equal(bylineFor(cfgForWorkspace(cfg, 'architecture')), 'beadcause (you@work.example)');
+  assert.equal(agentByline(cfgForWorkspace(cfg, 'architecture')), 'agent (you@work.example)');
+  // A personal graph is left exactly as it was — the same object, not a copy.
+  assert.equal(cfgForWorkspace(cfg, 'sorrel'), cfg);
+  assert.equal(bylineFor(cfgForWorkspace(cfg, 'sorrel')), 'beadcause (you@gmail.com)');
+}, 'a write into a workspace an account names is stamped with that account, whichever is active');
+
+check(() => {
+  const cfg = { ...TWO, me: accountHandles(TWO, { account: 'you@work.example' }) };
+  // Work active: a personal graph flips to the personal address the same way.
+  assert.deepEqual(ownAddresseeLabels(cfgForWorkspace(cfg, 'sorrel')), ['for:you@gmail.com']);
+  // A workspace no account names, and a workspace with no name, keep the active order.
+  assert.equal(cfgForWorkspace(cfg, 'unknown-repo'), cfg);
+  assert.equal(cfgForWorkspace(cfg, null), cfg);
+  // A catch-all account says nothing about any one graph.
+  const wide = { me: ['you@gmail.com', 'you@work.example'], accounts: [{ email: 'you@gmail.com' }, { email: 'you@work.example', workspaces: ['architecture'] }] };
+  assert.deepEqual(meHandles(cfgForWorkspace(wide, 'sorrel')), ['you@gmail.com', 'you@work.example']);
+  assert.deepEqual(meHandles(cfgForWorkspace(wide, 'architecture')), ['you@work.example', 'you@gmail.com']);
+  // No accounts at all: byte-for-byte what it was.
+  const bare = { me: ['you@gmail.com', 'you@work.example'] };
+  assert.equal(cfgForWorkspace(bare, 'architecture'), bare);
+}, 'the active account still decides wherever no specific account claims the workspace');
+
+check(() => {
+  const cfg = { ...TWO, me: accountHandles(TWO, {}) };
+  const scoped = cfgForWorkspace(cfg, 'architecture');
+  // Only the order moved: a question for the personal address is still mine in the work graph.
+  assert.equal(addressedElsewhere(scoped, { labels: ['human', 'for:you@gmail.com'] }), false);
+  assert.equal(addressedElsewhere(scoped, { labels: ['human', 'for:you@work.example'] }), false);
+  assert.equal(addressedElsewhere(scoped, { labels: ['human', 'for:carol@work.example'] }), true);
+}, 'routing still treats both addresses as me — only the stamp is per-workspace');
+
+check(() => {
+  const bd = new Bd({ bin: 'bd', actor: 'beadcause', me: accountHandles(TWO, {}), accounts: TWO.accounts });
+  assert.equal(bd.actor, 'beadcause (you@gmail.com)');
+  assert.equal(bd.actorIn({ name: 'architecture', dir: '/x' }), 'beadcause (you@work.example)');
+  assert.equal(bd.actorIn({ name: 'sorrel', dir: '/x' }), 'beadcause (you@gmail.com)');
+  assert.deepEqual(ownAddresseeLabels(bd.scopeIn({ name: 'architecture', dir: '/x' })), ['for:you@work.example']);
+  // A `Bd` built without accounts — every caller before bc-va3pi — signs as it always did.
+  const old = new Bd({ bin: 'bd', actor: 'beadcause', me: accountHandles(TWO, {}) });
+  assert.equal(old.actorIn({ name: 'architecture', dir: '/x' }), 'beadcause (you@gmail.com)');
+}, 'one daemon, many graphs: `Bd` signs each write as the account that owns its workspace');
 
 /* ------------------------------------------------------------ the push path */
 

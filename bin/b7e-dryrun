@@ -184,7 +184,7 @@ if (!dir && ws) {
 if (!dir) dir = rootAbs;
 if (!fs.existsSync(dir)) fail(`no such directory: ${dir}`);
 
-const realBd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me });
+const realBd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me, accounts: cfg.accounts });
 const bd = dryBd(realBd, rec);
 
 const call = buildCall(fn, { bd, ws, dir, cfg, args: extra });

@@ -98,7 +98,7 @@ for (const wsName of wsNames) {
 // once here, per workspace, and handed to `checkNames` rather than re-fetched per name.
 let trackerRowsByWorkspace = new Map();
 if (workspaces.length) {
-  const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me });
+  const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me, accounts: cfg.accounts });
   try {
     trackerRowsByWorkspace = await loadTrackerRows(bd, workspaces);
   } catch (err) {
