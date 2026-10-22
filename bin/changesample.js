@@ -110,7 +110,7 @@ const seed = arg('--seed') ?? '1';
 
 const result = await collect({
   dir,
-  bd: ws ? new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me }) : null,
+  bd: ws ? new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me, accounts: cfg.accounts }) : null,
   workspace: ws,
   branch: arg('--branch') || 'main',
   from: arg('--from') || '',

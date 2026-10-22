@@ -148,7 +148,7 @@ const trackerOrder = trackerName
   ? [named(trackerName)]
   : [named(wsName), named(workspaceFor(cfg, process.cwd())), ...workspaces].filter(Boolean);
 
-const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me });
+const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me, accounts: cfg.accounts });
 
 let issue = null;
 let tracker = null;

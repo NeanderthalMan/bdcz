@@ -121,7 +121,7 @@ if (!parsed || parsed.error || !parsed.beads.length) {
 // The same three the daemon builds it with (lib/server.js), so a workspace running a
 // Dolt server rather than embedded Dolt is reached the same way from a pipe as from a
 // phone — `bd` fails against a server that isn't there, and vice versa.
-const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me });
+const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me, accounts: cfg.accounts });
 
 /**
  * Is any of this already filed?

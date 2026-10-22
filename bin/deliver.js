@@ -76,6 +76,7 @@ import { execFileSync } from 'node:child_process';
 import { ownAddresseeLabels } from '../lib/addressee.js';
 import { isClaimGuard, LIVE_STATUSES } from '../lib/bd.js';
 import { bylineFor } from '../lib/byline.js';
+import { cfgForWorkspace } from '../lib/accounts.js';
 import { isMergeReason, parseJson } from '../lib/bd.js';
 import { approvalHold, approvalMergeHold, approvalPipeline, approvalStop, holdKind } from '../lib/approval.js';
 import { loadConfig } from '../lib/config.js';
@@ -353,7 +354,7 @@ if (ahead) {
 // `BEADS_ACTOR` and the flag beats both, which is why `Bd.run` has always appended it.
 // See bin/ask.js and lib/byline.js — and the re-measurement in `Bd.run`, which is why
 // this says "could".
-const byline = bylineFor(cfg);
+const byline = bylineFor(cfgForWorkspace(cfg, ws));
 const env = { ...process.env, BEADS_DIR: ws.dir, BEADS_ACTOR: byline };
 const bd = (args) =>
   execFileSync(cfg.bdBin, [...args, '--actor', byline], { env, cwd: ws.dir, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
@@ -1273,7 +1274,7 @@ if (autoMerge) {
     MERGE_LABEL,
     '--assignee',
     MERGE_ASSIGNEE,
-    ...ownAddresseeLabels(cfg).flatMap((l) => ['--label', l]),
+    ...ownAddresseeLabels(cfgForWorkspace(cfg, ws)).flatMap((l) => ['--label', l]),
     '--description',
     mergeBeadBody(delivery, { tests }),
     '--json',
@@ -1393,7 +1394,7 @@ const out = bd([
   // delivery is the clearest case there is — the branch is on this laptop and the
   // session that wrote it was opened here. Nothing at all when `me` is unset, which is
   // every single-person install; see lib/addressee.js.
-  ...ownAddresseeLabels(cfg).flatMap((l) => ['--label', l]),
+  ...ownAddresseeLabels(cfgForWorkspace(cfg, ws)).flatMap((l) => ['--label', l]),
   '--description',
   deliveryBody(delivery, {
     context: `**${request.files ?? 0} file${request.files === 1 ? '' : 's'}**, +${request.additions ?? 0} −${request.deletions ?? 0}, ${ahead} commit${ahead === 1 ? '' : 's'}.`,

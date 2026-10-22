@@ -140,7 +140,7 @@ async function main() {
     // `Bd` takes four named fields, not the config object — `new Bd(cfg)` finds no `bin`
     // and fails inside `execFile` with "the file argument must be of type string", which
     // names neither this line nor the mistake.
-    const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me });
+    const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me, accounts: cfg.accounts });
     const issue = await bd.show(ws, bead);
     if (!issue) die(`${workspace}/${bead} not found`);
     const had = readControls(issue).ids;

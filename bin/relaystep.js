@@ -159,7 +159,7 @@ if (!block) {
   process.exit(1);
 }
 
-const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me });
+const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me, accounts: cfg.accounts });
 try {
   await bd.appendNotes(ws, id, block);
 } catch (err) {

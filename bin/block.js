@@ -32,6 +32,7 @@ import { loadConfig } from '../lib/config.js';
 import { beadRow } from '../lib/park.js';
 import { mark, blockLabel, parseBlockTarget } from '../lib/farblock.js';
 import { bylineFor } from '../lib/byline.js';
+import { cfgForWorkspace } from '../lib/accounts.js';
 
 function arg(...names) {
   for (const n of names) {
@@ -73,7 +74,7 @@ if (!why) {
   process.exit(1);
 }
 
-const byline = bylineFor(cfg);
+const byline = bylineFor(cfgForWorkspace(cfg, ws));
 const bd = (args) =>
   execFileSync(cfg.bdBin, [...args, '--actor', byline], {
     env: { ...process.env, BEADS_DIR: ws.dir, BEADS_ACTOR: byline },

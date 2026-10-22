@@ -135,7 +135,7 @@ if (alsoName) {
   }
 }
 
-const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me });
+const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me, accounts: cfg.accounts });
 
 /** Best-effort — a workspace this checkout cannot resolve a repo for still ranks, just
  * without a guessed-file signal (declared files still work; see lib/dup.js `filesOf`). */

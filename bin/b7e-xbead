@@ -44,7 +44,7 @@ const cfg = loadConfig();
 const workspaces = cfg.workspaces || [];
 const prefixes = prefixesInUse(workspaces);
 const known = workspaces.map((w) => w.name);
-const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me });
+const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me, accounts: cfg.accounts });
 const MISSING = /no issue found|not found|does not exist/i;
 const withComments = has('--comments');
 

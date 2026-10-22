@@ -165,7 +165,7 @@ async function main() {
     case 'risk':
     case 'left': {
       const label = { tests: 'Tests', risk: 'Worth knowing', left: 'Left undone' }[action];
-      const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me });
+      const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me, accounts: cfg.accounts });
       await bd.comment(ws, beadId, `**${label}:** ${body}`);
       console.log(`commented ${label} on ${beadId} in ${ws.name} — ${bytes} bytes`);
       return;

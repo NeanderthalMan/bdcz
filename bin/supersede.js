@@ -53,6 +53,7 @@ import { loadConfig } from '../lib/config.js';
 import { beadRow } from '../lib/park.js';
 import { mark, supersedeLabel, parseSupersedeTarget } from '../lib/superseded.js';
 import { bylineFor } from '../lib/byline.js';
+import { cfgForWorkspace } from '../lib/accounts.js';
 
 function arg(...names) {
   for (const n of names) {
@@ -98,7 +99,7 @@ if (target.reason) {
 }
 const originalWs = target.workspace ? cfg.workspaces.find((w) => w.name === target.workspace) : ws;
 
-const byline = bylineFor(cfg);
+const byline = bylineFor(cfgForWorkspace(cfg, ws));
 const runner = (workspace) => (args) =>
   execFileSync(cfg.bdBin, [...args, '--actor', byline], {
     env: { ...process.env, BEADS_DIR: workspace.dir, BEADS_ACTOR: byline },

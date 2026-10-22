@@ -153,7 +153,7 @@ if (beadId || atFlag === undefined) {
     );
     process.exit(4);
   }
-  bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me });
+  bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me, accounts: cfg.accounts });
 }
 
 if (beadId) {

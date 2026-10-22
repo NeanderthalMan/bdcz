@@ -199,7 +199,7 @@ const slug = await pr.slugFor(dir).catch(() => '');
 
 /* ------------------------------------------------------------------------ the plan */
 
-const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me });
+const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me, accounts: cfg.accounts });
 
 let rows;
 try {

@@ -48,6 +48,7 @@ import { loadConfig } from '../lib/config.js';
 import { beadRow, park, questionType } from '../lib/park.js';
 import { addresseeLabel, meHandles } from '../lib/addressee.js';
 import { bylineFor } from '../lib/byline.js';
+import { cfgForWorkspace } from '../lib/accounts.js';
 import { askTemplate, decisionTail } from '../lib/decision.js';
 
 const flag = (...names) => names.some((n) => process.argv.includes(n));
@@ -88,7 +89,7 @@ const blocks = arg('--blocks', '-b');
  * Every machine's `me` is one of these labels' handles, so an addressed question is
  * still visible to all six — see lib/addressee.js. It only ever decides who is *rung*.
  */
-const addressee = arg('--for') ?? meHandles(cfg)[0] ?? '';
+const addressee = arg('--for') ?? meHandles(cfgForWorkspace(cfg, wsName))[0] ?? '';
 const forLabel = addresseeLabel(addressee);
 
 const ws = cfg.workspaces.find((w) => w.name === wsName);
@@ -144,7 +145,7 @@ if (!flag('--no-options', '--free-text')) {
  * take it harmlessly and a helper with two shapes is a helper somebody uses the wrong
  * one of.
  */
-const byline = bylineFor(cfg);
+const byline = bylineFor(cfgForWorkspace(cfg, ws));
 const env = { ...process.env, BEADS_DIR: ws.dir, BEADS_ACTOR: byline };
 const bd = (args) =>
   execFileSync(cfg.bdBin, [...args, '--actor', byline], { env, cwd: ws.dir, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });

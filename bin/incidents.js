@@ -85,7 +85,7 @@ const now = Date.now();
 const span = windowMs(arg('--period', '-p'));
 const from = span ? now - span : null;
 const doFile = has('--file');
-const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me });
+const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me, accounts: cfg.accounts });
 
 const pad = (text, width) => String(text).padEnd(width).slice(0, width);
 const iso = (ms) => (ms == null ? '—' : new Date(ms).toISOString().replace('T', ' ').slice(0, 16));

@@ -342,7 +342,7 @@ async function verifyLanded(bd) {
 }
 
 async function main() {
-  const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me });
+  const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me, accounts: cfg.accounts });
   const bdArgs = buildArgs();
 
   let stdout;
@@ -361,7 +361,7 @@ async function main() {
     // set the moment the write times out: reusing `bd` here would have the verification
     // read refused before it ever spawned, on every single timeout, which is the one
     // case this whole command exists to answer.
-    const verifyBd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me });
+    const verifyBd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me, accounts: cfg.accounts });
     let verdict;
     try {
       verdict = await verifyLanded(verifyBd);

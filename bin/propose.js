@@ -52,6 +52,7 @@ import { parseJson } from '../lib/bd.js';
 import { beadType, park, questionType } from '../lib/park.js';
 import { ownAddresseeLabels } from '../lib/addressee.js';
 import { bylineFor } from '../lib/byline.js';
+import { cfgForWorkspace } from '../lib/accounts.js';
 
 function arg(...names) {
   for (const n of names) {
@@ -120,7 +121,7 @@ const INTRO = {
 // `BEADS_ACTOR` and the flag beats both, which is why `Bd.run` has always appended it.
 // See bin/ask.js and lib/byline.js — and the re-measurement in `Bd.run`, which is why
 // this says "could".
-const byline = bylineFor(cfg);
+const byline = bylineFor(cfgForWorkspace(cfg, ws));
 const env = { ...process.env, BEADS_DIR: ws.dir, BEADS_ACTOR: byline };
 const bd = (args) =>
   execFileSync(cfg.bdBin, [...args, '--actor', byline], { env, cwd: ws.dir, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
@@ -187,7 +188,7 @@ const out = bd([
   `proposed-${kind === 'conflict' ? 'conflict' : 'discovery'}`,
   // Whose decision this is, when a tracker is shared. Nothing at all on a single-person
   // install — see lib/addressee.js.
-  ...ownAddresseeLabels(cfg).flatMap((l) => ['--label', l]),
+  ...ownAddresseeLabels(cfgForWorkspace(cfg, ws)).flatMap((l) => ['--label', l]),
   '--description',
   body,
   '--json',
