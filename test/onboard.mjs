@@ -231,6 +231,65 @@ bd(inTheWay, ['create', '--title', 'a bead of my own', '--type', 'task', '-p', '
   });
 }
 
+/* ------------------------------- a tracker inside a checkout, somewhere of their own */
+
+// Northwind's shape: the tracker lives in the clone of the repo it rides, and that clone is
+// wherever this engineer keeps repos — never where team.json guessed.
+const clone = path.join(tmp, 'elsewhere', 'src', 'architecture');
+fs.mkdirSync(clone, { recursive: true });
+spawnSync('git', ['init', '-q', clone]);
+spawnSync('git', ['-C', clone, 'remote', 'add', 'origin', `file://${remote}`]);
+const teamCheckout = writeTeam(path.join(tmp, 'team-checkout.json'), [
+  { workspace: 'acme', remote: `file://${remote}`, checkout: true, dir: path.join(tmp, 'nobody-clones-here') },
+]);
+const configCheckout = path.join(tmp, 'config-checkout');
+
+{
+  const r = onboard(teamCheckout, configCheckout);
+  check("team.json's guess with no clone behind it is refused, and nothing is made there", () => {
+    assert.equal(r.status, 1, r.out);
+    assert.match(r.out, /--dir acme=/);
+    assert.equal(fs.existsSync(path.join(tmp, 'nobody-clones-here')), false, 'a tracker was planted at the guess');
+  });
+}
+
+{
+  // An empty directory where team.json guessed is not a clone either.
+  const teamEmpty = writeTeam(path.join(tmp, 'team-checkout-empty.json'), [
+    { workspace: 'acme', remote: `file://${remote}`, checkout: true, dir: path.join(tmp, 'empty-guess') },
+  ]);
+  fs.mkdirSync(path.join(tmp, 'empty-guess'));
+  const r = onboard(teamEmpty, path.join(tmp, 'config-checkout-empty'), ['--non-interactive']);
+  check('an existing directory that is not the clone is refused, and nothing is made in it', () => {
+    assert.equal(r.status, 1, r.out);
+    assert.match(r.out, /not one by its git remotes/);
+    assert.equal(fs.existsSync(path.join(tmp, 'empty-guess', '.beads')), false, 'a tracker was planted at the guess');
+  });
+}
+
+{
+  const r = onboard(teamCheckout, configCheckout, ['--dir', `acme=${clone}`]);
+  check('told where the clone is, it bootstraps inside it', () => {
+    assert.equal(r.status, 0, r.out);
+    const rows = JSON.parse(bd(clone, ['list', '--json']).stdout);
+    assert.ok(rows.some((row) => row.id === id), `${id} is not in the clone`);
+  });
+
+  check("and remembers the answer in this Mac's workspaceDirs", () => {
+    const cfg = JSON.parse(fs.readFileSync(path.join(configCheckout, 'config.json'), 'utf8'));
+    assert.equal(path.resolve(cfg.workspaceDirs.acme.replace(/^~/, os.homedir())), clone);
+  });
+}
+
+{
+  const r = onboard(teamCheckout, configCheckout);
+  check('so the next run needs no --dir and does nothing', () => {
+    assert.equal(r.status, 0, r.out);
+    assert.match(r.out, /in place, wired to/);
+    assert.match(r.out, /nothing to do/);
+  });
+}
+
 /* ------------------------------------------------------ and with no profile at all */
 
 {

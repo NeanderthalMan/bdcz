@@ -137,6 +137,28 @@ with a remote is by definition one somebody else reads, so it defaults to `true`
 exists because JSON has none, and a file the whole team edits with nowhere to say why
 accumulates changes nobody can date.
 
+**A tracker inside a checkout is somewhere different on every Mac.** Where somebody clones
+`architecture` is theirs to decide, so a fixed `dir` is right on the Mac that wrote it and
+wrong on the next one. Set `"checkout": true` and `dir` becomes only the suggestion:
+
+```json
+{ "workspace": "northwind", "remote": "git+ssh://git@github.com/northwind/architecture.git",
+  "checkout": true, "dir": "~/northwind.dev/architecture" }
+```
+
+Onboarding then looks for a clone of the remote's repo — by its git remotes, not its name —
+at `dir`, then at `~/*/architecture` and `~/*/*/architecture`, and asks *"Where is your
+clone of github.com/northwind/architecture?"* with what it found as the default. An answer
+that is not a clone of that repo is asked again. The answer goes into this Mac's
+[`workspaceDirs`](config.md), which is also what the daemon reads to find the workspace, so
+it is asked once — unless that name is `null` there, a retired tracker, which an install
+never brings back. Without a terminal, or whenever the installer would not ask its setup
+questions (`--non-interactive`, `SKIP_CONFIGURE`, an agent session, CI — `--interactive`
+overrides), the clone it found is the answer; `npm run onboard -- --dir northwind=<path>`
+says it outright. If there is no clone at all, or what it settled on is not one and nobody
+named it, the install **stops** (exit 1) rather than making `.beads` in an empty directory
+beside wherever your real clone is.
+
 **Then, on the new Mac, the whole of it:**
 
 ```bash

@@ -306,7 +306,7 @@ try {
   check('＋ is the way to start an epic', v.picks === 1 && v.pickTag === 'BUTTON', `${v.picks} found`);
   check('AND THE BOARD NO LONGER OFFERS ITS OWN', v.stale === 0, `${v.stale} at the foot of the board`);
   check('a thumb can find it', v.pickHeight >= 34, `${v.pickHeight}px`);
-  check('it says what it would make, and names the panel that would open', /epic/i.test(v.pickLabel) && v.pickControls === 'compose-epics', `${v.pickLabel} → ${v.pickControls}`);
+  check('it says what it would make, and names the panel that would open', /effort/i.test(v.pickLabel) && v.pickControls === 'compose-epics', `${v.pickLabel} → ${v.pickControls}`);
   check('and it is shut until it is asked', v.pickExpanded === 'false' && v.panelShut === true && v.cands.length === 0);
   check('the card already on the board offers the reverse', v.offs === 1, `${v.offs} found`);
   await shot('shut');

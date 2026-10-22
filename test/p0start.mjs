@@ -300,7 +300,7 @@ await check('THE CARD STILL OFFERS THE REVERSE — one tap, back to open', () =>
   // screen, so it stays on the card.
   const html = board();
   assert.match(html, /data-act="p0-unstart" data-ws="alpha" data-bead="zz-live"/);
-  assert.match(html, /Take it off the board/);
+  assert.match(html, /Take it off My Efforts/);
 });
 
 await check('with nothing started the section is gone entirely, offer and all', () => {
@@ -607,16 +607,16 @@ try {
   console.log('\nand every refusal is a sentence\n');
 
   const refusals = [
-    ['a P0 that is already started', '/api/bead/start', 'zz-live', 409, /already on the board/],
+    ['a P0 that is already started', '/api/bead/start', 'zz-live', 409, /already on My Efforts/],
     ['a crash bead, at the door as well as in the list', '/api/bead/start', 'zz-crash', 409, /crash/],
     ['one nobody has endorsed', '/api/bead/start', 'zz-held', 409, /unendorsed/],
     ['one that is superseded', '/api/bead/start', 'zz-dupe', 409, /superseded/],
     ['one the tracker says is blocked', '/api/bead/start', 'zz-blocked', 409, /blocked, not open/],
     ['one that has closed', '/api/bead/start', 'zz-shut', 409, /closed/],
-    ['somebody else’s P0', '/api/bead/start', 'zz-theirs', 409, /not yours to put on the board/],
+    ['somebody else’s P0', '/api/bead/start', 'zz-theirs', 409, /not yours to put on My Efforts/],
     ['a bead that is neither an epic nor a P0', '/api/bead/start', 'zz-p2', 409, /not an epic or a P0/],
     ['a bead that does not exist', '/api/bead/start', 'zz-ghost', 404, /no such bead/],
-    ['a P0 that is not on the board', '/api/bead/unstart', 'zz-next', 409, /not on the board/],
+    ['a P0 that is not on the board', '/api/bead/unstart', 'zz-next', 409, /not on My Efforts/],
   ];
 
   for (const [what, route, id, status, why] of refusals) {

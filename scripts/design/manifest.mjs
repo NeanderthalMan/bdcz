@@ -143,14 +143,13 @@ const CORE = [
     <span class="viewpill-label">Questions</span>
     <span class="viewpill-count" data-count="question">4</span>
   </a>
-  <a class="viewpill" data-pill="history" href="#">
-    <span class="viewpill-icon" aria-hidden="true">📜</span>
-    <span class="viewpill-label">Ledger</span>
+  <a class="viewpill" data-pill="beads" href="#">
+    <span class="viewpill-icon" aria-hidden="true">🧿</span>
+    <span class="viewpill-label">Beads</span>
   </a>
-  <a class="viewpill" data-pill="advocates" href="#">
-    <span class="viewpill-icon" aria-hidden="true">📣</span>
-    <span class="viewpill-label">Advocates</span>
-  </a>
+  <button type="button" class="viewpill viewpill-more" data-more="1" aria-haspopup="menu" aria-expanded="false" aria-label="More views">
+    <span class="viewpill-icon" aria-hidden="true">⋯</span>
+  </button>
 </nav>`,
       },
       {
@@ -199,18 +198,12 @@ const CORE = [
         name: 'Question card — shut',
         subtitle: 'The row the inbox is made of',
         viewport: { width: 420, height: 300 },
-        note: `Shut, <b>the card is its own control</b>: <code>data-act="toggle"</code> sits on the article, so a tap anywhere — the title, the pills, the whitespace beside them — opens it. There is no "Show details" button any more; the card is that button. The identifying line comes first because answering the wrong bead is the expensive mistake here.`,
+        note: `Shut, <b>the card is its own control</b>: <code>data-act="toggle"</code> sits on the article, so a tap anywhere — the title, the pills, the whitespace beside them — opens it. There is no "Show details" button any more; the card is that button. <b>The question comes first</b> (bc-yjekg.4): the row of pills that used to lead was most of a shut card's height, so a shut card now says where it is from in one muted <b>.meta-line</b> under the question — workspace · id · priority · age — and the labels and owner wait inside the open card.`,
         markup: `<article class="card" data-act="toggle">
   <div class="card-head">
-    <div class="meta">
-      <span class="pill">beadcause</span>
-      <span class="pill id">bc-z665</span>
-      <span class="pill p0">P0</span>
-      <span class="pill">blocks 2</span>
-      <time>4m ago</time>
-    </div>
     <p class="q">Should the merge queue close the worker's bead, or leave it open for review?</p>
     <p class="subtitle">MergeAdvocate — the worker stops merging its own work</p>
+    <p class="meta-line"><span>beadcause</span><span class="sep">·</span><span class="id">bc-z665</span><span class="sep">·</span><span class="pri p0">P0</span><span class="sep">·</span><span>blocks 2</span><span class="sep">·</span><time>4m ago</time></p>
   </div>
 </article>`,
       },
@@ -223,33 +216,23 @@ const CORE = [
         markup: `<div class="ds-stack">
   <article class="card has-draft" data-act="toggle">
     <div class="card-head">
-      <div class="meta">
-        <span class="pill">beadcause</span><span class="pill id">bc-r941</span><span class="pill p1">P1</span><span class="pill st-in_progress">In progress</span>
-        <span class="draft-flag">draft saved</span>
-        <time>12m ago</time>
-      </div>
       <p class="q">Which of the two settle windows should the sweep debounce on?</p>
+      <p class="meta-line"><span>beadcause</span><span class="sep">·</span><span class="id">bc-r941</span><span class="sep">·</span><span class="pri p1">P1</span><span class="sep">·</span><time>12m ago</time><span class="draft-flag">draft saved</span></p>
     </div>
   </article>
 
   <article class="card replied" data-act="toggle">
     <div class="card-head">
-      <div class="meta">
-        <span class="pill">sorrel</span><span class="pill id">sp-88q2</span><span class="pill">P2</span>
-        <time>1h ago</time>
-      </div>
       <p class="q">Take the hero copy as drafted, or hold for the pricing change?</p>
       <p class="subtitle">Answered — waiting on the agent</p>
+      <p class="meta-line"><span>sorrel</span><span class="sep">·</span><span class="id">sp-88q2</span><span class="sep">·</span><span class="pri p2">P2</span><span class="sep">·</span><time>1h ago</time></p>
     </div>
   </article>
 
   <article class="card" data-act="toggle">
     <div class="card-head">
-      <div class="meta">
-        <span class="pill">loremia</span><span class="pill id">lm-14pk</span><span class="pill">P3</span>
-        <time>3h ago</time>
-      </div>
       <p class="q">Should the OTA creature keep its own texture budget?</p>
+      <p class="meta-line"><span>loremia</span><span class="sep">·</span><span class="id">lm-14pk</span><span class="sep">·</span><span class="pri p3">P3</span><span class="sep">·</span><time>3h ago</time></p>
       <p class="subtitle bad">⚠ bd: workspace is locked by another writer</p>
     </div>
   </article>

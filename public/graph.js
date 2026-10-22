@@ -1449,7 +1449,7 @@
         <span class="sess-glyph" aria-hidden="true">🗓</span>
         <span class="sess-main">
           <span class="sess-what">The docket</span>
-          <span class="sess-sub">where this sits in its beadepic · what happened, in order</span>
+          <span class="sess-sub">where this sits in its effort · what happened, in order</span>
         </span>
         <span class="sess-go" aria-hidden="true">›</span>
       </a>`;

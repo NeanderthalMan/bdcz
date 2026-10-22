@@ -67,6 +67,9 @@ const {
   trackerState,
   trackerPlan,
   sameRemote,
+  resolveTrackerDir,
+  repoOfRemote,
+  sameRepo,
   readSyncRemote,
   withSyncRemote,
   teamPath,
@@ -382,6 +385,87 @@ check('an unreadable config.yaml reads as no remote rather than throwing', () =>
 });
 
 /* ------------------------------------------------------------------- the wiring */
+
+console.log('\na tracker inside a checkout, which is somewhere else on every Mac');
+
+const CHECKOUT = {
+  trackers: [{ workspace: 'acme', remote: REMOTE, checkout: true, dir: '~/acme.dev/architecture' }],
+};
+
+check('checkout is a tracker field, and defaults to false', () => {
+  assert.equal(profileOf(CHECKOUT).trackers[0].checkout, true);
+  assert.equal(profileOf(ONE).trackers[0].checkout, false);
+});
+
+check("this Mac's workspaceDirs wins over team.json's dir — the person's answer, not the team's guess", () => {
+  const [t] = profileOf(CHECKOUT).trackers;
+  assert.equal(resolveTrackerDir(t, {}).source, 'team');
+  const mine = resolveTrackerDir(t, { workspaceDirs: { acme: '/src/work/architecture/.beads' } });
+  assert.deepEqual(mine, { dir: '/src/work/architecture', source: 'machine' }, 'a trailing .beads is not taken off');
+  // `null` retires a name (config.md); it is not an answer about where a tracker lives.
+  assert.equal(resolveTrackerDir(t, { workspaceDirs: { acme: null } }).source, 'team');
+  assert.equal(resolveTrackerDir(profileOf(ONE).trackers[0], {}).source, 'default');
+});
+
+check('a clone is recognised by its remote in either spelling git writes', () => {
+  assert.equal(repoOfRemote(REMOTE), 'github.com/acme/architecture');
+  assert.ok(sameRepo('git@github.com:acme/architecture.git', REMOTE), 'scp-style');
+  assert.ok(sameRepo('https://github.com/Acme/Architecture', REMOTE), 'https, other case');
+  assert.ok(!sameRepo('git@github.com:acme/architecture-old.git', REMOTE));
+  assert.ok(!sameRepo('', REMOTE));
+  assert.ok(sameRepo('file:///tmp/r/', 'file:///tmp/r'), 'file remotes, as the suite uses');
+});
+
+check('a checkout tracker with no checkout is refused, never planted in an empty directory', () => {
+  const [t] = profileOf(CHECKOUT).trackers;
+  const plan = trackerPlan(t, { dirExists: false });
+  assert.equal(plan.steps.length, 0, 'it planned a mkdir where the clone should be');
+  assert.match(plan.refusal, /--dir acme=/);
+  // With the clone there it is the ordinary absent case, and the mkdir is inside it.
+  assert.equal(trackerPlan(t, { dirExists: true }).steps[0].kind, 'mkdir');
+  // And a tracker without `checkout` keeps its old meaning: the directory is made.
+  assert.equal(trackerPlan(profileOf(ONE).trackers[0], { dirExists: false }).steps[0].kind, 'mkdir');
+});
+
+check('a directory nobody confirmed is the clone is refused too, before any step', () => {
+  const [t] = profileOf(CHECKOUT).trackers;
+  for (const observed of [
+    { dirExists: true, checkoutVerified: false },
+    { dirExists: true, beadsExists: true, configRemote: REMOTE, checkoutVerified: false },
+  ]) {
+    const plan = trackerPlan(t, observed);
+    assert.equal(plan.steps.length, 0, `it planned steps in an unverified directory (${plan.state})`);
+    assert.match(plan.refusal, /not one by its git remotes/);
+  }
+  assert.equal(trackerPlan(t, { dirExists: true, checkoutVerified: true }).steps[0].kind, 'mkdir');
+});
+
+check('where the clone is goes into workspaceDirs, once', () => {
+  const profile = profileOf(CHECKOUT);
+  const first = configPatch(profile, {}, { acme: '/src/work/architecture' });
+  assert.equal(first.patch.workspaceDirs.acme, '/src/work/architecture');
+  assert.ok(first.changes.some((c) => /workspaceDirs/.test(c)));
+  const again = configPatch(profile, { workspaceDirs: { acme: '/src/work/architecture/.beads' } }, {
+    acme: '/src/work/architecture',
+  });
+  assert.equal(again.patch.workspaceDirs, undefined, 'the same answer, spelled with .beads, was rewritten');
+  const kept = configPatch(profile, { workspaceDirs: { other: '/x' } }, { acme: '/y' });
+  assert.equal(kept.patch.workspaceDirs.other, '/x', 'a workspaceDirs entry of the person\'s own was dropped');
+});
+
+check('a retired tracker (workspaceDirs null) stays retired when its clone is found again', () => {
+  const r = configPatch(profileOf(CHECKOUT), { workspaceDirs: { acme: null } }, { acme: '/src/work/architecture' });
+  assert.equal(r.patch.workspaceDirs, undefined, 'the null exclusion was replaced');
+  assert.ok(!r.changes.some((c) => /workspaceDirs/.test(c)));
+});
+
+check('install.sh asks only when it may — --non-interactive reaches onboard', () => {
+  const sh = read('scripts/install.sh');
+  assert.match(sh, /ONBOARD_ARGS\+=\(--non-interactive\)/);
+  // The installer's own unattended decision, and a terminal rather than npm's piped stdin.
+  assert.match(sh, /if \[ -n "\$UNATTENDED_WHY" \] \|\| ! \{ : < \/dev\/tty; \} 2>\/dev\/null; then/);
+  assert.match(sh, /node scripts\/onboard\.mjs "\$\{ONBOARD_ARGS\[@\]\}" < "\$ONBOARD_IN"/);
+});
 
 console.log('\nthe wiring a refactor would break in silence');
 

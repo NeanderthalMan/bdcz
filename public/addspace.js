@@ -344,7 +344,7 @@
     body.innerHTML = `
       <h2 class="accountpick-title">Added</h2>
       <p class="accountpick-lede">${lines.join('</p><p class="accountpick-lede">')}</p>
-      <p class="addspace-note">Reading ${esc(workspace)}’s epics…</p>`;
+      <p class="addspace-note">Reading ${esc(workspace)}’s efforts…</p>`;
     let offer;
     try {
       const res = await fetch(`/api/workspaces/roots?workspace=${encodeURIComponent(workspace)}`, {
@@ -355,21 +355,21 @@
     } catch (err) {
       return paintDone([
         ...lines,
-        `<span class="addspace-warn">Could not read ${esc(workspace)}’s epics to ask which are yours — ${esc(
+        `<span class="addspace-warn">Could not read ${esc(workspace)}’s efforts to ask which are yours — ${esc(
           err.message
         )}. You can take each one from its sheet instead.</span>`,
       ]);
     }
     const roots = offer.roots || [];
     if (!roots.length) {
-      return paintDone([...lines, `${esc(workspace)} has no open epics or P0s yet, so there is nothing in it to own.`]);
+      return paintDone([...lines, `${esc(workspace)} has no open efforts yet, so there is nothing in it to own.`]);
     }
     if (!offer.me) {
       return paintDone([
         ...lines,
         `<span class="addspace-warn">This Mac does not know who you are — <code>me</code> is not set — so it cannot record which of ${esc(
           workspace
-        )}’s ${roots.length} epics are yours. Set it on the config screen, then take them from each epic’s sheet.</span>`,
+        )}’s ${roots.length} efforts are yours. Set it on the config screen, then take them from each effort’s sheet.</span>`,
       ]);
     }
 
@@ -397,11 +397,11 @@
       </li>`;
 
     body.innerHTML = `
-      <h2 class="accountpick-title">Which of ${esc(workspace)}’s epics are yours?</h2>
+      <h2 class="accountpick-title">Which of ${esc(workspace)}’s efforts are yours?</h2>
       <p class="accountpick-lede">${lines.join('</p><p class="accountpick-lede">')}</p>
       <p class="addspace-note">Pick none, some or all. <strong>Mine</strong> marks you as the owner, so it is on
-        your board. <strong>Advocate</strong> also opens an Epic Advocate on it now — an agent window that plans
-        and supervises the epic — and makes it yours.</p>
+        My Efforts. <strong>Advocate</strong> also opens an Effort Advocate on it now — an agent window that plans
+        and supervises the effort — and makes it yours.</p>
       <ul class="addspace-roots">${roots.map(rowHtml).join('')}</ul>
       <div class="accountpick-actions">
         <button type="button" class="accountpick-add" id="addspace-go" data-label="None of them">None of them</button>
@@ -442,7 +442,7 @@
           r.error
             ? `<span class="addspace-warn">${esc(r.id)}: ${esc(r.error)}</span>`
             : `<strong>${esc(r.id)}</strong> ${esc(title.get(r.id) || '')} is yours${
-                r.advocate ? ', and an Epic Advocate is opening on it' : ''
+                r.advocate ? ', and an Effort Advocate is opening on it' : ''
               }.`
         );
         paintDone([...lines, ...said]);

@@ -104,7 +104,7 @@ await check('the AIMS as it stands has nothing wrong with it', () => {
 });
 
 await check('the legal entity is named, exactly as the certificate would name it', () => {
-  assert.equal(ORGANISATION.legalName, 'Adam Morgan, trading as Neo');
+  assert.equal(ORGANISATION.legalName, 'Neo Labs');
   assert.equal(ORGANISATION.decidedBy, 'bc-jlpj', 'the entity was a decision, and the bead that made it is the record');
   assert.ok(ORGANISATION.gap.bead, 'what the repo cannot state names a bead rather than guessing');
 });

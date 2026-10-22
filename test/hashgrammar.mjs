@@ -420,7 +420,13 @@ check('the pill ids and the view ids are the same words', () => {
   const src = read('public/viewbar.js');
   const pills = [...src.matchAll(/\{ id: '([a-z]+)'/g)].map((m) => m[1]);
   assert.ok(pills.length >= 7, `could not read the pill list out of viewbar.js: ${pills.join(', ')}`);
-  for (const v of route.VIEWS) assert.ok(pills.includes(v.id), `the view ${v.id} has no pill of that name`);
+  // Since bc-yjekg.3 one view is drawn by a pill of another name: `history` is the
+  // Beads pill's ledger side, declared on that pill as `views: ['history']` — the one
+  // place the row says so, and `pillOf` in viewbar.js is what reads it.
+  const claimed = [...src.matchAll(/views: \[([^\]]*)\]/g)].flatMap((m) => [...m[1].matchAll(/'([a-z.]+)'/g)].map((x) => x[1]));
+  for (const v of route.VIEWS) {
+    assert.ok(pills.includes(v.id) || claimed.includes(v.id), `the view ${v.id} has no pill of that name`);
+  }
 });
 
 check('every page that loads viewbar.js or app.js loads hashroute.js before it', () => {
@@ -438,10 +444,11 @@ check('every page that loads viewbar.js or app.js loads hashroute.js before it',
       assert.ok(mine < at(f), `public/${page} loads hashroute.js after ${f}, so the call on boot throws`);
     }
   }
-  // Ten since bc-khoe.30.22 took public/releases.html out of `public/` entirely, as
+  // It was ten once bc-khoe.30.22 took public/releases.html out of `public/` entirely, as
   // bc-khoe.30.15 did for public/history.html before it — both pills are drawn by
-  // index.html now, which was already one of the count.
-  assert.equal(seen, 10, `expected the ten pages that draw the pill row, found ${seen}`);
+  // index.html now, which was already one of the count. Eight since bc-l75v7 deleted
+  // public/monitor.html and public/config.html, whose rows index.html draws the same way.
+  assert.equal(seen, 8, `expected the eight pages that draw the pill row, found ${seen}`);
 });
 
 check('and the service worker precaches it, because both callers call it flat', () => {

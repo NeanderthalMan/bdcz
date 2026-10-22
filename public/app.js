@@ -293,6 +293,19 @@
      * where which epic is unfolded is where you happen to be looking.
      */
     p0status: localStorage.getItem('beadcause.p0status') || 'live',
+    /**
+     * Which epic groups on the question list are folded, by `<workspace>/<id>` (or `none`).
+     * bc-yjekg. Persisted, like `p0status`: folding an effort you are not working on this
+     * week is a standing preference, and a list that unfolded it again on every reload would
+     * be the flat list back. Guarded because a private window can refuse the read.
+     */
+    epicFolds: (() => {
+      try {
+        return new Set(JSON.parse(localStorage.getItem('beadcause.epicFolds') || '[]'));
+      } catch {
+        return new Set();
+      }
+    })(),
     /*
       `p0picker` was here — is the picker at the foot of the board open — and went with
       the picker in bc-khoe.27.2. It had to be state because the picker was drawn by
@@ -807,10 +820,13 @@
    * value from then is the only one that explains anything.
    *
    * One line, dim, in the card head under the pills and above the question — where a
-   * postmark goes. On the collapsed card as well as the open one, because the pile is
-   * read from the list and most of these are never opened at all; and above the
-   * question rather than below it, so it cannot be mistaken for something an agent
-   * said. It states a fact and does nothing: the card answers exactly as it did.
+   * postmark goes. **Open card only, since bc-yjekg.4**: it used to be on the shut card
+   * too, and at two wrapped lines on a phone it was a large share of why a list of a
+   * hundred cards ran to forty-odd screens. The shut card's meta line still leads with
+   * the age, which is the half of this that stops a widened filter reading as a rush;
+   * the reason waits behind the tap. Above the question rather than below it, so it
+   * cannot be mistaken for something an agent said. It states a fact and does nothing:
+   * the card answers exactly as it did.
    */
   function arrivedQuietHtml(q) {
     const a = q.arrivedQuiet;
@@ -1063,6 +1079,39 @@
   }
 
   /**
+   * "beadcause · bc-x1 · P1 · 3d ago" — the one line a shut card says where it is from in
+   * (bc-yjekg.4).
+   *
+   * Under the question, small and muted, where a byline goes: the question is what you
+   * scan a list of a hundred for, and the four facts here are what you check *after* it
+   * caught your eye. Every pill that used to sit above it is still on the card — open it
+   * and the full row is back, owner and labels included (see `cardHtml`).
+   *
+   * **Only metadata is demoted; a state somebody has to act on stays a pill.** A draft you
+   * left half-typed, a ruling `in-review`, and a model chip whose tier labels are broken
+   * are each a thing to *do*, not a thing to know, so they ride on the end of the line in
+   * their own colours. `blocks N` stays as words, because something else waiting on this
+   * answer is the one fact here that changes which card you open first. P0 and P1 keep
+   * the warn colour their pill had, for the same reason.
+   */
+  function metaLineHtml(q, draft) {
+    const age = relTime(q.createdAt);
+    const facts = [
+      `<span>${esc(q.workspace)}</span>`,
+      `<span class="id">${esc(q.id)}</span>`,
+      q.priority != null ? `<span class="pri p${esc(q.priority)}">P${esc(q.priority)}</span>` : '',
+      q.dependentCount ? `<span>blocks ${esc(q.dependentCount)}</span>` : '',
+      age ? `<time>${esc(age)}</time>` : '',
+    ].filter(Boolean);
+    const states = [
+      approvalChipHtml(q),
+      q.model?.problem ? modelChipHtml(q) : '',
+      draft ? '<span class="draft-flag">draft saved</span>' : '',
+    ].join('');
+    return `<p class="meta-line">${facts.join('<span class="sep" aria-hidden="true">·</span>')}${states}</p>`;
+  }
+
+  /**
    * The same identifying line the card opens with, repeated at its foot.
    *
    * A brief can run several screens — a diagram, a spec, a thread — and by the time
@@ -1281,9 +1330,10 @@
    * questions and is what a single-person graph looks like).
    *
    * In the meta row with the workspace and the id rather than under the question,
-   * because it is the same kind of fact as those two — who and where, not what — and
-   * because the row is already the place your eye goes to decide whether this card is
-   * yours to open.
+   * because it is the same kind of fact as those two — who and where, not what. That
+   * row is drawn on the open card only since bc-yjekg.4, so this pill (and the panel
+   * behind it) is one tap in: the shut card is a row in a long list, and owner and
+   * labels were the pills it could least afford to wrap onto a second line for.
    */
   function addresseeHtml(q) {
     if (!state.me.length) return '';
@@ -3211,7 +3261,17 @@
     )}"${shutCardAct(open)}>
       ${cardTopHtml(q)}
       <div class="card-head">
-        <div class="meta">
+        ${
+          // Open, the whole row of pills — the labels and the owner live here and only
+          // here (bc-yjekg.4). Shut, a card is a row in a list of a hundred, and the
+          // pills were most of its height: two wrapped rows of them above the question
+          // on a phone, before you could read what was being asked. So a shut card
+          // leads with the question and says where it is from in one muted line under
+          // it (`.meta-line`, below), and everything that is only *about* the bead —
+          // the model chip, who it is for, the arrived-quietly postmark — waits for
+          // the tap that opens it.
+          open
+            ? `<div class="meta">
           <span class="pill">${esc(q.workspace)}</span>
           <span class="pill id">${esc(q.id)}</span>
           ${q.priority != null ? `<span class="pill p${q.priority}">P${q.priority}</span>` : ''}
@@ -3219,16 +3279,18 @@
           ${modelChipHtml(q)}
           ${approvalChipHtml(q)}
           ${addresseeHtml(q)}
-          ${draft && !open ? '<span class="draft-flag">draft saved</span>' : ''}
           <time>${esc(relTime(q.createdAt))}</time>
         </div>
         ${addressPanelHtml(q)}
-        ${arrivedQuietHtml(q)}
+        ${arrivedQuietHtml(q)}`
+            : ''
+        }
         ${activityHtml(q)}
         <button type="button" class="q"${shutCardAct(open)}${
           open ? ' tabindex="-1"' : ''
         } data-key="${esc(q.key)}">${esc(q.question || q.title)}</button>
         ${q.question && q.title !== q.question ? `<p class="subtitle">${esc(q.title)}</p>` : ''}
+        ${open ? '' : metaLineHtml(q, draft)}
         ${(q.errors || []).map((e) => `<p class="subtitle bad">⚠ ${esc(e)}</p>`).join('')}
       </div>
       ${answeredBeforeHtml(q)}
@@ -3874,7 +3936,7 @@
      * it is the context the card could not fit, which is the whole of why it exists. */
     parts.push(
       `<div class="docs"><a class="graph-link" href="${esc(docketUrl(q))}" target="_blank" rel="noopener noreferrer">
-        <span>The docket<span class="path">where this sits in its beadepic · what happened, in order</span></span>
+        <span>The docket<span class="path">where this sits in its effort · what happened, in order</span></span>
       </a></div>`
     );
 
@@ -4697,12 +4759,12 @@
       }</div>`;
     }
     if (!t.bead) {
-      acts.push('<span class="jira-wait">its beadepic is still being filed…</span>');
+      acts.push('<span class="jira-wait">its effort is still being filed…</span>');
     } else if (t.held === false) {
       // The id only when the line above is not already carrying it: `jiraIngestHtml`
       // draws the epic as a link the moment ingestion has finished, and the same bead id
       // twice on one card reads as two beads.
-      const named = t.ingest?.epic ? '' : ` as beadepic <span class="pill id">${esc(t.bead)}</span>`;
+      const named = t.ingest?.epic ? '' : ` as effort <span class="pill id">${esc(t.bead)}</span>`;
       acts.push(`<span class="jira-wait">✓ approved${named}</span>`);
     } else {
       acts.push(`<button class="secondary" data-act="jira-approve" ${at} ${busy ? 'disabled' : ''}>Approve</button>`);
@@ -5245,14 +5307,24 @@
    * of them is there a scope that could have failed to fetch one, and none of them has
    * a scope in which its pill would be dead.
    */
-  const kindsForScope = () =>
+  const kindsForScope = (scope = state.scope) =>
     (window.beadcause?.inboxFilter?.KINDS || [])
       .filter(
         (k) =>
-          k.side === 'any' ||
-          (state.scope === 'both' ? true : k.side === (state.scope === 'human' ? 'question' : 'agent'))
+          k.side === 'any' || (scope === 'both' ? true : k.side === (scope === 'human' ? 'question' : 'agent'))
       )
       .map((k) => k.id);
+
+  /**
+   * The scope you chose before a pill widened it (bc-khoe.25), or null when nothing has.
+   *
+   * bc-yjekg: the widening used to be stored as if you had tapped `Both` yourself, so one
+   * visit to All Beads left Home and Questions showing every agent bead from then on —
+   * across reloads, with nothing on screen to say a pill had done it. A widening is the
+   * pill's, for as long as you are on it; `narrowBack` hands the scope back the moment
+   * you pick something your own scope can produce, and only your own taps are stored.
+   */
+  let widenedFrom = null;
 
   /**
    * The scope this kind needs, or `null` when the one we are on can already produce it.
@@ -6116,7 +6188,7 @@
    * CSS class names and the view helpers did not, because `.p0-card` is a namespace prefix
    * rather than a claim and restyling four hundred selectors buys nothing a reader can see.
    */
-  const P0_SECTION_LABEL = 'Beadepics assigned to you';
+  const P0_SECTION_LABEL = 'Efforts assigned to you';
 
   /**
    * The three things the status filter can be asking for. bc-rfnr.9.6.
@@ -7210,7 +7282,7 @@
                 ? ''
                 : `<button type="button" class="p0-off" data-act="p0-unstart" data-ws="${esc(
                     c.workspace
-                  )}" data-bead="${esc(c.id)}">↩ Take it off the board</button>`
+                  )}" data-bead="${esc(c.id)}">↩ Take it off My Efforts</button>`
             }
           </div>`;
   }
@@ -7272,7 +7344,7 @@
       `${c.id} — ${c.title || ''}`
     )}">
       <div class="p0-full-top">
-        <button type="button" class="p0-back" data-act="p0-close"><span aria-hidden="true">‹</span> Board</button>
+        <button type="button" class="p0-back" data-act="p0-close"><span aria-hidden="true">‹</span> Efforts</button>
       </div>
       <div class="p0-full-head">${p0FaceHtml(c, asks)}</div>
       <div class="p0-full-body">${p0StatusHtml([c])}${p0TreeHtml(c)}</div>
@@ -7451,7 +7523,7 @@
                 : 'recorded'
             )
           : '',
-        'nobody is on this beadepic'
+        'nobody is on this effort'
       ),
       p0AdvFactHtml(
         'A window',
@@ -7467,7 +7539,7 @@
         s.live ? '' : s.hold ? esc(`${s.hold}${s.heldAt && relTime(s.heldAt) ? ` · ${relTime(s.heldAt)}` : ''}`) : '',
         s.live ? 'one is up' : 'nothing is holding it — the next tick may open one'
       ),
-      s.paused ? p0AdvFactHtml('Paused', esc('this beadepic is paused — no window will be opened on it')) : '',
+      s.paused ? p0AdvFactHtml('Paused', esc('this effort is paused — no window will be opened on it')) : '',
       s.finished
         ? p0AdvFactHtml('Finished', esc('every child is closed, and the close is waiting on you'))
         : '',
@@ -7594,7 +7666,7 @@
     // nothing at all; ＋ cannot, because it is drawn on My Epics either way and a tap has
     // to say something.
     if (!state.rootboard?.owned) {
-      return `<div class="p0-none">This Mac does not know who you are — set <code>me</code> in the config and the beadepics you own turn up here.</div>`;
+      return `<div class="p0-none">This Mac does not know who you are — set <code>me</code> in the config and the efforts you own turn up here.</div>`;
     }
     if (!rows.length) {
       // The fourth reason, and the only one of the four that is a fault rather than a
@@ -7605,13 +7677,13 @@
       // remedy is one label typed at one bead.
       const blind = state.rootboard?.unowned || [];
       if (blind.length) {
-        return `<div class="p0-none">Nothing to start here — and no beadepic in ${blind
+        return `<div class="p0-none">Nothing to start here — and no effort in ${blind
           .map((w) => `<strong>${esc(w)}</strong>`)
           .join(', ')} says who owns it, so none of them can appear. Ownership is the <code>owner:&lt;handle&gt;</code> label, not bd's owner field — <code>bd update &lt;id&gt; --add-label owner:${esc(
           (state.me || [])[0] || 'you@example.com'
-        )}</code> on a root puts it in this list.</div>`;
+        )}</code> on an effort puts it in this list.</div>`;
       }
-      return `<div class="p0-none">Nothing to start — every P0 you own is either on the board already or not open.</div>`;
+      return `<div class="p0-none">Nothing to start — every P0 you own is either on My Efforts already or not open.</div>`;
     }
     return `${rows
       .map(
@@ -7667,7 +7739,7 @@
       // also takes the row this tap is on off the screen, which is why nothing below
       // touches `btn` again on the way out.
       if (on) hideComposePick();
-      toast(on ? `${bead} is on the board` : `${bead} is off the board — ＋ on My Beadepics puts it back`);
+      toast(on ? `${bead} is on My Efforts` : `${bead} is off My Efforts — ＋ puts it back`);
       await load();
     } catch (err) {
       btn.disabled = false;
@@ -7695,9 +7767,9 @@
    */
   function epicsEmptyHtml() {
     const where = state.workspace !== 'all' ? state.workspace : state.space !== 'all' ? state.space : '';
-    return `<div class="empty"><strong>No beadepics started</strong>Nothing of yours is on the board${
+    return `<div class="empty"><strong>No efforts started</strong>Nothing of yours is started${
       where ? ` in ${esc(where)}` : ''
-    }. ＋ above picks one of your own beadepics and starts it.</div>`;
+    }. ＋ above picks one of your own efforts and starts it.</div>`;
   }
 
   function p0SectionHtml() {
@@ -7745,6 +7817,80 @@
       </h2><div class="p0-cards">${cards}</div>${open ? p0FullHtml(open) : ''}${
       advOn ? p0AdvFullHtml(advOn) : ''
     }</section>`;
+  }
+
+  /**
+   * The waiting questions, under a heading for the effort each belongs to. bc-yjekg.
+   *
+   * A card says what it is asking and not what it is for, so a flat list of a hundred
+   * reads as a hundred unrelated things. `rootboard.epics` (see `rowEpics` in
+   * lib/server.js) names the top of the tree each row hangs from, for every row and
+   * whoever owns the epic; this draws one heading per epic and the cards beneath it.
+   *
+   * **The order is still the server's.** Groups come in the order of their first card,
+   * and the server sends cards by priority then age — so the epic holding the most urgent
+   * question is the first heading, and within a group nothing moves.
+   *
+   * Headings are chunks of their own (`@epic:` keys, beside the other `@` panes) rather
+   * than wrappers round the cards, so the reconciler still keys and keeps each card. A
+   * folded group draws its heading alone — except a card that is open, which is a
+   * full-screen sheet built out of its row and must have one. With no epic known for any
+   * row (an older server, or a tracker with no epics in it) this is the flat list it was.
+   */
+  function epicChunks(rows) {
+    const epics = state.rootboard?.epics || {};
+    if (!rows.some((q) => epics[q.key])) return rows.map((q) => ({ key: q.key, html: cardHtml(q) }));
+    const groups = new Map();
+    for (const q of rows) {
+      const e = epics[q.key];
+      const id = e ? `${e.workspace}/${e.id}` : 'none';
+      if (!groups.has(id)) groups.set(id, { id, epic: e || null, rows: [] });
+      groups.get(id).rows.push(q);
+    }
+    // "No epic" last, whatever its first card's priority: it is the remainder, not an effort.
+    const order = [...groups.values()].sort((a, b) => (a.id === 'none') - (b.id === 'none'));
+    const out = [{ key: '@epic-bar', html: epicBarHtml(order.map((g) => g.id)) }];
+    for (const g of order) {
+      const folded = state.epicFolds.has(g.id);
+      out.push({ key: `@epic:${g.id}`, html: epicHeadHtml(g, folded) });
+      for (const q of g.rows) if (!folded || state.open.has(q.key)) out.push({ key: q.key, html: cardHtml(q) });
+    }
+    return out;
+  }
+
+  function epicHeadHtml(g, folded) {
+    const e = g.epic;
+    const n = g.rows.length;
+    const prio = Number.isFinite(Number(e?.priority)) && e?.priority !== null ? Number(e.priority) : null;
+    const pills = e
+      ? `<span class="pill">${esc(e.workspace)}</span>
+        <a class="pill id" href="${esc(graphUrl({ workspace: e.workspace, id: e.id }))}">${esc(e.id)}</a>
+        ${prio !== null ? `<span class="pill p${prio}">P${prio}</span>` : ''}`
+      : '';
+    // The pills beside the button rather than in it: the id is a link into the graph
+    // drawer, and a link inside a button is a tap that does two things.
+    return `<section class="epic-group${folded ? ' folded' : ''}">
+      <button class="epic-fold" data-act="epic-fold" data-epic="${esc(g.id)}" aria-expanded="${!folded}">
+        <span class="epic-caret" aria-hidden="true">${folded ? '▸' : '▾'}</span>
+        <span class="epic-title">${esc(e ? e.title : 'No effort')}</span>
+      </button>
+      <span class="epic-meta">${pills}<span class="epic-n">${n} waiting</span></span>
+    </section>`;
+  }
+
+  /**
+   * The line above the groups: how many efforts, and one tap to fold or open them all.
+   * Folding everything is what turns the list into the big picture — every effort with
+   * its count, on one screen — and unfolding one from there is how you get to work.
+   */
+  function epicBarHtml(ids) {
+    const allFolded = ids.every((id) => state.epicFolds.has(id));
+    return `<div class="epic-bar">
+      <span>${ids.length} ${ids.length === 1 ? 'effort' : 'efforts'}</span>
+      <button class="link" data-act="epic-fold-all" data-fold="${allFolded ? '0' : '1'}">${
+        allFolded ? 'Unfold all' : 'Fold all'
+      }</button>
+    </div>`;
   }
 
   function render(force = false) {
@@ -8017,7 +8163,7 @@
         .sort((a, b) => String(b.jira.updated || '').localeCompare(String(a.jira.updated || '')));
       const waiting = beads.filter((q) => !q.awaitingAgent);
       const replied = beads.filter((q) => q.awaitingAgent);
-      for (const q of waiting) chunks.push({ key: q.key, html: cardHtml(q) });
+      for (const c of epicChunks(waiting)) chunks.push(c);
       for (const q of prs) chunks.push({ key: q.key, html: prCardHtml(q) });
       for (const q of chats) chunks.push({ key: q.key, html: chatRowHtml(q) });
       for (const q of tickets) chunks.push({ key: q.key, html: jiraRowHtml(q) });
@@ -8819,6 +8965,24 @@
     const key = btn.dataset.key;
     const act = btn.dataset.act;
 
+    // Fold or unfold one epic's questions (bc-yjekg, `epicChunks`). A plain render: the
+    // heading carries no key, so nothing below this has anything to act on.
+    if (act === 'epic-fold' || act === 'epic-fold-all') {
+      if (act === 'epic-fold-all') {
+        const ids = [...listEl.querySelectorAll('[data-act="epic-fold"]')].map((b) => b.dataset.epic);
+        for (const id of ids) btn.dataset.fold === '1' ? state.epicFolds.add(id) : state.epicFolds.delete(id);
+      } else {
+        const id = btn.dataset.epic;
+        if (state.epicFolds.has(id)) state.epicFolds.delete(id);
+        else state.epicFolds.add(id);
+      }
+      try {
+        localStorage.setItem('beadcause.epicFolds', JSON.stringify([...state.epicFolds]));
+      } catch {}
+      render(true);
+      return;
+    }
+
     /**
      * Put an Epic Advocate on this epic — the one button on the board's cards.
      *
@@ -8849,7 +9013,7 @@
         // whole complaint bc-d6yk answers is a card that forgets what you just did.
         state.p0opening.set(`${btn.dataset.ws}/${bead}`, Date.now());
         render(true);
-        toast(`An Epic Advocate is planning ${bead}`);
+        toast(`An Effort Advocate is planning ${bead}`);
       } catch (err) {
         // Back to a button you can press again, with the reason on screen. Every refusal
         // this route gives is a fixable state — unowned, closed, already running — so a
@@ -10562,10 +10726,18 @@
    * three" — and it is gone (bc-ka5y.1); the chips are the only way now.
    * Already-there is a no-op rather than a reload.
    */
-  function chooseScope(next) {
-    if (!SCOPES.includes(next) || next === state.scope) return;
+  function chooseScope(next, { widening = false } = {}) {
+    if (!SCOPES.includes(next)) return;
+    // A choice rather than a widening is yours from now on, and is stored — including
+    // tapping the scope the pill had already widened to, which adopts it.
+    if (!widening) {
+      widenedFrom = null;
+      try {
+        localStorage.setItem('beadcause.scope', next);
+      } catch {}
+    }
+    if (next === state.scope) return;
     state.scope = next;
-    localStorage.setItem('beadcause.scope', state.scope);
     // Before the paint, because the scope decides which kind pills exist at all — and
     // a selection the new scope cannot produce is dropped here rather than left to
     // hide every row the refetch is about to bring back. Counts go to zero with the
@@ -11324,7 +11496,7 @@
       controls: 'compose-pick',
     },
     epic: {
-      label: 'Start a beadepic — put one of the beads you own on the board',
+      label: 'Start an effort — put one of the beads you own on My Efforts',
       controls: 'compose-epics',
     },
   };
@@ -11885,11 +12057,23 @@
     const saved = localStorage.getItem('beadcause.scope');
     if (SCOPES.includes(saved)) state.scope = saved;
     const wider = scopeFor(window.beadcause?.inboxFilter?.asked?.());
+    // Widened for this load and not stored — see `widenedFrom`.
     if (wider) {
+      widenedFrom = state.scope;
       state.scope = wider;
-      localStorage.setItem('beadcause.scope', state.scope);
     }
     mountFilters();
+  }
+
+  /**
+   * Hand a widened scope back, once the pill you are on no longer needs it. True when it
+   * did, which means `chooseScope` has already reset the list and gone to refetch it.
+   */
+  function narrowBack() {
+    const f = window.beadcause?.inboxFilter;
+    if (!widenedFrom || !f || !kindsForScope(widenedFrom).includes(f.current())) return false;
+    chooseScope(widenedFrom);
+    return true;
   }
 
   /**
@@ -11931,6 +12115,10 @@
       // fires for a pill tap too: public/viewbar.js routes those through `pick`, which
       // is `set` underneath, which is this channel.
       onChange: () => {
+        // Leaving All Beads hands back the scope it widened. `chooseScope` has emptied
+        // the list and put the wait up, so a `render` here would draw an empty list over
+        // "Asking bd…" — the refetch is what repaints.
+        if (narrowBack()) return loadBoard();
         render(true);
         loadBoard();
       },
@@ -11948,7 +12136,9 @@
     f?.onWiden?.((id) => {
       const wider = scopeFor(id);
       if (!wider) return false;
-      chooseScope(wider);
+      const from = widenedFrom ?? state.scope;
+      chooseScope(wider, { widening: true });
+      widenedFrom = from;
       return true;
     });
     f?.survey({ kinds: kindsForScope() });

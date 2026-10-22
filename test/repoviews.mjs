@@ -463,8 +463,14 @@ function boot(panes, { hash = '', pathname = '/', views = null } = {}) {
 }
 
 /** Every pill the row emitted. The id class is wide enough for a repo view's dotted id. */
+/* The row and then the ⋯ menu beside it, in drawing order — a repo pill is a row of the
+   menu since bc-yjekg.1, under "Repo tools", after Config. */
 const pills = (nav) =>
-  [...nav.innerHTML.matchAll(/<(\w+) class="viewpill" data-pill="([^"]+)"([^>]*)>/g)].map((m) => ({
+  [
+    ...(nav.innerHTML + (nav.parent?.children.find((c) => String(c.className).includes('viewmenu'))?.innerHTML || '')).matchAll(
+      /<(\w+) class="(?:viewpill|viewmenu-row accountmenu-row)"(?: role="menuitem")? data-pill="([^"]+)"([^>]*)>/g
+    ),
+  ].map((m) => ({
     tag: m[1],
     id: m[2],
     href: /href="([^"]*)"/.exec(m[3])?.[1] ?? null,
@@ -554,12 +560,12 @@ await check('a repo pill goes to the end of the row, after Config, and is a butt
 
   const nav = b.topbar.parent.children.find((c) => c.className === 'viewbar');
   const row = pills(nav);
-  assert.equal(row[row.length - 1].id, 'loremia.studio', 'a repo pill takes the end of the row');
+  assert.equal(row[row.length - 1].id, 'loremia.studio', 'a repo pill takes the end of the ⋯ menu');
   assert.equal(row[row.length - 2].id, 'config', 'and does not displace the one that asked for it');
   const mine = row[row.length - 1];
   assert.equal(mine.tag, 'button', 'the pane is in this document, so the pill must not reload it');
   assert.equal(mine.pane, 'loremia.studio');
-  assert.ok(nav.innerHTML.includes('Studio'));
+  assert.ok(nav.parent.children.find((c) => String(c.className).includes('viewmenu')).innerHTML.includes('Studio'));
 });
 
 await check('and it is the current pill once its pane is up', () => {

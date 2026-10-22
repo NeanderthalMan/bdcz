@@ -202,7 +202,7 @@ export const SOUNDS = {
     ],
   },
   chime: {
-    title: 'A beadepic completed',
+    title: 'An effort completed',
     ms: 480,
     peak: 0.38,
     parts: [

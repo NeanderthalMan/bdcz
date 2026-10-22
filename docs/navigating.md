@@ -636,13 +636,12 @@ and once they arrive as `/#advocates` there is no pathname left to read them off
 `localStorage` stays the memory in both documents; the address says which chip *this arrival*
 wants, and the store says which one you were last on when it does not.
 
-**monitor.html stays served, and that is not politeness.** Nine paths answer with it and
-several are on a phone's home screen and in the notifications the ship path sends. Landing
-them on this pane is bc-khoe.30.7, whose commit owes each of them three edits in one go — a
+**The nine paths stayed; the file did not.** Several are on a phone's home screen and in the
+notifications the ship path sends, so bc-khoe.30.7 made each of them a 302 onto this pane — a
 redirect in `serveStatic`, the path out of `SHELL` and into the offline hop table, and its row
-moved from `PAGES` to `REDIRECTS` in `test/pagepaths.mjs`. Until then all four of these files
-run in two documents and ask which one they are in, the same way `history.js` and
-`releases.js` do.
+moved from `PAGES` to `REDIRECTS` in `test/pagepaths.mjs`. After that no path could serve
+`public/monitor.html`, and bc-l75v7 deleted it. The four files still carry the branches that
+asked which document they were in; with one document left, those are dead code.
 
 **And this is the one pane that stands down while it is hidden.** The stager's rule is that
 a hidden pane stays live, so a pane you come back to is already right rather than catching

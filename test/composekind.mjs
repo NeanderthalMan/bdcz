@@ -284,7 +284,7 @@ await check('THE BUTTON SAYS WHAT IT WOULD MAKE, and points at the panel that wo
   const r = room();
   r.makes('epic');
   r.paint();
-  assert.match(r.els['#compose'].getAttribute('aria-label'), /epic/i, '＋ still offers a chat on My Epics');
+  assert.match(r.els['#compose'].getAttribute('aria-label'), /effort/i, '＋ still offers a chat on My Efforts');
   assert.equal(r.els['#compose'].getAttribute('aria-controls'), 'compose-epics');
   r.makes('chat');
   r.paint();

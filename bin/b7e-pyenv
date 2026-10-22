@@ -37,7 +37,8 @@ const USAGE = `usage: b7e-pyenv -w <workspace> [--need mod1,mod2,...] [--model <
   --need <mods>         comma-separated module names to probe each interpreter for
   --model <substring>   only show Hugging Face cache entries whose org/repo name
                         contains this (case-insensitive)
-  --dir <path>          the repo checkout to use instead of ~/projects/<n>
+  --dir <path>          the repo checkout to use instead of <projectRoot>/<n> from
+                        the config (or its sessionDirs pin)
   --json                the machine-readable form instead of the printed report
   -h, --help            this text`;
 
@@ -94,7 +95,7 @@ const needs = needArg
   .map((s) => s.trim())
   .filter(Boolean);
 
-const opts = dirArg ? { repoRoot: dirArg } : {};
+const opts = dirArg ? { repoRoot: dirArg } : { cfg };
 const rows = probeAll(wsName, needs, opts);
 const winner = satisfiesAll(rows, needs);
 const cache = hfCacheEntries(modelGlob ? { modelGlob } : {});
@@ -104,7 +105,7 @@ if (jsonMode) {
     JSON.stringify(
       {
         workspace: wsName,
-        repoRoot: dirArg || defaultRepoRoot(wsName),
+        repoRoot: dirArg || defaultRepoRoot(wsName, { cfg }),
         needs,
         interpreters: rows,
         satisfiesAll: winner ? winner.label : needs.length ? null : undefined,

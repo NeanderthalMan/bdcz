@@ -169,10 +169,17 @@
     </span>`;
   }
 
-  /** The beads this pull request is for, as links into the graph. */
-  function beadsHtml(p) {
+  /**
+   * The beads this pull request is for, as links into the graph — or, with `link: false`,
+   * as plain ids, for a row that is itself a button (see `bodyHtml`; bc-yjekg).
+   */
+  function beadsHtml(p, { link = true } = {}) {
     const beads = (p.beads || [])
-      .map((b) => `<a class="pill id" href="${esc(graphUrl(p.workspace, b.id))}">${esc(b.id)}</a>`)
+      .map((b) =>
+        link
+          ? `<a class="pill id" href="${esc(graphUrl(p.workspace, b.id))}">${esc(b.id)}</a>`
+          : `<span class="pill id">${esc(b.id)}</span>`
+      )
       .join('');
     return beads || '<span class="board-nobead">no bead named</span>';
   }
@@ -187,7 +194,9 @@
    * element and a phone will pick whichever it likes. Both callers now use both halves:
    * a shut row is a button on either screen — the board's folds, the inbox's opens full
    * screen (bc-l8jp.7) — and the open view puts the title back as the link out to GitHub,
-   * where it is no longer competing with a tap that means something else.
+   * where it is no longer competing with a tap that means something else. The bead ids
+   * follow the same rule (bc-yjekg): links only when the title is one, so a shut row
+   * holds no link at all, and the open view is where they go back to being links.
    *
    * `repo` names the workspace, which the board does not need (its cards are one repo
    * each) and the inbox does: a flat list of pull requests from six repos with no repo on
@@ -201,9 +210,9 @@
       <span class="work-title">${
         titleHref ? `<a class="pr-title-link" href="${esc(titleHref)}" target="_blank" rel="noopener">${title}</a>` : title
       }</span>
-      <span class="work-sub">${repo ? `<span class="pill">${esc(p.workspace)}</span>` : ''}${stageHtml(p)}${beadsHtml(
-        p
-      )} ${factsHtml(p)}</span>
+      <span class="work-sub">${repo ? `<span class="pill">${esc(p.workspace)}</span>` : ''}${stageHtml(p)}${beadsHtml(p, {
+        link: Boolean(titleHref),
+      })} ${factsHtml(p)}</span>
       ${lampsHtml(p)}
     </span>
     <time>${esc(age(p.updatedAt))}</time>`;

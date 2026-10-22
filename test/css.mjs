@@ -148,8 +148,8 @@ console.log('\nthe tab bars');
   // twice, so the markup is asked which class each bar is actually carrying.
   const wears = (file, cls) => new RegExp(`class="[^"]*\\b${cls.slice(1)}\\b`).test(fs.readFileSync(path.join(PUBLIC, file), 'utf8'));
   check('the agents page wears .agent-tabs', wears('foundations.html', '.agent-tabs'));
-  check('the monitor wears .mon-tabs', wears('monitor.html', '.mon-tabs'));
-  check('and neither page wears the other bar’s class', !wears('foundations.html', '.mon-tabs') && !wears('monitor.html', '.agent-tabs'));
+  check('the Advocates pane wears .mon-tabs', wears('index.html', '.mon-tabs'));
+  check('and neither page wears the other bar’s class', !wears('foundations.html', '.mon-tabs') && !wears('index.html', '.agent-tabs'));
 
   /*
     Where .mon-tabs sits — and the contract across two files that used to be here.

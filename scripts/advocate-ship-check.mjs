@@ -33,6 +33,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { CHROME, launchChrome } from './helpers/chrome.mjs';
+import { hopLocation, viewHops } from '../lib/pagealias.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PUBLIC = path.join(ROOT, 'public');
@@ -111,8 +112,10 @@ const posted = [];
 /* Presence is the page telling the daemon which view this device has open — it is not a
    write anybody pressed, and it lands on every load. Filtered here for the same reason
    scripts/card-thread-check.mjs filters it: 'nothing was written' has to mean nothing was
-   written *by the tap*. */
-const real = () => posted.filter((p) => p.path !== '/api/presence');
+   written *by the tap*. `/api/error` likewise (bc-zjep, as in scripts/prfull-check.mjs):
+   since `/monitor` is the shell's pane (bc-l75v7) the page registers the service worker,
+   whose install fails against a fixture that answers a handful of paths and says so. */
+const real = () => posted.filter((p) => p.path !== '/api/presence' && p.path !== '/api/error');
 let reply = { status: 200, body: { ok: true, deploy: { id: 'd-ship1' } } };
 
 const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.json': 'application/json' };
@@ -128,6 +131,9 @@ if (BASELINE) {
     }
   }
 }
+
+/* The paths that are a 302 to a pane of the shell, read out of lib/server.js (bc-l75v7). */
+const HOPS = viewHops();
 
 function serve() {
   const server = http.createServer((req, res) => {
@@ -153,8 +159,14 @@ function serve() {
     if (p === '/api/poll') return json({ seq: 1, events: [] });
     if (p.startsWith('/api/')) return json({});
 
-    const rel = p === '/' || p === '/monitor' || p === '/advocates' ? '/monitor.html' : p;
-    const name = rel.replace(/^\/+/, '');
+    // `/monitor` hops to the shell's Advocates pane, as the daemon's does; public/monitor.html,
+    // which this used to serve for it and for `/`, is deleted (bc-l75v7).
+    const hop = hopLocation(p, new URL(req.url, 'http://x').search, HOPS);
+    if (hop) {
+      res.writeHead(302, { location: hop });
+      return res.end();
+    }
+    const name = p === '/' ? 'index.html' : p.replace(/^\/+/, '');
     if (BASE_FILES[name]) {
       res.writeHead(200, { 'content-type': TYPES[path.extname(name)] });
       return res.end(BASE_FILES[name]);

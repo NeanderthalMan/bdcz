@@ -374,11 +374,14 @@ check('and the card draws the count rather than leaving it in the payload', () =
 
 /* ================================================================ the wiring */
 
-check('the page carries the settings card, and it is a page of its own', () => {
-  const html = read('public/config.html');
-  assert.ok(html.includes('id="space"'), 'nothing on /config for the card to be drawn into');
-  assert.ok(html.includes('src="/config.js"'), '/config draws with no script');
-  assert.ok(html.includes('src="/spacebar.js"'), 'no picker, so the page cannot know which space it is about');
+check('the shell carries the settings card, and it is a pane of its own', () => {
+  // The Config pane of index.html since bc-khoe.60; public/config.html, the page it used
+  // to be, is deleted (bc-l75v7). config.js is injected by public/panelazy.js.
+  const html = read('public/index.html');
+  const pane = html.slice(html.indexOf('<div class="pane" data-pane="config"'));
+  assert.ok(pane.includes('id="space"'), 'nothing in the Config pane for the card to be drawn into');
+  assert.match(read('public/panelazy.js'), /\['config', \['\/config\.js'\]\]/, 'the Config pane draws with no script');
+  assert.ok(html.includes('src="/spacebar.js"'), 'no picker, so the pane cannot know which space it is about');
   const js = read('public/config.js');
   assert.ok(js.includes('/api/space?space='), 'the page never reads a space');
   assert.ok(js.includes('data-space-set'), 'nothing on the page writes one');
@@ -394,7 +397,7 @@ check('the page carries the settings card, and it is a page of its own', () => {
   // card back would leave two screens writing the same config and nothing would say so.
   const mon = read('public/monitor.js');
   assert.ok(!mon.includes('spaceHtml('), 'the advocate console still draws the settings card');
-  assert.ok(!read('public/monitor.html').includes('data-tab="config"'), 'the Config chip is still on the console');
+  assert.ok(!read('public/index.html').includes('data-tab="config"'), 'the Config chip is still on the console');
 });
 
 check('the row reaches it, or the card is a page with nothing pointing at it', () => {

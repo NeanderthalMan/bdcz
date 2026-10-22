@@ -60,7 +60,7 @@ function check(name, fn) {
   }
 }
 
-/* The four chips as monitor.html declares them, `data-view` and all. Written out here
+/* The four chips as monitor.html declared them (the file is gone, bc-l75v7), `data-view` and all. Written out here
    rather than parsed out of the HTML on purpose: this suite is about what the file does
    with a row, and test/mirrorpane.mjs is what holds the row itself to the empty
    `data-view` on the Mirror. Config is the fourth (bc-me2b) and it is here for one

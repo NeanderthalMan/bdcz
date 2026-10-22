@@ -193,7 +193,7 @@ function pane(id, { pending = null, scroller = true } = {}) {
  * `hash` and `pathname` are the whole of the input those two files take: everything else
  * they know, they read out of the document below them.
  */
-function boot(panes, { hash = '', pathname = '/' } = {}) {
+function boot(panes, { hash = '', pathname = '/', store = null } = {}) {
   const body = new El('body');
   const topbar = new El('header');
   topbar.className = 'topbar';
@@ -229,6 +229,14 @@ function boot(panes, { hash = '', pathname = '/' } = {}) {
       listeners.get(type).push(fn);
     },
   };
+  /* Only when asked for: without one the room has no `localStorage` at all, which is the
+     private window viewbar.js has to survive (bc-yjekg.3). */
+  if (store) {
+    ctx.localStorage = {
+      getItem: (k) => (store.has(k) ? store.get(k) : null),
+      setItem: (k, v) => store.set(k, String(v)),
+    };
+  }
   ctx.window = ctx;
   vm.createContext(ctx);
   vm.runInContext(read('public/hashroute.js'), ctx, { filename: 'hashroute.js' });
@@ -244,12 +252,21 @@ function boot(panes, { hash = '', pathname = '/' } = {}) {
 
 /** Every pill the row emitted, as `{ id, tag, href, pane, kind, current }`. */
 function pills(nav) {
-  return [...nav.innerHTML.matchAll(/<(\w+) class="viewpill" data-pill="([a-z]+)"([^>]*)>/g)].map((m) => ({
+  /* The row and the ⋯ menu beside it (bc-yjekg.1): Advocates, Releases and Config are
+     rows of the menu now, drawn in the same three shapes, so every claim below about a
+     pill holds of them wherever they are drawn. `menu` says which. */
+  const menu = nav.parent?.querySelector?.('.viewmenu');
+  const html = nav.innerHTML + (menu ? menu.innerHTML : '');
+  return [...html.matchAll(/<(\w+) class="(viewpill|viewmenu-row accountmenu-row)"(?: role="menuitem")? data-pill="([a-z.]+)"([^>]*)>/g)].map(
+    ([, tag, cls, id, rest]) => ['', tag, id, rest, cls]
+  ).map((m) => ({
+    menu: m[4] !== 'viewpill',
     tag: m[1],
     id: m[2],
     href: /href="([^"]*)"/.exec(m[3])?.[1] ?? null,
     pane: /data-pane="([^"]*)"/.exec(m[3])?.[1] ?? null,
     kind: /data-kind="([^"]*)"/.exec(m[3])?.[1] ?? null,
+    beads: /data-beads="([^"]*)"/.exec(m[3])?.[1] ?? null,
     current: m[3].includes('aria-current="page"'),
   }));
 }
@@ -799,7 +816,9 @@ await check('a pill whose container is still pending is a link to the document i
   // theirs. This is the whole of what filling a container changes at the row: nothing in
   // viewbar.js moved for any of them, and the `href` in `PILLS` stays — nine pages that
   // have no panes still draw this row and still need the link.
-  for (const id of ['history', 'advocates', 'releases']) {
+  // History is not in the list since bc-yjekg.3: it is the Beads pill's ledger side,
+  // and the checks on that pill are below.
+  for (const id of ['advocates', 'releases']) {
     assert.equal(pill(nav, id).tag, 'button', `${id} still loads a document this page has open`);
     assert.equal(pill(nav, id).pane, id);
     assert.equal(pill(nav, id).href, null);
@@ -808,10 +827,10 @@ await check('a pill whose container is still pending is a link to the document i
 
 await check('once a pane is built, its pill stops being a link', () => {
   const { nav } = row(whenBuilt());
-  const p = pill(nav, 'history');
+  const p = pill(nav, 'releases');
   assert.equal(p.tag, 'button', 'a pill still loads a document the app already has open');
   assert.equal(p.href, null);
-  assert.equal(p.pane, 'history');
+  assert.equal(p.pane, 'releases');
 });
 
 await check('and no pill anywhere on the shell is an <a> to a view it can show', () => {
@@ -845,6 +864,15 @@ await check('a kind pill tapped from another pane switches to Home and narrows, 
   assert.equal(p.kind, 'pr');
 });
 
+await check('and the counted pills keep their badges on that pane, so no pill changes width (bc-yjekg)', () => {
+  const { nav, panes } = row(whenBuilt());
+  const onHome = (nav.innerHTML.match(/class="viewpill-count"/g) || []).length;
+  panes().go('history');
+  const onLedger = (nav.innerHTML.match(/class="viewpill-count"/g) || []).length;
+  assert.ok(onHome > 0, 'no badge on Home to compare against');
+  assert.equal(onLedger, onHome, 'the badges went with the pane — every pill to their right moved under the thumb');
+});
+
 await check('and on Home it carries the narrowing alone — the pane is already right', () => {
   const { nav } = row(whenBuilt());
   const p = pill(nav, 'pr');
@@ -871,10 +899,155 @@ await check('a narrowing chosen while another pane is up is waiting when Home co
   // The inbox goes on repainting behind a hidden pane, and `paint` pushes the selection at
   // the row every time. Refusing it outright — which is what "a no-op off Home" used to
   // mean — leaves the row lighting last week's answer on the way back.
-  ctx.window.beadcause.views.mark('bead');
-  assert.equal(pills(nav).find((p) => p.current).id, 'history', 'the row lit a Home pill while History was up');
+  ctx.window.beadcause.views.mark('pr');
+  assert.equal(pills(nav).find((p) => p.current).id, 'beads', 'the row lit a Home pill while the ledger was up');
   panes().go('epics');
-  assert.equal(pills(nav).find((p) => p.current).id, 'bead');
+  assert.equal(pills(nav).find((p) => p.current).id, 'pr');
+});
+
+/* ============================================ the ⋯ menu (bc-yjekg.1) */
+
+console.log('\nthe ⋯ pill — operations and repo tools, off the row');
+
+const moreBtn = (nav) => /<button type="button" class="viewpill viewpill-more"[^>]*>/.exec(nav.innerHTML)?.[0] ?? null;
+
+await check('the row is the inbox’s narrowings and the Beads pane, then ⋯ — seven', () => {
+  const { nav } = row(whenBuilt());
+  const onRow = pills(nav).filter((p) => !p.menu).map((p) => p.id);
+  assert.deepEqual(onRow, ['home', 'epics', 'question', 'pr', 'session', 'beads']);
+  assert.ok(moreBtn(nav), 'there is no ⋯ pill');
+  const inMenu = pills(nav).filter((p) => p.menu).map((p) => p.id);
+  assert.deepEqual(inMenu, ['advocates', 'releases', 'config']);
+});
+
+await check('the ⋯ is lit when the view on screen is one it holds', () => {
+  const { nav, panes } = row(whenBuilt());
+  assert.ok(!moreBtn(nav).includes('aria-current'), '⋯ is lit over Home');
+  panes().go('releases');
+  assert.ok(moreBtn(nav).includes('aria-current="page"'), '⋯ is not lit on Releases — the row says nowhere');
+  assert.equal(pills(nav).find((p) => p.current).id, 'releases', 'and the menu row is the current one');
+});
+
+await check('⋯ opens the menu, and a row of it goes there and shuts it', () => {
+  const { nav, body, panes } = row(whenBuilt());
+  const menu = body.querySelector('.viewmenu');
+  assert.equal(menu.hidden, true);
+  nav.fire('click', { target: { closest: () => ({ dataset: { more: '1' } }) }, preventDefault() {}, stopPropagation() {} });
+  assert.equal(menu.hidden, false, '⋯ did not open the menu');
+  const row0 = { tagName: 'BUTTON', dataset: { pane: 'advocates' } };
+  menu.fire('click', { target: { closest: () => row0 }, preventDefault() {} });
+  assert.equal(panes().showing(), 'advocates');
+  assert.equal(menu.hidden, true, 'the menu stayed open over the pane it went to');
+});
+
+/* ============================================ one Beads pill (bc-yjekg.3) */
+
+console.log('\nthe Beads pill — the ledger and All Beads, as one');
+
+/** The shell with the toggle's two hosts in it, where index.html puts them. */
+function withToggle() {
+  const panes = whenBuilt();
+  for (const id of ['epics', 'history']) {
+    const host = new El('div');
+    host.className = 'beadstoggle';
+    host.setAttribute('data-beads-toggle', '');
+    host.hidden = true;
+    panes.find((p) => p.getAttribute('data-pane') === id).append(host);
+  }
+  return panes;
+}
+const hostIn = (b, id) => b.body.querySelector(`[data-pane="${id}"]`).querySelector('[data-beads-toggle]');
+const pressed = (host) => /data-beads="([a-z]+)" aria-pressed="true"/.exec(host.innerHTML)?.[1] ?? null;
+const tapToggle = (host, side) =>
+  host.fire('click', {
+    target: { closest: () => ({ dataset: { beads: side }, getAttribute: () => 'false' }) },
+    preventDefault() {},
+  });
+
+await check('Ledger and All Beads are one pill, lit on either side', () => {
+  const { nav, ctx, panes } = row(whenBuilt());
+  const ids = pills(nav).map((p) => p.id);
+  assert.ok(ids.includes('beads'), 'there is no Beads pill');
+  assert.ok(!ids.includes('history') && !ids.includes('bead'), `the two it replaced are still drawn: ${ids.join(', ')}`);
+  // Home narrowed to beads is the Open side — the old All Beads.
+  ctx.window.beadcause.views.mark('bead');
+  assert.equal(pills(nav).find((p) => p.current).id, 'beads');
+  // And the ledger pane is the other two — the old Ledger.
+  panes().go('history');
+  assert.equal(pills(nav).find((p) => p.current).id, 'beads');
+});
+
+await check('with nothing remembered it is All Beads’ tap: a narrowing of Home, which widens', () => {
+  // A private window: no localStorage at all, and the pill must still draw.
+  const { nav, panes } = row(whenBuilt());
+  assert.equal(pill(nav, 'beads').tag, 'button');
+  assert.equal(pill(nav, 'beads').kind, 'bead', 'the Open side stopped going through the kind pick that widens the scope');
+  assert.equal(pill(nav, 'beads').pane, null);
+  panes().go('advocates');
+  assert.equal(pill(nav, 'beads').pane, 'epics');
+  assert.equal(pill(nav, 'beads').kind, 'bead');
+});
+
+await check('a remembered side is where the pill lands — on the shell and off it', () => {
+  const store = new Map([['beadcause.beadsSide', 'closed']]);
+  const { nav } = row(whenBuilt(), { store });
+  assert.equal(pill(nav, 'beads').pane, 'history');
+  assert.equal(pill(nav, 'beads').beads, 'closed');
+  assert.equal(pill(nav, 'beads').kind, null);
+  const b = boot([], { pathname: '/flow', store: new Map([['beadcause.beadsSide', 'all']]) });
+  b.run('viewbar.js');
+  assert.equal(pill(b.body.querySelector('.viewbar'), 'beads').href, '/#history');
+  const c = boot([], { pathname: '/flow', store });
+  c.run('viewbar.js');
+  assert.equal(pill(c.body.querySelector('.viewbar'), 'beads').href, '/#history?status=closed');
+});
+
+await check('the toggle says which side is up, read off the address — so old links land right', () => {
+  const closed = row(withToggle(), { hash: '#history?status=closed' });
+  assert.equal(hostIn(closed, 'history').hidden, false, 'the ledger has no toggle');
+  assert.equal(pressed(hostIn(closed, 'history')), 'closed');
+  const all = row(withToggle(), { hash: '#history' });
+  assert.equal(pressed(hostIn(all, 'history')), 'all', 'a bare #history is the whole ledger, which is All');
+  const home = row(withToggle());
+  assert.equal(hostIn(home, 'epics').hidden, true, 'the toggle is up over an unnarrowed Home');
+  home.ctx.window.beadcause.views.mark('bead');
+  assert.equal(hostIn(home, 'epics').hidden, false);
+  assert.equal(pressed(hostIn(home, 'epics')), 'open');
+});
+
+await check('tapping a side goes there and is remembered on this device', () => {
+  const store = new Map();
+  const b = row(withToggle(), { store, hash: '#history' });
+  const picks = [];
+  b.ctx.window.beadcause.inboxFilter = { pick: (k) => picks.push(k) };
+  tapToggle(hostIn(b, 'history'), 'closed');
+  // Before history.js has built there is no ledger to tell, so the hash carries it —
+  // which `readUrl` there reads as the pane is built.
+  assert.equal(b.ctx.location.hash, '#history?status=closed');
+  assert.equal(store.get('beadcause.beadsSide'), 'closed');
+  assert.equal(pressed(hostIn(b, 'history')), 'closed');
+  tapToggle(hostIn(b, 'history'), 'open');
+  assert.equal(b.panes().showing(), 'epics', 'Open is Home, and the tap stayed on the ledger');
+  assert.deepEqual(picks, ['bead'], 'Open did not go through the kind pick that widens the scope (bc-khoe.25)');
+  assert.equal(store.get('beadcause.beadsSide'), 'open');
+});
+
+await check('once the ledger is built, the toggle sets its status filter and leaves the rest', () => {
+  const b = row(withToggle(), { hash: '#history' });
+  const set = [];
+  let status = ['open'];
+  b.ctx.window.beadcause.ledger = {
+    status: () => status,
+    setStatus: (s) => {
+      set.push([...s]);
+      status = [...s];
+    },
+  };
+  tapToggle(hostIn(b, 'history'), 'closed');
+  assert.deepEqual(set, [['closed']]);
+  tapToggle(hostIn(b, 'history'), 'all');
+  assert.deepEqual(set, [['closed'], []]);
+  assert.equal(b.panes().showing(), 'history');
 });
 
 /* ================================================ the nine pages without panes */
@@ -902,14 +1075,14 @@ await check('and on a page that is a view, that view’s pill is current', () =>
   assert.equal(pills(nav).find((p) => p.current).id, 'advocates');
 });
 
-await check('on Home as a whole document, the kind pills still act and History still links', () => {
+await check('on Home as a whole document, the kind pills still act and Advocates still links', () => {
   const b = boot([], { pathname: '/' });
   b.run('viewbar.js');
   const nav = b.body.querySelector('.viewbar');
   assert.equal(pill(nav, 'pr').tag, 'button');
   assert.equal(pill(nav, 'pr').kind, 'pr');
   assert.equal(pill(nav, 'pr').pane, null);
-  assert.equal(pill(nav, 'history').tag, 'a');
+  assert.equal(pill(nav, 'advocates').tag, 'a');
   assert.equal(pills(nav).find((p) => p.current).id, 'home');
 });
 

@@ -1559,12 +1559,25 @@ const rowPills = () => {
   return [...src.slice(0, src.indexOf('\n  ];')).matchAll(/\bid: '([a-z]+)'/g)].map((m) => m[1]);
 };
 
-await check('the row draws the six kinds, in the table’s order', () => {
+/**
+ * The two kinds that are one pill since bc-yjekg.3: the ledger and All Beads, drawn as
+ * the Beads pill's Closed/All and Open sides. They stay kinds in the table — a stored
+ * `bead` selection and a `?kind=bead` link still mean what they meant — and the row
+ * says which pill took them in, as `kinds` and `views` on that pill.
+ */
+const MERGED = ['history', 'bead'];
+
+await check('the row draws the six kinds, in the table’s order — two of them as one Beads pill', () => {
   // The copy, checked. viewbar.js is loaded on ten pages and inboxfilter.js on one,
   // so the row cannot read the table at paint time — which makes this the only thing
   // standing between "one place that knows" and two lists that drift.
   const drawn = rowPills();
-  assert.deepEqual(drawn.slice(0, PILLS.length), PILLS, `the row draws ${drawn.join(', ')}`);
+  const own = PILLS.filter((id) => !MERGED.includes(id));
+  assert.deepEqual(drawn.slice(0, own.length + 1), [...own, 'beads'], `the row draws ${drawn.join(', ')}`);
+  const at = VIEWBAR.indexOf("{ id: 'beads'");
+  const row = VIEWBAR.slice(at, VIEWBAR.indexOf('\n', at));
+  assert.ok(row.includes("views: ['history']"), 'the Beads pill is not lit on the ledger');
+  assert.ok(row.includes("kinds: ['bead']"), 'the Beads pill is not lit on Home narrowed to beads');
 });
 
 /**
@@ -1599,6 +1612,7 @@ await check('five of the pills carry a count, and three deliberately do not', ()
 
 await check('and every kind’s label is the same word in both files', () => {
   for (const k of list(model.KINDS)) {
+    if (MERGED.includes(k.id)) continue;
     const at = VIEWBAR.indexOf(`id: '${k.id}', kind: '${k.id}'`);
     assert.notEqual(at, -1, `${k.id} is in the table and not on the row`);
     const row = VIEWBAR.slice(at, VIEWBAR.indexOf('\n', at));
@@ -1607,15 +1621,17 @@ await check('and every kind’s label is the same word in both files', () => {
   }
 });
 
-await check('only History leaves Home, and it is the one with an href', () => {
+await check('no kind with a pill of its own leaves Home', () => {
   // Five of the six are Home under a different narrowing, so five of the six must not
   // carry an href — a link to the page you are on is a full document load to change
   // which rows of a list already in hand get drawn.
   for (const k of list(model.KINDS)) {
     const at = VIEWBAR.indexOf(`id: '${k.id}', kind: '${k.id}'`);
+    // The ledger left with its pill (bc-yjekg.3): the Beads pill's Closed and All sides
+    // are where it is now, and what they link to is `aim` in viewbar.js, not this table.
+    if (MERGED.includes(k.id)) continue;
     const row = VIEWBAR.slice(at, VIEWBAR.indexOf('\n', at));
-    if (k.id === 'history') assert.ok(row.includes("href: '/history'"), 'History is not a link');
-    else assert.ok(!row.includes('href:'), `${k.id} navigates away from Home`);
+    assert.ok(!row.includes('href:'), `${k.id} navigates away from Home`);
   }
 });
 

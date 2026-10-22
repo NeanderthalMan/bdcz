@@ -781,7 +781,7 @@ await check('a screen dark for a week is renewed rather than thrown away — the
 /* -------------------------------------------------------------- the wiring */
 
 await check('every standing page loads the file, or that page is the one cold tab', () => {
-  for (const page of ['index.html', 'console.html', 'monitor.html', 'admin.html', 'endorse.html']) {
+  for (const page of ['index.html', 'console.html', 'admin.html', 'endorse.html']) {
     assert.ok(read(`public/${page}`).includes('/warm.js'), `${page} does not load warm.js`);
   }
 });
@@ -790,16 +790,20 @@ await check('and it is loaded before the page script that asks it for a list', (
   for (const [page, script] of [
     ['index.html', '/app.js'],
     ['console.html', '/console.js'],
-    ['monitor.html', '/monitor.js'],
-    // The board is a pane on that same page now (bc-d4d5), and it reads the warm layer
-    // for its own payload — so it is the second script on the page here rather than a
-    // page of its own, exactly as mirror.js is in test/stream.mjs.
-    ['monitor.html', '/prs.js'],
+    // The advocate console and the board are panes of the shell now (bc-khoe.4, bc-d4d5),
+    // and both read the warm layer for their own payloads. Their scripts are injected by
+    // public/panelazy.js (bc-iaju1.6), so the tag that has to come after warm.js is that
+    // loader's; that it carries monitor.js and prs.js is asserted below.
+    ['index.html', '/panelazy.js'],
     ['admin.html', '/admin.js'],
     ['endorse.html', '/endorse.js'],
   ]) {
     const html = read(`public/${page}`);
     assert.ok(html.indexOf('/warm.js') < html.indexOf(script), `${page} loads ${script} first`);
+  }
+  const lazy = read('public/panelazy.js');
+  for (const script of ['/monitor.js', '/prs.js']) {
+    assert.ok(lazy.includes(`'${script}'`), `public/panelazy.js no longer injects ${script}`);
   }
 });
 
@@ -852,9 +856,11 @@ await check('every pill the row draws is warmed — and three views are delibera
     epics: 'inbox',
     question: 'inbox',
     session: 'inbox',
-    bead: 'inbox',
     pr: 'prs',
-    history: 'history',
+    // Ledger and All Beads, as one pill since bc-yjekg.3. Its Open side is Home narrowed
+    // — the inbox payload, already warm through every pill above — so the entry it is
+    // the only way to is the ledger's.
+    beads: 'history',
     advocates: 'advocates',
     releases: 'releases',
     config: 'config',

@@ -279,7 +279,7 @@ check('and it carries the remedy, as a label and not a config edit', () => {
 
 check('with nothing blind, the old sentence is unchanged', () => {
   const html = candsWith([]);
-  assert.match(html, /already on the board|on the board already/, 'the ordinary empty state was replaced rather than added to');
+  assert.match(html, /already on My Efforts|on My Efforts already/, 'the ordinary empty state was replaced rather than added to');
   assert.doesNotMatch(html, /--add-label/, 'the labelling nag is showing when nothing is unlabelled');
 });
 

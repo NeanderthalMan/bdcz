@@ -142,6 +142,10 @@
       navigation you have to open something to see is one nobody uses. bc-khoe.26 is what
       takes the rest of the panel apart the same way.
     -->
+    <!-- The Beads pane's Open / Closed / All (bc-yjekg.3). Open is this pane narrowed to
+         `bead`; the other two are the ledger's. public/viewbar.js fills both hosts and
+         shows the one on screen while the Beads pill is lit. -->
+    <div class="beadstoggle" data-beads-toggle role="group" aria-label="Which beads" hidden></div>
     <nav class="filters" id="filters" hidden></nav>
 
     <main id="list" class="list pagescroll" aria-live="polite">
@@ -210,7 +214,7 @@
         then title — is one renderer and not two.
       -->
       <div id="compose-epics" class="compose-pick ws-pick epics" hidden>
-        <h2 class="section-label">Start a beadepic</h2>
+        <h2 class="section-label">Start an effort</h2>
         <div id="compose-epics-row" class="p0-picker"></div>
       </div>
       <div id="compose-pick" class="compose-pick ws-pick" hidden>
@@ -295,7 +299,7 @@
         <label class="field">
           <span>Parent</span>
           <input type="text" id="beadform-parent" autocapitalize="none" autocorrect="off"
-            spellcheck="false" placeholder="a bead id — blank files it under the unsorted root">
+            spellcheck="false" placeholder="a bead id — blank files it under the unsorted effort">
         </label>
 
         <label class="field">
@@ -369,6 +373,7 @@
          which is where the ledger's filters have always been written; in one document
          that string outlives the view that wrote it, and Home is not the place to keep
          History's filter. -->
+    <div class="beadstoggle" data-beads-toggle role="group" aria-label="Which beads" hidden></div>
     <nav class="filters" id="hist-filters" hidden></nav>
 
     <main class="work pagescroll">
@@ -418,10 +423,10 @@
     out of this pane would be the same row drawn twice. The ⟳ and the brand dot are the
     shell's and are shared — each pane asks whether the press was its own.
 
-    `monitor.html` stays served and stays correct. Landing `/monitor`, `/advocates`,
-    `/sessions`, `/work`, `/prs` and the rest on this pane is bc-khoe.30.7; until that
-    merges the document is still the address, which is why every one of these four files
-    asks the document whether it has panes rather than assuming.
+    `/monitor`, `/advocates`, `/sessions`, `/work`, `/prs` and the rest land on this pane
+    since bc-khoe.30.7, and `monitor.html` itself is deleted (bc-l75v7). The four files
+    still ask the document whether it has panes; with one document left, the other answer
+    is dead code.
   -->
   <div class="pane" data-pane="advocates" hidden>
     <!-- `data-pane` is the section a chip shows and `data-view` is what this device tells
@@ -513,9 +518,9 @@
     **bc-khoe.60** is the fold, and the markup is public/config.html's, unchanged, minus
     the top bar and the pill row the shell already draws. What fills it is
     public/config.js, the same file that page loads, which registers with the stager and
-    builds this container when asked. `/config`, `/settings` and `/config.html` are still
-    documents and still answer — any of the three can be on a home screen — so that file
-    has to run in both, and it decides which by asking whether this document has panes.
+    builds this container when asked. `/config`, `/settings` and `/config.html` still
+    answer — any of the three can be on a home screen — as a 302 onto this pane, and
+    config.html itself is deleted (bc-l75v7).
 
     `id="cfg-observing"` rather than the bare name config.html has always called this
     chip: the Advocates pane above already holds it (bc-khoe.4), and the reason it was

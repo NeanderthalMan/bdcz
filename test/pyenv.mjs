@@ -102,8 +102,25 @@ process.exit(1);
 
 /* ------------------------------------------------------------------- repoRoot / env discovery */
 
-check('defaultRepoRoot builds ~/projects/<workspace>', () => {
-  assert.equal(defaultRepoRoot('loremia', { homeDir: '/home/x' }), '/home/x/projects/loremia');
+// bc-x79kq.1: the root comes from the config, never from a directory name spelled in
+// lib/pyenv.js — the public tree's scrub rewrites that name, and a scrubbed checkout
+// then looked under a projects directory this Mac does not have.
+check('defaultRepoRoot reads <projectRoot>/<workspace> from the config', () => {
+  const cfg = { projectRoot: '~/code', workspaces: [{ name: 'loremia', dir: '/home/x/beads/loremia/.beads' }] };
+  assert.equal(defaultRepoRoot('loremia', { cfg, homeDir: '/home/x' }), '/home/x/code/loremia');
+});
+
+check('defaultRepoRoot prefers a sessionDirs pin, then falls back to the tracker home, then null', () => {
+  const pinned = { projectRoot: '/home/x/code', sessionDirs: { loremia: '~/elsewhere/lm' } };
+  assert.equal(defaultRepoRoot('loremia', { cfg: pinned, homeDir: '/home/x' }), '/home/x/elsewhere/lm');
+  const noRoot = { workspaces: [{ name: 'loremia', dir: '/home/x/beads/loremia/.beads' }] };
+  assert.equal(defaultRepoRoot('loremia', { cfg: noRoot, homeDir: '/home/x' }), '/home/x/beads/loremia');
+  assert.equal(defaultRepoRoot('loremia', { homeDir: '/home/x' }), null);
+});
+
+check('with no root configured, candidateEnvironments skips repo-local envs rather than guessing', () => {
+  const { envs } = candidateEnvironments('nowhere', { homeDir: path.join(tmp, 'home-none'), scratchpadRoot: path.join(tmp, 'no-scratch-none') });
+  assert.ok(Array.isArray(envs));
 });
 
 check('pythonOf finds bin/python3 over bin/python, and null when neither exists', () => {

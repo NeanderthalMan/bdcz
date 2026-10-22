@@ -61,6 +61,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CHROME, launchChrome } from './helpers/chrome.mjs';
+import { hopLocation, viewHops } from '../lib/pagealias.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PUBLIC = path.join(ROOT, 'public');
@@ -221,7 +222,10 @@ const committed = (f) => execFileSync('git', ['show', `HEAD:${f}`], { cwd: ROOT,
 
 // The pages the server maps onto one file. Mirrored here rather than imported, because
 // what this check drives is the *URL* a notification or a home-screen icon opens.
-const ALIAS = { '/': '/index.html', '/console': '/console.html', '/monitor': '/monitor.html', '/prs': '/monitor.html' };
+const ALIAS = { '/': '/index.html', '/console': '/console.html' };
+
+/* The paths that are a 302 to a pane of the shell, read out of lib/server.js (bc-l75v7). */
+const HOPS = viewHops();
 
 function serve() {
   const server = http.createServer(async (req, res) => {
@@ -306,6 +310,12 @@ function serve() {
       return res.end(committed('public/warm.js'));
     }
 
+    // `/monitor` and `/prs` hop to the shell's Advocates pane, as the daemon's do.
+    const hop = hopLocation(p, new URL(req.url, 'http://x').search, HOPS);
+    if (hop) {
+      res.writeHead(302, { location: hop });
+      return res.end();
+    }
     const file = path.join(PUBLIC, (ALIAS[p] || p).replace(/^\/+/, ''));
     if (!file.startsWith(PUBLIC) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {
       res.writeHead(404).end('no');
@@ -351,8 +361,8 @@ async function timeToRows(url, selector) {
 /**
  * The three views, by the URL a home-screen icon or a notification actually opens.
  *
- * `/prs` is `monitor.html` with the board chip up — the server maps it, and
- * public/montabs.js selects the chip from the path — so two of these are the same
+ * `/prs` is the Advocates pane with the board chip up — the server hops it there, and
+ * public/montabs.js selects the chip from `tab=prs` in the hash — so two of these are the same
  * document with a different pane in front, which is exactly how a thumb reaches them.
  */
 const VIEWS = [
@@ -438,7 +448,13 @@ try {
 
      What must not happen is a *second* one behind either of those, from the background
      warm going and replacing an entry already on the disk. That is the whole difference
-     between these numbers and the baseline's. */
+     between these numbers and the baseline's.
+
+     Since bc-l75v7 `/monitor` and `/prs` arrive the way a phone does — a hop to the
+     shell's Advocates pane — rather than on public/monitor.html, which no path could
+     serve any more. The shell boots the inbox under the pane, and on that path the run
+     counted two board sweeps where the deleted document spent one. That is a finding
+     about the shell, not a reason to lower the number. */
   const spentBy = (url, key) => {
     const r = reopens.find((x) => x.view.url === url);
     return r.after[key] - r.before[key];

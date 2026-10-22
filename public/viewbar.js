@@ -104,11 +104,20 @@
   it is drawn. Off Home the pills are plain links with nothing on them, exactly as they
   were.
 
+  **"Home" now means the shell, not the pane** (bc-yjekg). Since Ledger, Advocates,
+  Releases and Config became panes of the same document (bc-khoe.30), Home's list keeps
+  being polled and counted behind them, so the number is as live there as it is on Home —
+  the argument above, unchanged, reaches every pane. Hiding it off the Home pane is what
+  made every pill change width as you moved between panes, so a thumb aimed at All Beads
+  landed on Advocates. Pages outside the shell still draw no count: they hold no list.
+
   The three without a number are three different reasons, and none is an omission. **All
   Beads** is every live bead in the tracker: an unbounded number, and one that says
   nothing you would act on. **Ledger** and **Advocates** are pages of their own with
   their own polls — a count for either is the stale badge the paragraph above refuses,
-  and it would be stale on the one screen it appears on.
+  and it would be stale on the one screen it appears on. (All Beads and Ledger are one
+  **Beads** pill since bc-yjekg.3 — see `PILLS` — and it carries no count for both
+  reasons at once.)
 
   Zero is drawn as `0` rather than by hiding the badge. A badge that appears when the
   first poll lands would change the pill's width under a thumb already on its way to it.
@@ -158,6 +167,21 @@
   It is built here rather than pasted into eight <head>-alike blocks of HTML because
   there is no templating in this app, and a row that says different things on different
   pages is worse than no row. One list, one place to add a pill.
+
+  ## What is behind ⋯ (bc-yjekg.1)
+
+  By October the row was thirteen pills and four kinds of thing: Home's narrowings, the
+  panes, the tools a repo declared about itself (Studio, Briefs, …) and the operations
+  (Advocates, Releases, Config). A sideways scroll that long is a row you read by
+  flicking, and the pills you check daily were the ones you flicked past. So the row keeps
+  the narrowings and the Beads pane, and every pill flagged `more` — the three operations
+  and every repo view `add` appends — is a row of a menu the trailing **⋯** opens instead:
+  seven pills, which a 390px phone very nearly shows without a flick.
+
+  The menu rows are drawn by the same `draw()` as the pills and carry the same `data-`
+  attributes, so a tap in the menu is decided by the same code as one on the row. When
+  the view on screen is one of them the ⋯ itself is lit, so the row never says you are
+  nowhere, and the menu row for it is the `<span aria-current>` the pill would have been.
 
   ## Why the class is `.viewbar` and not `.pillrow`
 
@@ -217,26 +241,24 @@
     // bc-fwp2c: it was the landing pill for as long as the board was drawn on the screen
     // you land on, and the badge is what separated them — a place can only ever count the
     // sum of every kind, which is not a number the word "Epics" can carry.
-    { id: 'epics', kind: 'epics', icon: '🎯', label: 'My Beadepics', count: true },
+    { id: 'epics', kind: 'epics', icon: '🎯', label: 'My Efforts', count: true },
     // Questions, PRs, Chats: what is arriving, in the order it tends to need answering.
     { id: 'question', kind: 'question', icon: '❓', label: 'Questions', count: true },
     { id: 'pr', kind: 'pr', icon: '🚢', label: 'PRs', count: true },
     { id: 'session', kind: 'session', icon: '💬', label: 'Chats', count: true },
-    // The record (bc-nib3.2): where you go to ask "what happened to that". A page rather
-    // than a narrowing of Home — it has its own poll, its own filter bar and its own
-    // vocabulary — and it kept the position it has had since it was a tab.
+    // Every bead, one pill (bc-yjekg.3). It was two — `Ledger`, the record of every bead
+    // the space has had (the `history` pane), and `All Beads`, Home narrowed to the live
+    // ones (the `bead` kind) — and the two answered one question from two ends. They are
+    // one pill with an **Open / Closed / All** toggle under it now: Open is what All Beads
+    // was, Home narrowed to `bead`, widening the scope to reach it exactly as before
+    // (bc-khoe.25); Closed is the ledger narrowed to `status=closed`; All is the ledger
+    // unnarrowed. Nothing addressable moved: `#history`, `/history`, `?kind=bead` and a
+    // stored `bead` selection all still land here, with the toggle on the side they name.
     //
-    // `Ledger` rather than `History`, since bc-khoe.53. The list is every bead the space
-    // has ever had — `parseQuery` in lib/history.js starts at `status: null` and applies
-    // no default, so open, blocked and deferred beads are in it beside the closed ones —
-    // and `History` promised only the closed half. It is the page's own word for itself
-    // (the first line of public/history.js) and it does not collide with `All Beads`,
-    // which is live beads only. The `id`, the `kind` and the path stay `history`: the
-    // label moved and nothing addressable did.
-    { id: 'history', kind: 'history', href: '/history', icon: '📜', label: 'Ledger' },
-    // The work nobody is asking you about, which is why it is past the three that are —
-    // and past the record of the ones that are finished.
-    { id: 'bead', kind: 'bead', icon: '🧿', label: 'All Beads' },
+    // `views` and `kinds` are what make that true: the view ids and the narrowings this
+    // one pill is lit for, read by `pillOf`. Which side a tap lands on is the toggle you
+    // last chose, remembered on this device — see `beadsMode`.
+    { id: 'beads', icon: '🧿', label: 'Beads', views: ['history'], kinds: ['bead'] },
     // Not a kind, and the one pill on this row that is neither Home nor a record. It
     // also carries the pull request board's three paths, which used to be a `PRs` pill
     // of their own: /prs, /pulls and /prs.html all serve monitor.html with its board
@@ -247,7 +269,7 @@
     // keeps its three extra paths. bc-khoe.4 folds that console into the shell's
     // Advocates pane, at which point this pill stops being an `<a>` and starts being a
     // `data-pane` like the rest — the same pill, one fewer document load.
-    { id: 'advocates', href: '/monitor', icon: '📣', label: 'Advocates' },
+    { id: 'advocates', href: '/monitor', icon: '📣', label: 'Advocates', more: true },
     // Where everything in flight actually is (bc-khoe.7). Immediately after the pill that
     // carries the board, because the two are read one after the other: the board
     // is where you decide something may land, and this is where you watch it do so. It is a
@@ -256,7 +278,7 @@
     // after it, and a screen about pull requests was the wrong place to be told. Its three
     // addresses — /releases, /deploys, /releases.html — are in public/hashroute.js with
     // every other view's, since bc-khoe.30.2; this row asks rather than knows.
-    { id: 'releases', href: '/releases', icon: '🚀', label: 'Releases' },
+    { id: 'releases', href: '/releases', icon: '🚀', label: 'Releases', more: true },
     // Last, and last on purpose: it is the one pill here you reach about once a month.
     // Past Releases, which asked only to sit beside the board it follows and is happy
     // anywhere right of it; this one asked for the end of the row specifically.
@@ -279,7 +301,7 @@
     // two-step History, Advocates and Releases each went through, and nothing here
     // changed to make that work either: `panes?.has` answers yes on the shell now, and
     // this pill draws as the row's control rather than this `<a>` the moment it does.
-    { id: 'config', href: '/config', icon: '🎛', label: 'Config' },
+    { id: 'config', href: '/config', icon: '🎛', label: 'Config', more: true },
   ];
 
   /**
@@ -362,6 +384,20 @@
   nav.setAttribute('aria-label', 'Views');
 
   /**
+   * The menu the trailing ⋯ opens (bc-yjekg.1): every pill flagged `more`, and every repo
+   * view. Its own element beside the row rather than inside it, because the row scrolls
+   * sideways and so clips on both axes — a menu hung inside it would be cut to the row's
+   * 52px. Drawn in the account menu's rows (public/accountbar.js) because it is the same
+   * kind of thing: a short list of places, opened from one chip, shut by a tap anywhere
+   * else.
+   */
+  const menu = document.createElement('div');
+  menu.className = 'accountmenu viewmenu';
+  menu.setAttribute('role', 'menu');
+  menu.setAttribute('aria-label', 'More views');
+  menu.hidden = true;
+
+  /**
    * Which of Home's pills the filter last chose.
    *
    * Recorded whether or not Home is on screen — see `mark()` — because on the shell the
@@ -387,7 +423,152 @@
    * five pills share one address *and* one empty hash, so neither can tell them apart and
    * the filter is the answer instead.
    */
-  const lit = () => (onHome() ? narrowed : here() || '');
+  const lit = () => pillOf(onHome() ? narrowed : here() || '');
+
+  /**
+   * The pill that draws a view or a narrowing: its own, or the one that took it in.
+   *
+   * Since bc-yjekg.3 two ids that used to be pills of their own — the `history` view and
+   * the `bead` narrowing — are both the Beads pill, so an address, a hash or a stored
+   * selection naming either still lights *something*. An id no pill claims comes back as
+   * itself, which is what it always was.
+   */
+  function pillOf(id) {
+    const p = PILLS.find((q) => q.id === id || q.views?.includes(id) || q.kinds?.includes(id));
+    return p ? p.id : id || '';
+  }
+
+  /* ---------------------------------------------------- the Beads pane's toggle */
+
+  /** The three sides of the Beads pill and their words, in the order the toggle draws
+   *  them. A map rather than a list of `{ id }`s, because the tests that read `PILLS` out
+   *  of this file match `id: '…'` at the start of a line, and these are not pills. */
+  const SIDES = { open: 'Open', closed: 'Closed', all: 'All' };
+  const isSide = (v) => Object.prototype.hasOwnProperty.call(SIDES, v);
+  const SIDE_KEY = 'beadcause.beadsSide';
+
+  /**
+   * Which side the Beads pill lands on when tapped from somewhere else: the one you last
+   * chose on the toggle, on this device. A convenience and nothing more — a private
+   * window, a cleared site or a storage that throws is `open`, which is what All Beads
+   * always was.
+   */
+  let beadsSide = (() => {
+    try {
+      const v = localStorage.getItem(SIDE_KEY);
+      return isSide(v) ? v : 'open';
+    } catch {
+      return 'open';
+    }
+  })();
+  const rememberSide = (side) => {
+    beadsSide = side;
+    try {
+      localStorage.setItem(SIDE_KEY, side);
+    } catch {
+      /* Remembered for this page only — see above. */
+    }
+  };
+
+  /** The ledger's status filter as the address holds it, for before history.js has built. */
+  function statusInHash() {
+    const q = route.queryFor?.('history', location.hash) || '';
+    const m = /(?:^|&)status=([^&]*)/.exec(q);
+    if (!m) return [];
+    let raw = m[1];
+    try {
+      raw = decodeURIComponent(raw);
+    } catch {
+      /* Taken as written. */
+    }
+    return raw.split(',').map((v) => v.trim().toLowerCase()).filter(Boolean);
+  }
+
+  /**
+   * Which side is on screen, read off what is actually there rather than off storage: Home
+   * is Open, and the ledger is Closed when its status filter is exactly `closed` and All
+   * otherwise. So a `#history?status=closed` from an old link arrives with Closed pressed,
+   * and a bare `#history` with All — which is what the Ledger pill always showed.
+   */
+  function shownSide() {
+    if (here() !== 'history') return 'open';
+    const st = window.beadcause?.ledger?.status?.() ?? statusInHash();
+    return st.length === 1 && st[0] === 'closed' ? 'closed' : 'all';
+  }
+
+  /**
+   * Go to one side of the Beads pane, and remember it.
+   *
+   * Open is a kind tap — Home first, then the narrowing, through the same `pick` every
+   * kind pill uses, which is what keeps bc-khoe.25's widen-without-storing intact. The
+   * other two are the ledger with its status set: through public/history.js once it is
+   * built, so the three filters you left it on stay put, and through the hash before it
+   * is, because `readUrl` there is what reads the hash as the pane is built.
+   */
+  function beadsGo(side) {
+    if (!isSide(side)) return;
+    rememberSide(side);
+    if (side === 'open') {
+      if (!onHome()) panes?.go(route.HOME);
+      window.beadcause?.inboxFilter?.pick?.('bead');
+      paintToggle();
+      return;
+    }
+    const status = side === 'closed' ? ['closed'] : [];
+    const ledger = window.beadcause?.ledger;
+    if (ledger) {
+      const now = ledger.status();
+      if (now.length !== status.length || now.some((v, i) => v !== status[i])) ledger.setStatus(status);
+      if (here() !== 'history') panes?.go('history');
+    } else {
+      panes?.go('history', status.length ? 'status=closed' : '');
+    }
+    paintToggle();
+  }
+
+  /** The toggle's hosts: one at the top of Home, one at the top of the ledger. */
+  const toggleHosts = () => [...(document.querySelectorAll?.('[data-beads-toggle]') || [])];
+
+  /**
+   * Draw the toggle into whichever of its hosts is on screen. Hidden whenever the Beads
+   * pill is not the lit one — on Home under any other narrowing it would be a control
+   * for a list you are not looking at.
+   */
+  function paintToggle() {
+    const show = lit() === 'beads';
+    const side = show ? shownSide() : '';
+    for (const host of toggleHosts()) {
+      host.hidden = !show;
+      if (!show) continue;
+      host.innerHTML = Object.entries(SIDES)
+        .map(
+          ([id, label]) =>
+            `<button type="button" class="beadstoggle-opt" data-beads="${id}" aria-pressed="${id === side}">${esc(label)}</button>`
+        )
+        .join('');
+    }
+  }
+  for (const host of toggleHosts()) {
+    host.addEventListener('click', (e) => {
+      const btn = e.target.closest?.('button[data-beads]');
+      if (!btn || btn.getAttribute('aria-pressed') === 'true') return;
+      e.preventDefault();
+      beadsGo(btn.dataset.beads);
+    });
+  }
+  /* A status chip tapped in the ledger's own filter bar moves the toggle too. */
+  if (typeof addEventListener === 'function') addEventListener('beadcause:ledger', () => paintToggle());
+
+  /**
+   * Where a pill's tap goes: the view it shows, the kind it narrows Home to, and the
+   * address it is off the shell. For every pill but one that is just the pill; for Beads
+   * it is whichever side you last chose.
+   */
+  function aim(p) {
+    if (!p.kinds) return { view: p.id, kind: p.href ? null : p.kind || null, href: hrefOf(p) };
+    if (beadsSide === 'open') return { view: null, kind: 'bead', href: '/?kind=bead' };
+    return { view: 'history', kind: null, href: beadsSide === 'closed' ? '/#history?status=closed' : '/#history', side: beadsSide };
+  }
 
   /**
    * What each counted pill's badge says right now, as text, keyed by pill id.
@@ -420,26 +601,38 @@
   function draw() {
     const cur = lit();
     const home = onHome();
-    nav.innerHTML = PILLS.map((p) => {
+    // The badges, wherever Home is a pane and not only on it (bc-yjekg): the inbox keeps
+    // repainting behind the other panes, so its counts are still true there — and a row
+    // whose badges came and went with the pane changed every pill's width, so a tap
+    // landed on the wrong one. Separate from `home`, which is where a kind tap has to go.
+    const counted = homeIsHere();
+    /* One pill's markup, in the row or as a row of the ⋯ menu. The same three shapes and
+       the same `data-` attributes either way, so a tap in the menu is decided by exactly
+       the code that decides one on the row; only the class and the menu role differ. */
+    const one = (p, inMenu) => {
       const on = p.id === cur;
-      const showable = !on && !!panes?.has(p.id) && p.id !== here();
-      const narrows = !on && !!p.kind && !p.href && homeIsHere();
+      const a = aim(p);
+      const showable = !on && !!a.view && !!panes?.has(a.view) && a.view !== here();
+      const narrows = !on && !!a.kind && homeIsHere();
       const act = showable || narrows;
       /* Where the tap has to land first. The pane for a view pill; Home for a kind pill
          tapped from anywhere else, because a narrowing of a list means nothing until the
          list is the one on screen. Empty when the pane is already right. */
-      const pane = showable ? p.id : narrows && !home ? route.HOME : '';
+      const pane = showable ? a.view : narrows && !home ? route.HOME : '';
       const tag = on ? 'span' : act ? 'button' : 'a';
+      /* `data-beads` on the Beads pill when it is going to the ledger: the status has to
+         be set as well as the pane switched, which is `beadsGo` and not a bare `go`. */
       const attrs = on
         ? 'aria-current="page"'
         : act
-          ? `type="button"${pane ? ` data-pane="${esc(pane)}"` : ''}${narrows ? ` data-kind="${esc(p.kind)}"` : ''}`
-          : `href="${esc(hrefOf(p))}"`;
-      /* The badge, on the four that carry one and only on Home. Not `aria-hidden`: it is
+          ? `type="button"${pane ? ` data-pane="${esc(pane)}"` : ''}${narrows ? ` data-kind="${esc(a.kind)}"` : ''}` +
+            (showable && a.side ? ` data-beads="${esc(a.side)}"` : '')
+          : `href="${esc(a.href)}"`;
+      /* The badge, on the four that carry one, on every pane of the shell. Not `aria-hidden`: it is
          the one part of a pill that is information rather than decoration, and a reader
          that cannot see it hears "Questions 4", which is what the pill says. */
       const badge =
-        home && p.count
+        counted && p.count
           ? `<span class="viewpill-count" data-count="${esc(p.id)}">${esc(shown[p.id])}</span>`
           : '';
       /* `data-pill` and not `data-view`: the chips on /monitor already carry a `data-view`
@@ -447,13 +640,59 @@
          is looking at — so one name for two things across two rows of chrome is exactly
          what this change exists to stop. `data-pane` above is the shell's own word for a
          container in public/index.html, which is the thing this attribute names. */
+      if (inMenu) {
+        return `<${tag} class="viewmenu-row accountmenu-row" role="menuitem" data-pill="${esc(p.id)}" ${attrs}>` +
+          `<span class="accountmenu-glyph" aria-hidden="true">${p.icon}</span>` +
+          `<span class="accountmenu-label">${esc(p.label)}</span>` +
+          badge +
+          `</${tag}>`;
+      }
       return `<${tag} class="viewpill" data-pill="${esc(p.id)}" ${attrs}>` +
         `<span class="viewpill-icon" aria-hidden="true">${p.icon}</span>` +
         `<span class="viewpill-label">${esc(p.label)}</span>` +
         badge +
         `</${tag}>`;
-    }).join('');
+    };
+    const row = PILLS.filter((p) => !p.more);
+    const tucked = PILLS.filter((p) => p.more);
+    /* The ⋯ pill, last. Lit — the accent fill and `aria-current` — when the view on
+       screen is one of the pills behind it, so the row still says where you are when
+       where you are is not on it. Always a button, because it always opens the menu:
+       even lit, the menu is how you get to the other views behind it. */
+    const deep = tucked.some((p) => p.id === cur);
+    const more = tucked.length
+      ? `<button type="button" class="viewpill viewpill-more" data-more="1" aria-haspopup="menu"` +
+        ` aria-expanded="${!menu.hidden}" aria-label="More views"${deep ? ' aria-current="page"' : ''}>` +
+        `<span class="viewpill-icon" aria-hidden="true">⋯</span></button>`
+      : '';
+    nav.innerHTML = row.map((p) => one(p, false)).join('') + more;
+    /* Two groups: what this app does (the advocates, the releases, the space's settings)
+       and the views a repo declared about itself, which `add` flags as `repo`. */
+    const ops = tucked.filter((p) => !p.repo);
+    const tools = tucked.filter((p) => p.repo);
+    menu.innerHTML =
+      (ops.length ? `<div class="viewmenu-head">Operations</div>${ops.map((p) => one(p, true)).join('')}` : '') +
+      (tools.length ? `<div class="viewmenu-head">Repo tools</div>${tools.map((p) => one(p, true)).join('')}` : '');
+    paintToggle();
   }
+
+  /* ------------------------------------------------------------ the ⋯ menu */
+
+  /** Is the page held still by edit mode? The account menu's own rule — see accountbar.js. */
+  const frozen = () => Boolean(window.beadcause?.editMode?.frozen?.());
+
+  function setMenu(open) {
+    menu.hidden = !open;
+    const btn = nav.querySelector?.('.viewpill-more');
+    btn?.setAttribute?.('aria-expanded', String(open));
+    if (!open) return;
+    /* Under the row and against the right-hand edge, where the ⋯ is once the row is
+       scrolled to it. Measured on each open rather than once: the top bar thins out in
+       landscape, and the row can be anywhere by then. */
+    const r = nav.getBoundingClientRect?.();
+    if (r) menu.style.top = `${Math.round(r.bottom + 6)}px`;
+  }
+
   draw();
 
   /* One listener on the row rather than one per pill, because `draw()` replaces every
@@ -464,11 +703,44 @@
     const btn = e.target.closest?.('button.viewpill');
     if (!btn) return;
     e.preventDefault();
+    if (btn.dataset.more) {
+      e.stopPropagation?.();
+      if (!frozen()) setMenu(menu.hidden);
+      return;
+    }
+    act(btn);
+  });
+
+  /** What a tapped pill asks for, on the row or in the menu. */
+  function act(btn) {
     /* The pane first and the narrowing second, and the order is the point: a kind pill
        tapped from another pane carries both, and picking the kind before Home is the pane
        on screen would narrow a list nobody is looking at and then paint over it. */
+    if (btn.dataset.beads) return beadsGo(btn.dataset.beads);
     if (btn.dataset.pane) panes?.go(btn.dataset.pane);
     if (btn.dataset.kind) window.beadcause?.inboxFilter?.pick?.(btn.dataset.kind);
+  }
+
+  /* A row of the menu shuts it as well as going there. A link row shuts it too, so the
+     menu is not still open on the page you come back to. */
+  menu.addEventListener('click', (e) => {
+    const item = e.target.closest?.('.viewmenu-row');
+    if (!item) return;
+    setMenu(false);
+    if (item.tagName !== 'BUTTON') return;
+    e.preventDefault();
+    act(item);
+  });
+  /* A tap anywhere else shuts it, on the document rather than a backdrop — the account
+     menu's trade, for the same reason: a backdrop would eat the first tap of whatever you
+     were actually reaching for. */
+  document.addEventListener?.('click', (e) => {
+    if (menu.hidden || frozen()) return;
+    if (menu.contains?.(e.target) || e.target?.closest?.('.viewpill-more')) return;
+    setMenu(false);
+  });
+  document.addEventListener?.('keydown', (e) => {
+    if (e.key === 'Escape' && !menu.hidden) setMenu(false);
   });
 
   /* Second row of the shell, under the top bar — not appended to the end of <body> the
@@ -478,6 +750,7 @@
   const bar = document.querySelector('.topbar');
   if (bar) bar.after(nav);
   else document.body.prepend(nav);
+  nav.after(menu);
 
   /**
    * Put the current pill on screen.
@@ -509,6 +782,7 @@
      different pill is lit and a different set of them are links. Registered rather than
      polled, and a no-op on the nine pages that have no panes to move. */
   panes?.onShow(() => {
+    setMenu(false);
     draw();
     reveal();
   });
@@ -520,7 +794,7 @@
    * block comments beside them — position included, because position is the argument. A
    * repo view has no such argument available to it here: this file cannot know whether
    * loremia's studio board is read more often than the ledger. So every one of them goes
-   * to the **end of the row**, after Config, in the order `/api/views` answered — which is
+   * to the **end of the list** — since bc-yjekg.1 the ⋯ menu, under "Repo tools" after Config — in the order `/api/views` answered — which is
    * the order of the configured workspaces, so it is stable across restarts.
    *
    * That is not a placeholder for a better rule. The row scrolls sideways and the current
@@ -535,7 +809,7 @@
    */
   function add(pill) {
     const id = String(pill?.id || '');
-    if (!id || PILLS.some((p) => p.id === id)) return false;
+    if (!id || PILLS.some((p) => p.id === id || p.views?.includes(id) || p.kinds?.includes(id))) return false;
     PILLS.push({
       id,
       icon: String(pill?.icon || '🧩'),
@@ -549,6 +823,7 @@
       // no address gets the one address that is always true.
       href: String(pill?.href || `/${route.hashFor(id) || ''}`),
       repo: true,
+      more: true,
     });
     draw();
     reveal();
@@ -579,7 +854,7 @@
      * switches ago the moment you came back.
      */
     mark(id) {
-      if (narrowed === id || !PILLS.some((p) => p.id === id)) return;
+      if (narrowed === id || !PILLS.some((p) => p.id === id || p.kinds?.includes(id))) return;
       narrowed = id;
       if (!onHome()) return;
       draw();
@@ -607,14 +882,14 @@
      * because a poll landed would be a worse bug than the pixels it corrects.
      */
     counts(map) {
-      if (!onHome() || !map || typeof map !== 'object') return;
+      if (!homeIsHere() || !map || typeof map !== 'object') return;
       for (const p of PILLS) {
         if (!p.count) continue;
         const n = Number(map[p.id]);
         const next = String(Number.isFinite(n) && n > 0 ? Math.round(n) : 0);
         if (shown[p.id] === next) continue;
         shown[p.id] = next;
-        const el = nav.querySelector(`.viewpill-count[data-count="${p.id}"]`);
+        const el = nav.querySelector(`.viewpill-count[data-count="${p.id}"]`) || menu.querySelector?.(`.viewpill-count[data-count="${p.id}"]`);
         if (el) el.textContent = next;
       }
     },

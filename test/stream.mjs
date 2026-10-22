@@ -352,8 +352,9 @@ await check('and "would `bd` answer /api/work differently" is one judgement, not
 /**
  * Every mount of the shared loop.
  *
- * Seven rather than five, and two of them are second and third scripts on a page already
- * here: `monitor.html` carries three panes and each follows the log for its own reason.
+ * Seven rather than five, and three of them share a pane: the Advocates pane of
+ * `index.html` (once `monitor.html`, deleted in bc-l75v7) carries three sections and each
+ * follows the log for its own reason.
  * The mirror's is a phone moving, with its own sequence — it was left hand-rolled when
  * the other five were converted, see bc-2ml3 and the note at `feed()` in mirror.js for
  * why the three rules it looked to invert turned out not to. The board's is a pull
@@ -363,10 +364,10 @@ await check('and "would `bd` answer /api/work differently" is one judgement, not
 const VIEWS = [
   { page: 'public/index.html', script: 'public/app.js', id: 'inbox' },
   { page: 'public/admin.html', script: 'public/admin.js', id: 'admin' },
-  { page: 'public/monitor.html', script: 'public/monitor.js', id: 'advocates' },
-  { page: 'public/monitor.html', script: 'public/prs.js', id: 'prs' },
+  { page: 'public/index.html', script: 'public/monitor.js', id: 'advocates', lazy: true },
+  { page: 'public/index.html', script: 'public/prs.js', id: 'prs', lazy: true },
   { page: 'public/console.html', script: 'public/console.js', id: 'console' },
-  { page: 'public/monitor.html', script: 'public/mirror.js', id: 'mirror' },
+  { page: 'public/index.html', script: 'public/mirror.js', id: 'mirror', lazy: true },
   // The seventh, and it was not one of the five bc-rk2o converted — that bead's table
   // listed the views with tabs and the endorsement queue has never had one, so it kept
   // its 45-second full refetch for as long as this file has existed (bc-bsgn). It is the
@@ -379,7 +380,11 @@ await check('every standing page loads the file, before the script that mounts i
     const html = read(v.page);
     const at = html.indexOf('/stream.js');
     assert.ok(at > 0, `${v.page} does not load /stream.js`);
-    const mine = html.indexOf(`/${path.basename(v.script)}`);
+    // A pane's script that public/panelazy.js injects has no tag of its own; the loader's
+    // tag is the one that has to come after the stream, and the loader has to name it.
+    const name = `/${path.basename(v.script)}`;
+    if (v.lazy) assert.ok(read('public/panelazy.js').includes(`'${name}'`), `public/panelazy.js does not inject ${name}`);
+    const mine = html.indexOf(v.lazy ? '<script src="/panelazy.js">' : name);
     assert.ok(at < mine, `${v.page} loads its own script before /stream.js`);
   }
 });

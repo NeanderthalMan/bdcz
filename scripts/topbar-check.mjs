@@ -71,6 +71,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CHROME, launchChrome } from './helpers/chrome.mjs';
+import { hopLocation, viewHops } from '../lib/pagealias.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PUBLIC = path.join(ROOT, 'public');
@@ -133,6 +134,9 @@ const TYPES = {
   '.webmanifest': 'application/manifest+json',
 };
 
+/* The paths that are a 302 to a pane of the shell, read out of lib/server.js (bc-l75v7). */
+const HOPS = viewHops();
+
 function serve() {
   const server = http.createServer((req, res) => {
     const p = new URL(req.url, 'http://x').pathname;
@@ -161,20 +165,22 @@ function serve() {
       return;
     }
     if (p.startsWith('/api/')) return json({});
+    // The advocate console, the board and the space's settings (bc-khoe.10) are panes of
+    // the shell, and public/monitor.html and public/config.html are deleted (bc-l75v7) —
+    // so their paths hop to the pane, as the daemon's do, and the bar is measured there.
+    const hop = hopLocation(p, new URL(req.url, 'http://x').search, HOPS);
+    if (hop) {
+      res.writeHead(302, { location: hop });
+      return res.end();
+    }
     let rel = p;
     if (rel === '/console') rel = '/console.html';
-    // The board is a pane on the advocates page now (bc-d4d5), so these land there.
-    if (rel === '/prs' || rel === '/pulls' || rel === '/prs.html') rel = '/monitor.html';
-    if (rel === '/monitor' || rel === '/advocates' || rel === '/sessions' || rel === '/work') rel = '/monitor.html';
     if (rel === '/endorse') rel = '/endorse.html';
     // Releases (bc-khoe.7) is a pane of the shell now (bc-khoe.30.14), and
     // public/releases.html is gone from disk (bc-khoe.30.22) — so this lands on the same
-    // document '/' does, the way '/prs' lands on '/monitor.html' above.
+    // document '/' does.
     if (rel === '/releases' || rel === '/deploys') rel = '/index.html';
     if (rel === '/foundations') rel = '/foundations.html';
-    // The selected space's settings (bc-khoe.10). Here because it carries the space
-    // picker, which is the row of the bar this check exists to measure the cost of.
-    if (rel === '/config' || rel === '/settings') rel = '/config.html';
     const file = path.join(PUBLIC, rel === '/' ? 'index.html' : rel.replace(/^\/+/, ''));
     if (!file.startsWith(PUBLIC) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {
       res.writeHead(404).end('no');

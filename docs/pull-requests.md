@@ -2099,12 +2099,11 @@ Everything above describes `/config`, a document. It is a **pane of the shell** 
 `[data-pane="config"]` in `public/index.html`, shown by a `display: none` swap with nothing
 fetched and nothing rebuilt. `/config`, `/settings` and `/config.html` still answer — any of
 them can be sitting on a phone's home screen — but as a **302 onto the pane** since
-bc-khoe.60 rather than as the document. `public/config.js` is still one file written to run
-in either, deciding which by asking whether the one it is in has panes at all;
-`public/config.html` is still on disk and reachable exactly as it always was — unlike
-`public/history.html` and `public/releases.html`, nothing has deleted it, because that is a
-cleanup for once the hop has taken traffic for a while rather than a condition of landing
-it. It is the third view to make this move, after
+bc-khoe.60 rather than as the document. `public/config.js` was written to run in either,
+deciding which by asking whether the one it is in has panes at all; `public/config.html`
+stayed on disk for a while after the hop landed, unreachable by any path, and bc-l75v7
+deleted it as `public/history.html` and `public/releases.html` were before it. It is the
+third view to make this move, after
 [the ledger](navigating.md#the-ledger-as-a-pane-and-its-filters-in-the-hash) and
 [Releases](#releases-as-a-pane-and-the-two-clocks-it-brought-with-it), and the smallest —
 what is worth writing down is the one place it went a different way.
