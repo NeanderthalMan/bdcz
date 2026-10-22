@@ -192,7 +192,7 @@
 | `sharedServer` | leave `false` — see the note below |
 | `doltServer` | which trackers get their own per-project `dolt sql-server` instead of the embedded engine: `advocated` (the default — the workspaces an advocate works), `all`, or `off`. Four to seven times the read speed where an agent is making thousands of `bd` calls (111ms against 526ms for a `bd list`, measured on the real trackers), at ~90-400MB resident each while up; bd starts them itself, so a tracker nobody reads never runs one. Applied by `npm run dolt-mode`, which `npm run install-service` runs for you — see [Worth knowing before you rely on it](install.md#worth-knowing-before-you-rely-on-it) and `lib/doltmode.js` |
 | `mirrorStateToBeads` | write `agent:<phase>` state labels into beads too (off — see Progress) |
-| `ntfy.enabled` | the whole ntfy channel's off switch (default `true`) |
+| `ntfy.enabled` | the whole ntfy channel's on/off switch (default `false` — opt in with `npm run configure` or by setting it `true`) |
 | `ntfy.server` | the ntfy server to publish to (default `https://ntfy.sh`) |
 | `ntfy.topic` | the topic notifications are sent to (default: a random string generated on first run — anyone who guesses it can read your notifications, which is why `minimalWorkspaces` and `detail` exist) |
 | `ntfy.detail` | `full` = question + option buttons in the notification; `minimal` = contentless nudge |
