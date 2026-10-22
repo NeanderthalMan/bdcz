@@ -91,9 +91,6 @@ const TYPES = {
   '.png': 'image/png',
   '.webmanifest': 'application/manifest+json',
 };
-/* The two rewrites in `serveStatic` (lib/server.js) this file needs, written out rather
-   than imported: importing the server would bring a config, a tracker and a daemon. */
-const ROUTES = { '/monitor': '/monitor.html' };
 
 function serve() {
   const server = http.createServer((req, res) => {
@@ -138,7 +135,7 @@ function serve() {
     }
     if (p === '/auth/whoami') return json({ signedIn: true });
     if (p.startsWith('/api/')) return json({});
-    const rel = ROUTES[p] || p;
+    const rel = p;
     const file = path.join(PUBLIC, rel === '/' ? 'index.html' : rel.replace(/^\/+/, ''));
     if (!file.startsWith(PUBLIC) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {
       res.writeHead(404).end('no');
@@ -191,7 +188,7 @@ try {
       // Every row drawn is a closed one — the narrowing came from the hash, not from a
       // wide list corrected afterwards.
       allClosed: [...list.querySelectorAll('.hist-row')].every((r) => r.classList.contains('is-closed')),
-      historyPill: document.querySelector('.viewbar a[href="/history"]') ? 'a-link' : 'not-a-link',
+      historyPill: document.querySelector('.viewbar a[href^="/history"], .viewbar a[href^="/#history"]') ? 'a-link' : 'not-a-link',
       advocatesPill: document.querySelector('.viewbar a[href="/monitor"]') ? 'a-link' : 'not-a-link',
       current: [...document.querySelectorAll('.viewbar [aria-current]')].map((e) => e.textContent.trim()).join(','),
       // Only what is painted: the hidden panes' scrollers have no layout box at all.
@@ -215,7 +212,7 @@ try {
   check('and the page fits the screen', !cold.wide);
   check('the pane was built first, ahead of the inbox', cold.builtFirst === 'history', cold.builtFirst);
   check('and it asks the shell’s poll for nothing but presence', cold.want === 'presence', String(cold.want));
-  check('the Ledger pill is not a link any more', cold.historyPill === 'not-a-link' && cold.current.includes('Ledger'), cold.current);
+  check('the Beads pill — the ledger since bc-yjekg.3 — is lit and not a link', cold.historyPill === 'not-a-link' && cold.current.includes('Beads'), cold.current);
   // bc-khoe.30.14 filled the release board's container and bc-khoe.4 the advocate console's,
   // so nothing is pending any more and every pill on the row is a control. What this line
   // is really asserting has not changed: the row and the markup agree about which views

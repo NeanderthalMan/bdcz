@@ -630,6 +630,13 @@ await check('a tracker that would not answer is a line, not a queue with nothing
   assert.match(strip(h.out.innerHTML), /Could not read the merge queue in other/);
 });
 
+await check('and only for a tracker in the space you are looking at (bc-yjekg)', async () => {
+  const h = load({ payload: queues({ errors: [{ workspace: 'other', error: 'dolt is mid-write' }] }) });
+  await settle();
+  h.pick((ws) => ws !== 'other');
+  assert.doesNotMatch(strip(h.out.innerHTML), /Could not read the merge queue/, "another space's tracker is blamed here");
+});
+
 await check('an unpaired device is told to pair rather than shown an empty board', async () => {
   const h = load({ token: '' });
   await settle();

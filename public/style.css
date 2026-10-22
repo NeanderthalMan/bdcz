@@ -494,6 +494,10 @@ body {
 .filter-summary .sel,
 .filter-note .sel { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .filter-summary .sel[hidden] { display: none; }
+/* `display: inline-flex` beats the UA's [hidden] rule, as it does for the note and the panel
+   below — so a group `paintGroup` has hidden, said only as its note, drew as a pill beside
+   that note: "PR status: unmerged" twice on Home (bc-yjekg). */
+.filter-summary[hidden] { display: none; }
 .filter-summary .caret { flex: 0 0 auto; font-size: 10px; }
 .filter-one.open .filter-summary { border-color: var(--accent); color: var(--text); }
 /* Narrowed is a state you have to be able to see without opening anything — the whole
@@ -1426,6 +1430,25 @@ body {
   .card.open > .agent-log { min-height: 0; overflow-y: auto; }
   .card.open > .card-head { max-height: 30dvh; }
   .card.open > .options { max-height: 34dvh; }
+  /* The box gives way; the buttons in it don't. `.options` is itself a flex column, so
+     without this a squeezed box shrank each button below its own text instead of
+     scrolling, and the labels drew over one another and over the box above. */
+  .card.open > .options > * { flex-shrink: 0; }
+  /* "You answered this" gives way too, and first (bc-yjekg). With `min-height: auto` it
+     never shrank, so the head shrank for it and cut off its own last line — the subtitle
+     — flush against the box's dashed edge, which read as the box drawn over the text. */
+  .card.open > .answered-before {
+    min-height: min(4.75em, 14dvh); flex-shrink: 3;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  /* What gives way is the earlier answer, at its own edge. Scrolling the whole box clipped
+     at the border instead, so a squeezed box drew half a line of it across the dashes. */
+  .card.open > .answered-before > strong { flex-shrink: 0; }
+  .card.open > .answered-before > p { min-height: 0; overflow: hidden; }
+  /* And the head keeps its content up to its own 30dvh cap rather than giving way below it:
+     the cap is what bounds it with the keyboard up, so shrinking under it as well only ever
+     cut the question's last line. */
+  .card.open > .card-head { flex-shrink: 0; }
   .card.open > .agent-log { max-height: 30dvh; }
 
   /* The rows that don't. Two icon buttons and a link each — there is nothing in them
@@ -1611,6 +1634,37 @@ body {
 
 .card-head { padding: 14px 15px 0; }
 
+/*
+  One heading per effort on the question list (bc-yjekg, `epicChunks`). Flat on the page
+  rather than a card of its own, with an accent rule down the left, so it reads as the
+  label for the cards beneath it and not as one more of them. Its gap above is larger
+  than its gap below, which is what makes it belong to what follows.
+*/
+.epic-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 12px; color: var(--muted); padding: 0 2px;
+}
+.epic-bar .link { background: none; border: 0; padding: 6px 0; color: var(--accent); font: inherit; font-weight: 650; cursor: pointer; }
+.epic-group {
+  display: flex; flex-wrap: wrap; align-items: center; column-gap: 12px;
+  margin-top: 14px;
+  padding: 0 0 0 12px;
+  border-left: 3px solid var(--accent);
+}
+.epic-group.folded { margin-top: 4px; border-left-color: var(--line); }
+.epic-fold {
+  display: flex; align-items: center; gap: 8px; flex: 1 1 260px; min-width: 0;
+  min-height: var(--tap); padding: 0;
+  background: none; border: 0; color: var(--text); text-align: left; cursor: pointer;
+  font: inherit;
+}
+.epic-caret { color: var(--muted); width: 1em; flex: none; }
+.epic-title { font-size: 16px; font-weight: 700; line-height: 1.3; min-width: 0; overflow-wrap: anywhere; }
+.epic-group.folded .epic-title { font-weight: 600; color: var(--prose); }
+.epic-meta { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin-left: auto; padding-bottom: 4px; }
+.epic-n { font-size: 12px; font-weight: 650; color: var(--accent); white-space: nowrap; }
+.epic-group.folded .epic-n { color: var(--muted); }
+
 .meta { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin-bottom: 8px; }
 .pill {
   font-size: 11px; font-weight: 650; letter-spacing: 0.03em; text-transform: uppercase;
@@ -1778,6 +1832,27 @@ body {
 button.q { display: block; width: 100%; text-align: left; background: none; border: none; padding: 0; font: inherit; color: inherit; cursor: pointer; }
 .subtitle { font-size: 13px; color: var(--muted); margin: 0 0 12px; }
 .subtitle.bad { color: var(--danger); }
+
+/*
+  "beadcause · bc-x1 · P1 · 3d ago" — a shut card's whole header now, under the question
+  (bc-yjekg.4, `metaLineHtml`). It replaced two wrapped rows of pills above the question,
+  which were most of a shut card's height on a phone. Small and muted because it is a
+  byline: you read the question to choose a card, and this to confirm which one it is.
+
+  The pills that ride on its end (draft, ruling, a broken tier) keep their own shape,
+  shrunk a touch, because each one is a state to act on rather than a fact to know.
+*/
+.meta-line {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 3px 6px;
+  font-size: 12px; line-height: 1.5; color: var(--muted);
+  margin: 2px 0 12px;
+}
+.subtitle + .meta-line { margin-top: -8px; }
+.meta-line .id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.meta-line .pri.p0, .meta-line .pri.p1 { color: var(--warn); font-weight: 650; }
+.meta-line .sep { opacity: 0.6; }
+.meta-line .pill { font-size: 10.5px; padding: 1px 6px; }
+.meta-line .draft-flag { font-size: 10.5px; }
 
 .options { display: flex; flex-direction: column; gap: 8px; padding: 4px 15px 14px; }
 .option {
@@ -4418,7 +4493,9 @@ button.work-row {
      the card scrolls, so a long question, a sixth option or an open session log
      costs a scroll rather than a share of a screen it is not competing for. */
   .card.open > .card-head,
-  .card.open > .options { max-height: none; overflow-y: visible; }
+  .card.open > .options,
+  .card.open > .answered-before { max-height: none; overflow-y: visible; }
+  .card.open > .answered-before { overflow: visible; }
   .card.open > .agent-log { max-height: 46vh; }
 
   .card:has(> .brief:not([hidden])) > .brief {
@@ -5803,6 +5880,77 @@ button.viewpill { cursor: pointer; }
   .viewbar { padding: 3px 12px; }
   .viewpill { font-size: 12.5px; padding: 0 11px; }
 }
+
+/* The trailing ⋯ pill and the menu it opens (bc-yjekg.1). The row keeps the inbox's
+   narrowings and the Beads pane; Advocates, Releases, Config and every repo view are
+   rows of this menu instead, so the row is seven pills rather than thirteen.
+
+   The ⋯ is a tap target the width of the app's tap floor, and its hit area reaches into
+   the row's 4px padding above and below, so it is 52px tall to a thumb while being drawn
+   44px like the pills beside it. The row clips at its padding box, which is exactly what
+   that reaches. */
+.viewpill-more { position: relative; min-width: var(--tap); padding: 0 12px; font-size: 18px; }
+.viewpill-more::after { content: ''; position: absolute; inset: -4px -3px; }
+.viewpill-more[aria-expanded="true"]:not([aria-current]) { border-color: var(--accent); color: var(--text); }
+
+/* The menu wears `.accountmenu`'s box and rows (it is the same kind of list) and only
+   moves: fixed, under the row and against the right-hand edge, because the ⋯ is the last
+   thing on a row that scrolls, and an absolute menu inside that row would be clipped to
+   it. `top` is set by viewbar.js as it opens. */
+.viewmenu {
+  position: fixed;
+  top: 100px;
+  left: auto;
+  right: 12px;
+  min-width: 220px;
+}
+.viewmenu-head {
+  padding: 8px 10px 2px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.viewmenu-row .viewpill-count { margin-left: auto; color: var(--muted); }
+.viewmenu-row[aria-current="page"] { background: var(--surface-2); color: var(--accent); cursor: default; }
+
+/* The Beads pane's Open / Closed / All (bc-yjekg.3) — public/viewbar.js fills it, at the
+   top of Home while it is narrowed to beads and at the top of the ledger. One segmented
+   control rather than three chips, because it is one choice of three sides of one list;
+   the segments share the width so a thumb has the whole row to aim at, and each is the
+   app's tap floor tall. `display: flex` beats the UA's `[hidden]`, so that is said again. */
+.beadstoggle {
+  flex: none;
+  display: flex;
+  max-width: 460px;
+  padding: 10px 16px 0;
+}
+.beadstoggle[hidden] { display: none; }
+.beadstoggle-opt {
+  flex: 1 1 0;
+  min-height: var(--tap);
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-left-width: 0;
+  background: var(--surface);
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.beadstoggle-opt:first-child { border-left-width: 1px; border-radius: 999px 0 0 999px; }
+.beadstoggle-opt:last-child { border-radius: 0 999px 999px 0; }
+.beadstoggle-opt[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+.beadstoggle-opt:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* ── ＋, and the conversations it starts ──────────────────────────────────────
 

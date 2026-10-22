@@ -61,10 +61,14 @@ resolve() {
 #    from a worktree, or through the installed symlink, and the reason the "your checkout
 #    is behind" failure below is now rare: reached through the symlink, the sweep it execs
 #    is the one sitting beside the shim that named it, so the two cannot disagree.
-# 3. The historical default, for a shim hand-copied somewhere outside any checkout.
+# 3. `<projectRoot>/beadcause` from the config, for a shim hand-copied somewhere outside
+#    any checkout. Read, not spelled here (bc-x79kq.1): the public tree's scrub rewrites
+#    the projects directory's name, and a literal would point a scrubbed copy at nothing.
 SELF="$(resolve "${BASH_SOURCE[0]}")"
 HERE="$(dirname "$(dirname "$SELF")")"
-DEFAULT="$HOME/projects/beadcause"
+CONFIG="${BEADCAUSE_CONFIG_DIR:-$HOME/.config/beadcause}/config.json"
+PROJECT_ROOT="$(node -e 'try { const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).projectRoot; if (r) process.stdout.write(String(r).replace(/^~(?=\/|$)/, require("os").homedir())); } catch {}' "$CONFIG" 2>/dev/null)"
+DEFAULT="${PROJECT_ROOT:-$HOME}/beadcause"
 
 if [ -n "${BEADCAUSE_DIR:-}" ]; then
   BEADCAUSE="$BEADCAUSE_DIR"

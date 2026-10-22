@@ -446,7 +446,17 @@
     clearTimeout(typeTimer);
     writeUrl();
     rebuild(state.scope || scopeOf(filterNow()));
+    /* The Beads pane's Open / Closed / All toggle (bc-yjekg.3) reads which of its three
+       this is off the status filter, so it has to hear about a chip tap here as well as
+       its own taps. An event rather than a call into public/viewbar.js: `replaceState`
+       fires nothing, and this file has no business knowing who draws the toggle. */
+    if (typeof dispatchEvent === 'function' && typeof CustomEvent === 'function') {
+      dispatchEvent(new CustomEvent('beadcause:ledger'));
+    }
   }
+
+  /** The control the four filters are drawn in, once `build` has mounted it. */
+  let menu = null;
 
   /* ------------------------------------------------------------------ the fetch */
 
@@ -939,8 +949,22 @@
        applied: the filters live in `filters` and the chrome only moves them, so the
        missing half is the controls rather than the narrowing. */
     if (filterHost && window.beadcause && window.beadcause.filterMenu) {
-      window.beadcause.filterMenu.mount(filterHost, { groups: filterGroups });
+      menu = window.beadcause.filterMenu.mount(filterHost, { groups: filterGroups });
     }
+
+    /* The status half of the Beads toggle (bc-yjekg.3): `Closed` is this list narrowed
+       to closed and `All` is it unnarrowed, so the toggle sets the one filter it is about
+       and leaves the other three where you put them. Published here rather than at load,
+       because before `readUrl` has run there is no filter to set — public/viewbar.js
+       writes the query into the hash instead, and `readUrl` above is what reads it. */
+    window.beadcause.ledger = {
+      status: () => filters.status.slice(),
+      setStatus(list) {
+        filters.status = [...new Set((list || []).map((v) => String(v).toLowerCase()))];
+        menu?.paint?.();
+        applyFilters();
+      },
+    };
 
     /* Registered here rather than at load, so nothing is fetched before `readUrl` has
        run: the picker announces itself the moment /api/spaces lands, and a `follow` that

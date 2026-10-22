@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { turn, isReadCard, adamInput } from '../lib/turn.js';
+import { turn, isReadCard, adamInput, humanPattern } from '../lib/turn.js';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const BIN = path.join(ROOT, 'bin', 'b7e-turn');
@@ -58,6 +58,24 @@ check('a Read card with no docnotes is Adam\'s; with docnotes it is the agent\'s
   const noted = { ...card, comments: [...card.comments, { text: 'docnotes: fix the ending', author: 'adam', created_at: '2026-10-05' }] };
   assert.equal(turn('w', noted).turn, 'agent');
   assert.equal(adamInput(noted.comments).at, '2026-10-05');
+});
+
+// bc-x79kq.1: who is Adam comes from the config, so a scrubbed tree (whose source no
+// longer spells his handles) still recognises his comments on this Mac.
+check('humanPattern reads owner, me and accounts — address and local part', () => {
+  const human = humanPattern({ owner: 'Pat', me: ['pat.k@corp.example'], accounts: [{ email: 'patk@home.example' }] });
+  for (const who of ['Pat', 'pat Smith', 'pat.k@corp.example', 'pat.k', 'PATK@home.example', 'patk']) {
+    assert.ok(human.test(who), `${who} should be Pat`);
+  }
+  for (const who of ['patrick', 'spat', 'claude', 'beadcause']) assert.ok(!human.test(who), `${who} is not Pat`);
+  assert.equal(humanPattern({}), null);
+});
+
+check('a comment by the configured human is input; with nobody configured only docnotes counts', () => {
+  const comments = [{ text: 'looks right', author: 'pat.k@corp.example', created_at: '2026-10-06' }];
+  assert.equal(adamInput(comments, { human: humanPattern({ me: 'pat.k@corp.example' }) }).at, '2026-10-06');
+  assert.equal(adamInput(comments), null);
+  assert.equal(turn('w', bead({ comments }), { human: humanPattern({ owner: 'Sam' }) }).input, null);
 });
 
 check('prose about Read cards in the body does not make a bead one', () => {

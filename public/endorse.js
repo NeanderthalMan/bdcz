@@ -263,9 +263,7 @@
   function fromHtml(b) {
     if (!b.from) return '';
     const word = b.from.kind === 'discovered' ? 'Found while working' : 'Filed under';
-    return `<span class="eq-from">${esc(word)} <a class="pill id" href="${esc(
-      graphUrl(b.workspace, b.from.id)
-    )}">${esc(b.from.id)}</a>${b.from.title ? ` <span class="eq-from-title">${esc(b.from.title)}</span>` : ''}</span>`;
+    return `<span class="eq-from">${esc(word)} <span class="pill id">${esc(b.from.id)}</span>${b.from.title ? ` <span class="eq-from-title">${esc(b.from.title)}</span>` : ''}</span>`;
   }
 
   /**
@@ -287,7 +285,7 @@
     const each = qs
       .map(
         (q) =>
-          `<a class="pill id" href="${esc(graphUrl(q.workspace, q.id))}">${esc(q.id)}</a>` +
+          `<span class="pill id">${esc(q.id)}</span>` +
           (q.priority != null ? `<span class="pill p${esc(q.priority)}">P${esc(q.priority)}</span>` : '') +
           ` <span class="eq-ask-title">${esc(q.title)}</span>`
       )
@@ -320,11 +318,17 @@
     }<span class="eq-last-text">${esc(text)}${c.truncated ? '…' : ''}</span></span>`;
   }
 
-  /** The pills that say what kind of work this claims to be, at a glance. */
+  /**
+   * The pills that say what kind of work this claims to be, at a glance.
+   *
+   * Ids are plain here and in `fromHtml` and `questionsHtml`: the folded row is a
+   * `<button>`, and a link inside one is a nested interactive element a phone resolves
+   * however it likes and a keyboard cannot reach (bc-yjekg). The open row has the links.
+   */
   function pillsHtml(b) {
     const many = Object.keys(state.data?.counts?.byWorkspace || {}).length > 1;
     return [
-      `<a class="pill id" href="${esc(graphUrl(b.workspace, b.id))}">${esc(b.id)}</a>`,
+      `<span class="pill id">${esc(b.id)}</span>`,
       // Only when there is more than one workspace in the queue. On a phone narrowed to
       // one repo, a pill repeating the repo's name on every row is noise.
       many ? `<span class="pill">${esc(b.workspace)}</span>` : '',
@@ -514,8 +518,17 @@
       `<a class="board-btn link" href="${esc(graphUrl(b.workspace, b.id))}">Graph ↗</a>`,
     ];
 
+    // The beads the folded row names, as the links it cannot hold (see `pillsHtml`).
+    const named = [b.from, ...(Array.isArray(b.questions) ? b.questions : [])].filter(Boolean);
+    const links = named.length
+      ? `<div class="board-where">${named
+          .map((n) => `<a class="pill id" href="${esc(graphUrl(n.workspace || b.workspace, n.id))}">${esc(n.id)}</a>`)
+          .join(' ')}</div>`
+      : '';
+
     return `<div class="board-open">
       ${wordsHtml(b)}
+      ${links}
       <div class="board-actions">${buttons.join('')}</div>
       <div class="board-say">
         <textarea data-note rows="2" placeholder="Say what is wrong with it, or why you are turning it down…">${esc(
@@ -1149,9 +1162,6 @@
       }
       return act(key, action);
     }
-
-    // A bead pill is a link into the graph, not a fold.
-    if (ev.target.closest('.pill.id')) return;
 
     const row = ev.target.closest('[data-row]');
     if (row) {

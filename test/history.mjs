@@ -742,10 +742,12 @@ await check('history.js has no inShell, and no second filter grammar', () => {
   assert.doesNotMatch(JS, /URLSearchParams\(location\.search\)/, 'a second place for the four filters to live');
 });
 
-await check('the pill row has a History pill pointing at the view', () => {
+await check('the pill row has a pill pointing at the view — the Beads pill, since bc-yjekg.3', () => {
   const bar = read('public/viewbar.js');
-  assert.match(bar, /id: 'history'/);
-  assert.match(bar, /href: '\/history'/);
+  // Ledger and All Beads are one Beads pill now, and the ledger is its Closed and All
+  // sides: the pill declares the view it is lit for, and goes there off the shell.
+  assert.match(bar, /id: 'beads'[^\n]*views: \['history'\]/);
+  assert.match(bar, /'\/#history\?status=closed'/);
   // The addresses moved to public/hashroute.js with bc-khoe.30.2 — the row asks it which
   // view a path is rather than holding a second copy of the answer. `/history.html` stays
   // in that table: it is an old address to redirect, not a claim that the file exists.

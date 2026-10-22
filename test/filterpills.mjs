@@ -415,9 +415,11 @@ await check('and a scope tap still repaints both controls', () => {
 
 await check('chooseScope is untouched — the switch moved, what it does did not', () => {
   const app = read('public/app.js');
-  const fn = app.slice(app.indexOf('function chooseScope(next)'));
+  // `(next, { widening })` since bc-yjekg: a pill's widening is not stored, a tap still is.
+  const fn = app.slice(app.indexOf('function chooseScope(next'));
   const body = fn.slice(0, fn.indexOf('\n  }'));
-  assert.match(body, /if \(!SCOPES\.includes\(next\) \|\| next === state\.scope\) return;/, 'already-there is no longer a no-op');
+  assert.match(body, /if \(!SCOPES\.includes\(next\)\) return;/, 'an unknown scope is no longer refused');
+  assert.match(body, /if \(next === state\.scope\) return;/, 'already-there is no longer a no-op');
   assert.match(body, /localStorage\.setItem\('beadcause\.scope'/, 'the scope no longer survives a reload');
   assert.match(body, /surveyKinds\(\[\]\)/, 'a selection the new scope cannot produce is no longer dropped');
   assert.match(body, /load\(\);/, 'the tap no longer refetches');

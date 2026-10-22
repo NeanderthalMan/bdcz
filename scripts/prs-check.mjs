@@ -43,6 +43,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CHROME, launchChrome } from './helpers/chrome.mjs';
+import { hopLocation, viewHops } from '../lib/pagealias.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PUBLIC = path.join(ROOT, 'public');
@@ -217,6 +218,9 @@ const headFile = (rel) => {
 };
 const BASE_FILES = BASELINE ? { 'prs.js': headFile('prs.js'), 'style.css': headFile('style.css') } : {};
 
+/* The paths that are a 302 to a pane of the shell, read out of lib/server.js (bc-l75v7). */
+const HOPS = viewHops();
+
 function serve() {
   const server = http.createServer((req, res) => {
     const p = new URL(req.url, 'http://x').pathname;
@@ -239,10 +243,17 @@ function serve() {
        would be the one thing that could hide a poll nobody meant to leave behind. */
     if (p.startsWith('/api/')) return json({});
 
-    // The board is a pane on the advocates page now (bc-d4d5). Everything below is
-    // unchanged by that: the pane keeps the `#prs` id it had as a `<main>`, and arriving
-    // by this path is what puts its chip up — see `initial` in public/montabs.js.
-    let rel = p === '/prs' || p === '/pulls' || p === '/prs.html' ? '/monitor.html' : p;
+    // The board is a chip of the shell's Advocates pane (bc-d4d5, bc-khoe.4). Everything
+    // below is unchanged by that: the pane keeps the `#prs` id it had as a `<main>`, and
+    // `/prs` is a hop to `/#advocates?tab=prs`, which is what puts its chip up — see
+    // `initial` in public/montabs.js. public/monitor.html, which this used to serve, is
+    // deleted (bc-l75v7).
+    const hop = hopLocation(p, new URL(req.url, 'http://x').search, HOPS);
+    if (hop) {
+      res.writeHead(302, { location: hop });
+      return res.end();
+    }
+    const rel = p;
     const name = rel.replace(/^\/+/, '');
     if (BASE_FILES[name]) {
       res.writeHead(200, { 'content-type': TYPES[path.extname(name)] });
@@ -432,7 +443,8 @@ try {
   await evalJs(s, OPEN_ROW(4));
   await sleep(200);
   let btns = await evalJs(s, BUTTONS);
-  ok(/Merge/.test(btns.join('|')), `an open one offers the merge — ${btns.join(', ')}`);
+  // Any case: the button has read "Queue to merge" since bc-02ldo (caa490147).
+  ok(/merge/i.test(btns.join('|')), `an open one offers the merge — ${btns.join(', ')}`);
   ok(!/Ship/.test(btns.join('|')), 'and no ship, because there is nothing to ship yet');
 
   await evalJs(s, OPEN_ROW(4));

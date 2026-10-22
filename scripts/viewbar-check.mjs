@@ -119,6 +119,7 @@ import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 import { toQuestion } from '../lib/decision.js';
 import { CHROME, launchChrome } from './helpers/chrome.mjs';
+import { hopLocation, viewHops } from '../lib/pagealias.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PUBLIC = path.join(ROOT, 'public');
@@ -180,7 +181,13 @@ const PILLS = arrayFromSource('viewbar.js', 'PILLS');
 /* Which addresses are which view. A view's id is its pill's id on purpose, so this joins
    to the array above by that id and no mapping is written down anywhere. */
 const VIEWS = arrayFromSource('hashroute.js', 'VIEWS');
-const IDS = PILLS.map((p) => p.id);
+/* What the row draws since bc-yjekg.1: every pill not flagged `more`, then the ⋯ that
+   opens a menu of the rest. `IDS` is the row as drawn, `MORE_IDS` the menu's rows. */
+const MORE_IDS = PILLS.filter((p) => p.more).map((p) => p.id);
+const IDS = [...PILLS.filter((p) => !p.more).map((p) => p.id), ...(MORE_IDS.length ? ['more'] : [])];
+/** Which drawn pill a view lights: its own, the Beads pill for the ledger, ⋯ for a tucked one. */
+const rowPillFor = (id) =>
+  id == null ? null : MORE_IDS.includes(id) ? 'more' : PILLS.find((p) => p.id === id || p.views?.includes(id))?.id ?? id;
 
 /** The path a pill claims, normalised the way the row itself normalises `location`. */
 const norm = (p) => p.replace(/\/+$/, '') || '/';
@@ -357,13 +364,6 @@ const TYPES = {
    Only the ones below are needed and they are written out rather than imported, because
    importing the server would bring a config, a tracker and a daemon along with it. */
 const ROUTES = {
-  '/monitor': '/monitor.html',
-  '/advocates': '/monitor.html',
-  '/sessions': '/monitor.html',
-  '/work': '/monitor.html',
-  '/prs': '/monitor.html',
-  '/pulls': '/monitor.html',
-  '/prs.html': '/monitor.html',
   '/console': '/console.html',
   '/endorse': '/endorse.html',
   '/flow': '/flow.html',
@@ -372,13 +372,15 @@ const ROUTES = {
   '/admin': '/admin.html',
   '/sounds': '/sounds.html',
   '/audition': '/sounds.html',
-  '/config': '/config.html',
 };
 
 /* Every URL the fixture was asked for, in order. One assertion needs it: "tapping All
    Beads refetches" is a claim about a request going out, and no amount of reading the
    page afterwards can tell you whether one did. */
 const HITS = [];
+
+/* The paths that are a 302 to a pane of the shell, read out of lib/server.js (bc-l75v7). */
+const HOPS = viewHops();
 
 function serve() {
   const server = http.createServer((req, res) => {
@@ -434,6 +436,11 @@ function serve() {
       return;
     }
     if (p.startsWith('/api/')) return json({});
+    const hop = hopLocation(p, new URL(req.url, 'http://x').search, HOPS);
+    if (hop) {
+      res.writeHead(302, { location: hop });
+      return res.end();
+    }
     const rel = ROUTES[p] || p;
     const file = path.join(PUBLIC, rel === '/' ? 'index.html' : rel.replace(/^\/+/, ''));
     if (!file.startsWith(PUBLIC) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {
@@ -458,9 +465,12 @@ function serve() {
  * the way a passing check is: every assertion below would still be green, about the pages
  * somebody remembered.
  *
- * `/prs` is here twice over — as its own path and as `/monitor` — because the server
- * serves one document for both and what is being asked is that arriving by either URL
- * lights the pill the row's own list says it should.
+ * `/monitor`, `/prs` and `/config` are a 302 to a pane of the shell, and the fixture
+ * sends the same hop (`HOPS`), so each lands on `index.html` with its pane up — which is
+ * what a home-screen shortcut does — and is asked to light the pill the row's own list
+ * gives its path. public/monitor.html and public/config.html, which they were once served
+ * as, are deleted (bc-l75v7). `/prs` is here beside `/monitor` because it arrives on the
+ * same pane with a different chip up.
  *
  * `/history` and `/releases` are gone from here (bc-khoe.30.15, bc-khoe.30.22): both
  * rows are drawn by public/index.html now — already the `/` entry below — and
@@ -476,8 +486,8 @@ function serve() {
  */
 const PAGES = [
   { url: '/', file: 'index.html' },
-  { url: '/monitor', file: 'monitor.html' },
-  { url: '/prs', file: 'monitor.html' },
+  { url: '/monitor', file: 'index.html' },
+  { url: '/prs', file: 'index.html' },
   { url: '/console', file: 'console.html' },
   { url: '/endorse', file: 'endorse.html' },
   { url: '/flow', file: 'flow.html' },
@@ -485,7 +495,7 @@ const PAGES = [
   { url: '/skills', file: 'skills.html' },
   { url: '/admin', file: 'admin.html' },
   { url: '/sounds', file: 'sounds.html' },
-  { url: '/config', file: 'config.html' },
+  { url: '/config', file: 'index.html' },
 ];
 
 /**
@@ -504,9 +514,10 @@ const PAGES = [
  * a member of this list — instead. "History does not move" is about an accidental drift
  * between a page and `PAGES`; bc-khoe.30 folding pages into the shell one at a time is a
  * deliberate retirement of the *document*, and the guard above would otherwise fail this
- * whole file for exactly the change the epic asks for.
+ * whole file for exactly the change the epic asks for. `monitor.html` came out the same
+ * way (bc-l75v7): its views are the Advocates pane of `index.html`.
  */
-const REACHED = ['index.html', 'monitor.html', 'admin.html', 'console.html', 'endorse.html', 'flow.html', 'requirements.html'];
+const REACHED = ['index.html', 'admin.html', 'console.html', 'endorse.html', 'flow.html', 'requirements.html'];
 
 /* 360×640 is the cheap Android this app is for and the width every trade in this epic was
    argued at; 393×852 is the phone in the hand. Both, because a rule that holds at one
@@ -650,7 +661,8 @@ const PROBE = `(() => {
     const on = to - from >= 8;
     const hit = on ? document.elementFromPoint((from + to) / 2, r.top + r.height / 2) : null;
     return {
-      id: el.dataset.pill || null,
+      id: el.dataset.pill || (el.dataset.more ? 'more' : null),
+      more: !!el.dataset.more,
       tag: el.tagName,
       href: el.getAttribute('href'),
       current: el.getAttribute('aria-current'),
@@ -687,8 +699,20 @@ const PROBE = `(() => {
     } else lines.push({ top: p.top, bottom: p.bottom, ids: [p.id] });
   }
   lines.sort((a, b) => a.top - b.top);
+  /* The ⋯ menu's rows (bc-yjekg.1): not measured for size — the menu is shut — only for
+     which pills it holds and what each would do. */
+  const menuRows = [...document.querySelectorAll('.viewmenu [data-pill]')].map((el) => ({
+    id: el.dataset.pill,
+    tag: el.tagName,
+    href: el.getAttribute('href'),
+    current: el.getAttribute('aria-current'),
+    kind: el.dataset.kind || null,
+    pane: el.dataset.pane || null,
+    type: el.getAttribute('type'),
+  }));
   return {
     ...out,
+    menuRows,
     rowH: Math.round(nr.height),
     overflowX: cs.overflowX,
     overflowY: cs.overflowY,
@@ -838,6 +862,11 @@ try {
           `${at}: the row draws every pill in public/viewbar.js's order`,
           `the source says ${IDS.join(', ')}; the row drew ${got.join(', ') || '(none)'}`
         );
+      // And the rest behind ⋯, in the list's order (bc-yjekg.1).
+      const tucked = (m.menuRows || []).map((p) => p.id).filter((id) => MORE_IDS.includes(id));
+      if (tucked.length === MORE_IDS.length && tucked.every((id, i) => id === MORE_IDS[i]))
+        ok(`${at}: the ⋯ menu holds ${tucked.join(' · ')}`);
+      else bad(`${at}: the ⋯ menu holds every pill flagged more`, `the source says ${MORE_IDS.join(', ')}; the menu drew ${tucked.join(', ') || '(none)'}`);
 
       // One line. Not "one line or the row got taller" — see the probe.
       if (m.lines.length === 1 && m.downBy <= 0 && m.wrap === 'nowrap')
@@ -865,7 +894,8 @@ try {
 
       // Exactly what the view table's `paths` say is current, and nothing where they say nothing.
       const cur = m.pills.filter((p) => p.current === 'page');
-      if (cur.length === (want ? 1 : 0) && cur[0]?.id === (want ?? undefined))
+      const wantRow = rowPillFor(want);
+      if (cur.length === (want ? 1 : 0) && cur[0]?.id === (wantRow ?? undefined))
         ok(
           want
             ? `${at}: "${want}" is the one current pill — public/hashroute.js's VIEWS say so`
@@ -879,6 +909,15 @@ try {
 
       // Tapping where you are does nothing — and the mark is not only colour.
       for (const p of cur) {
+        /* The ⋯ lit is still the button that opens the menu — the current *row* is the
+           span inside it (bc-yjekg.1). */
+        if (p.more) {
+          const inMenu = (m.menuRows || []).filter((r) => r.current === 'page');
+          if (p.tag === 'BUTTON' && inMenu.length === 1 && inMenu[0].id === want && inMenu[0].tag === 'SPAN' && !inMenu[0].href)
+            ok(`${at}: ⋯ is lit, and "${want}" is the current row of its menu — a <span>, tapping it does nothing`);
+          else bad(`${at}: ⋯ is lit and the menu marks "${want}" current`, `the menu marks ${inMenu.map((r) => `${r.id} <${r.tag.toLowerCase()}>`).join(', ') || 'nothing'}`);
+          continue;
+        }
         if (p.tag === 'SPAN' && !p.href) ok(`${at}: the current pill is a <span> with no href — tapping it does nothing`);
         else bad(`${at}: the current pill is a <span> with no href`, `"${p.id}" is a <${p.tag.toLowerCase()}>${p.href ? ` pointing at ${p.href}` : ''}`);
         // `aria-current` is the half of the mark that is not colour. The fill and the
@@ -891,7 +930,7 @@ try {
          and the row is `.after()`'d onto whatever markup the page has above it. */
       const dead = m.pills
         .filter((p) => p.current !== 'page')
-        .filter((p) => !(p.tag === 'A' && p.href) && !(p.tag === 'BUTTON' && (p.kind || p.pane) && p.type === 'button'));
+        .filter((p) => !(p.tag === 'A' && p.href) && !(p.tag === 'BUTTON' && (p.kind || p.pane || p.more) && p.type === 'button'));
       if (!dead.length)
         ok(
           `${at}: every other pill is a link or a button (${m.pills
@@ -968,7 +1007,9 @@ try {
       /* The counts. Which pills carry one is read out of the row's own list, like
          everything else here; *where* they are drawn is Home and nowhere else, which is
          the whole of the answer to the staleness objection in that file's header. */
-      const isHome = ['/', '/index.html'].includes(norm(page.url));
+      // The shell, not the path: `/monitor`, `/prs` and `/config` hop onto a pane of it, and
+      // the shell draws one row whose counts stay up on every pane (bc-yjekg).
+      const isHome = page.file === 'index.html';
       const badged = m.pills.filter((p) => p.count !== null).map((p) => p.id);
       const wantBadged = isHome ? PILLS.filter((p) => p.count).map((p) => p.id) : [];
       if (badged.length === wantBadged.length && badged.every((id, i) => id === wantBadged[i]))
@@ -1149,14 +1190,14 @@ try {
        file leaves `bead` in there, which would be the check passing on its own history. */
     await s.send('Page.navigate', { url: `http://127.0.0.1:${port}/?t=viewbar-check-scope` });
     await sleep(900);
-    await evalJs(s, `localStorage.setItem('beadcause.scope', 'human'), localStorage.removeItem('beadcause.kinds'), 1`);
+    await evalJs(s, `localStorage.setItem('beadcause.scope', 'human'), localStorage.removeItem('beadcause.kinds'), localStorage.removeItem('beadcause.beadsSide'), 1`);
     await s.send('Page.navigate', { url: `http://127.0.0.1:${port}/?t=viewbar-check-scope-2` });
     await sleep(1200);
 
     const STATE = `(() => {
       const armed = document.querySelector('.filterpills .chip-row.scopes .chip[aria-pressed="true"]');
       const cur = document.querySelector('.viewbar [aria-current="page"]');
-      const bead = document.querySelector('.viewbar [data-pill="bead"]');
+      const bead = document.querySelector('.viewbar [data-pill="beads"]');
       return {
         scope: armed ? armed.dataset.chip : null,
         lit: cur ? cur.dataset.pill : null,
@@ -1174,11 +1215,11 @@ try {
     else bad('All Beads is a tappable button on Human', `it is a <${before.beadTag ?? 'nothing'}> — a pill you cannot tap is the other way to make this bug`);
 
     const asked = HITS.length;
-    const hit = await evalJs(s, `!!document.querySelector('.viewbar button.viewpill[data-pill="bead"]')?.click() || true`);
+    const hit = await evalJs(s, `!!document.querySelector('.viewbar button.viewpill[data-pill="beads"]')?.click() || true`);
     await sleep(1400);
     const after = await evalJs(s, STATE);
 
-    if (after.lit === 'bead') ok('tapping it leaves All Beads lit');
+    if (after.lit === 'beads') ok('tapping it leaves Beads lit, on its Open side — All Beads since bc-yjekg.3');
     else
       bad(
         'tapping All Beads leaves All Beads lit',
@@ -1188,8 +1229,10 @@ try {
       );
     if (after.scope === 'both') ok('and the scope switch beside it has moved to Both, where the beads are fetched');
     else bad('the scope switch moves to Both', `it says ${after.scope ?? 'nothing'} — the widening is invisible, or did not happen`);
-    if (after.stored === 'both') ok('and it is stored, so the widening survives a reload like every other scope change');
-    else bad('the widened scope is stored', `beadcause.scope is ${after.stored ?? 'unset'}`);
+    // bc-yjekg reversed this: a stored widening left Home and Questions on Both for good
+    // after one visit to All Beads. The widening is the pill's, not yours.
+    if (after.stored === 'human') ok('and it is not stored — the scope you chose is still Human');
+    else bad('the widened scope is not stored', `beadcause.scope is ${after.stored ?? 'unset'} — one visit to All Beads re-scopes every view for good`);
 
     const refetched = HITS.slice(asked).filter((u) => u.startsWith('/api/questions?scope=both'));
     if (refetched.length) ok(`and the beads were actually asked for (${refetched[0]})`);
@@ -1205,6 +1248,15 @@ try {
     const onHuman = HITS.slice(0, asked).filter((u) => u.startsWith('/api/questions?scope=') && !u.startsWith('/api/questions?scope=human'));
     if (!onHuman.length) ok('and nothing went out on a wider scope before the tap — the Human poll is unchanged');
     else bad('the Human poll asks for nothing wider', `it asked for ${[...new Set(onHuman)].join(', ')}`);
+
+    // And leaving it hands the scope back (bc-yjekg): Questions is reachable on Human.
+    await evalJs(s, `!!document.querySelector('.viewbar button.viewpill[data-pill="question"]')?.click() || true`);
+    await sleep(1400);
+    const back = await evalJs(s, STATE);
+    if (back.scope === 'human') ok('leaving All Beads for Questions puts the scope switch back on Human');
+    else bad('leaving All Beads restores the scope you chose', `the switch says ${back.scope ?? 'nothing'} after tapping Questions`);
+    if (back.stored === 'human') ok('and Human is what is stored');
+    else bad('Human is still stored after leaving All Beads', `beadcause.scope is ${back.stored ?? 'unset'}`);
   }
 
   /* ------------------------------------------------- the row that does not fit */
@@ -1219,7 +1271,8 @@ try {
   console.log(`\n\x1b[1m${PINCH.width}×${PINCH.height} — the row narrower than its pills\x1b[0m`);
   await s.send('Emulation.setDeviceMetricsOverride', { ...PINCH, deviceScaleFactor: 2, mobile: true });
   const later = PAGES.filter((p) => {
-    const id = litFor(p.url);
+    // Through `rowPillFor`: a page whose view is behind ⋯ lights the ⋯, the row's last pill.
+    const id = rowPillFor(litFor(p.url));
     return id && IDS.indexOf(id) > 0;
   });
   if (!later.length) bad('some page lights a pill other than the first', 'every path in the row points at its first pill — the reveal cannot be observed');

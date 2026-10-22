@@ -261,10 +261,14 @@ await check('the board is still served, and still has the bar on it', () => {
     /urlPath === '\/prs' \|\| urlPath === '\/pulls' \|\| urlPath === '\/prs\.html'/.test(server),
     'the board’s three paths no longer land together'
   );
-  const html = read('public/monitor.html');
+  // That page is itself a pane of the shell now (bc-khoe.4) and its file is deleted
+  // (bc-l75v7), so these are asked of index.html, where prs.js is injected by
+  // public/panelazy.js after every eager tag has run.
+  const html = read('public/index.html');
   assert.ok(html.includes('/viewbar.js'), 'the board lost the pill row, which is the only way off it');
   assert.ok(html.includes('/prcard.js'), 'the board does not load the shared renderer');
-  assert.ok(html.indexOf('/prcard.js') < html.indexOf('/prs.js'), 'prs.js runs before the renderer it uses');
+  assert.ok(html.indexOf('/prcard.js') < html.indexOf('/panelazy.js'), 'prs.js runs before the renderer it uses');
+  assert.ok(read('public/panelazy.js').includes("'/prs.js'"), 'nothing loads prs.js into the board');
   assert.ok(/data-tab="prs"/.test(html), 'there is no PRs chip, so nothing points at the board again');
 });
 

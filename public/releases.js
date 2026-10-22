@@ -320,8 +320,12 @@
     // A tracker that would not answer is not an empty queue, and the difference is the
     // whole of what this line is for: a merge queue that came back empty because Dolt was
     // mid-write reads exactly like one with nothing in it.
-    const errors = (d.errors || []).length
-      ? `<p class="board-foot bad">Could not read the merge queue in ${(d.errors || [])
+    // Space-filtered like the rows it caveats (bc-yjekg): a tracker in another space that
+    // would not answer cannot make *this* list short, and naming it here read as a fault
+    // in the space you were looking at.
+    const failed = (d.errors || []).filter(inSpace);
+    const errors = failed.length
+      ? `<p class="board-foot bad">Could not read the merge queue in ${failed
           .map((e) => esc(e.workspace))
           .join(', ')} — what is below may be short.</p>`
       : '';

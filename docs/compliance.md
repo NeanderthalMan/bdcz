@@ -1385,7 +1385,7 @@ audit. An auditor opening at the
 asks what it is evidence *for*, and until this file existed the honest answer was "a
 management system nobody had written down".
 
-**The organisation is `Adam Morgan, trading as Neo`, a sole trader**, and that was not
+**The organisation is `Neo Labs`, a sole trader**, and that was not
 a decision a session could make: the entity named in the scope statement is the one an
 accredited body audits and the one printed on the certificate. It was asked as `bc-jlpj` and
 answered on 2026-08-16. Top management is Adam Morgan, because a sole trader is its own top
@@ -1451,7 +1451,7 @@ same list.
 #### The AI policy
 
 > Beadcause AI policy, version 0.1.0-draft. Issued by Adam Morgan as top management, for
-> **Adam Morgan, trading as Neo**. **Draft — not yet signed.**
+> **Neo Labs**. **Draft — not yet signed.**
 
 Beadcause runs autonomous agent sessions that read, write and merge code on machines and in
 repositories that belong to people. This policy states what those agents may and may not do,
@@ -1541,13 +1541,13 @@ organisational clause is for.
 > Morgan, as top management, and `bc-nft5` is the question that asks for it. Until it is
 > signed, every register that names it says so.
 >
-> `Signed ____________________  Adam Morgan, for Adam Morgan trading as Neo, as top management.  Date __________`
+> `Signed ____________________  Adam Morgan, for Neo Labs, as top management.  Date __________`
 
 #### Scope of the AI management system
 
 > Clause 4.3. Version 0.1.0-draft, awaiting Adam Morgan's signature as top management.
 
-The AI management system of **Adam Morgan, trading as Neo** covers the design,
+The AI management system of **Neo Labs** covers the design,
 development, operation and provision of Beadcause: the decision inbox and the daemon behind
 it, the autonomous agent sessions it opens against repositories on machines the organisation
 operates, the tracker those sessions read and write, and the compliance layer that evidences

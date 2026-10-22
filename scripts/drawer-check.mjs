@@ -48,6 +48,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { toQuestion } from '../lib/decision.js';
 import { CHROME, launchChrome } from './helpers/chrome.mjs';
+import { hopLocation, viewHops } from '../lib/pagealias.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PUBLIC = path.join(ROOT, 'public');
@@ -237,7 +238,6 @@ const BASE_FILES = [
   '/doc.js',
   '/graph.html',
   '/graph.js',
-  '/monitor.html',
   '/monitor.js',
   '/mirror.js',
   '/session.html',
@@ -256,6 +256,9 @@ const committed = (p) => {
 /** Answered once per page load, then parked — see the `/api/poll` branch below. */
 let polled = false;
 const NOW = new Date().toISOString();
+
+/* The paths that are a 302 to a pane of the shell, read out of lib/server.js (bc-l75v7). */
+const HOPS = viewHops();
 
 function serve() {
   const server = http.createServer((req, res) => {
@@ -327,17 +330,20 @@ function serve() {
       res.writeHead(200, { 'content-type': TYPES[path.extname(p)] || 'text/plain' });
       return res.end(body);
     }
-    // The daemon serves these as pages, not as files on disk. `/work` and `/sessions`
-    // are the advocate console now — the sessions view they used to serve was merged
-    // into it, and the paths were kept because the phone's home screen holds them.
+    // `/work`, `/sessions` and `/advocates` are the advocate console, which is a pane of
+    // the shell — the daemon answers them with a hop to `/#advocates`, and so does this.
+    // public/monitor.html, which they used to be rewritten onto, is deleted (bc-l75v7).
+    const hop = hopLocation(p, new URL(req.url, 'http://x').search, HOPS);
+    if (hop) {
+      res.writeHead(302, { location: hop });
+      return res.end();
+    }
+    // The daemon serves these as pages, not as files on disk.
     const PAGES = {
       '/': 'index.html',
-      '/work': 'monitor.html',
-      '/sessions': 'monitor.html',
       '/graph': 'graph.html',
       '/doc': 'doc.html',
       '/session': 'session.html',
-      '/advocates': 'monitor.html',
     };
     const file = path.join(PUBLIC, PAGES[p] || p.replace(/^\/+/, ''));
     if (!file.startsWith(PUBLIC) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {
@@ -458,6 +464,8 @@ const STATE = `(() => {
     frameView: (() => { try { return frame ? frame.contentWindow.innerWidth : 0; } catch (e) { return -1; } })(),
     text: (() => { try { return frame ? frame.contentDocument.body.innerText.slice(0, 4000) : ''; } catch (e) { return ''; } })(),
     path: location.pathname,
+    // Which pane of the shell, without the filters that ride after it in the hash.
+    view: location.hash.split('?')[0],
     viewport: innerWidth,
   };
 })()`;
@@ -775,7 +783,7 @@ try {
   const withGraph = await evalJs(s, STATE);
   check(
     'a graph row opens over the advocate console too',
-    graphUp && withGraph.open && withGraph.path === '/work',
+    graphUp && withGraph.open && withGraph.path + withGraph.view === '/#advocates',
     withGraph.exists ? `at ${withGraph.path}, showing ${withGraph.frame}` : 'no drawer — the tab navigated'
   );
   const drew = await waitFor(
@@ -811,7 +819,7 @@ try {
   const backTab = await evalJs(s, STATE);
   check(
     'back closes it and leaves you on the advocates tab',
-    backTab.exists && !backTab.open && backTab.path === '/work',
+    backTab.exists && !backTab.open && backTab.path + backTab.view === '/#advocates',
     `at ${backTab.path}, drawer ${backTab.open ? 'still open' : 'closed'}`
   );
 
@@ -833,7 +841,7 @@ try {
   const withSession = await evalJs(s, STATE);
   check(
     "a session's detail opens over the list, showing what it is actually saying",
-    sessionUp && withSession.open && withSession.path === '/work' && withSession.frame?.startsWith('/session'),
+    sessionUp && withSession.open && withSession.path + withSession.view === '/#advocates' && withSession.frame?.startsWith('/session'),
     withSession.exists ? `at ${withSession.path}, showing ${withSession.frame}` : 'no drawer — the tab navigated'
   );
   check(
@@ -861,7 +869,7 @@ try {
   const backFromSession = await evalJs(s, STATE);
   check(
     'back dismisses it and leaves you on the list you tapped from',
-    backFromSession.exists && !backFromSession.open && backFromSession.path === '/work',
+    backFromSession.exists && !backFromSession.open && backFromSession.path + backFromSession.view === '/#advocates',
     `at ${backFromSession.path}, drawer ${backFromSession.open ? 'still open' : 'closed'}`
   );
 
@@ -883,7 +891,7 @@ try {
   const withConsole = await evalJs(s, STATE);
   check(
     'and it opens over the console rather than navigating away from it',
-    overConsole && withConsole.open && withConsole.path === '/advocates',
+    overConsole && withConsole.open && withConsole.path + withConsole.view === '/#advocates',
     withConsole.exists ? `at ${withConsole.path}, showing ${withConsole.frame}` : 'no drawer — the tab navigated'
   );
   await back(s);
@@ -905,7 +913,7 @@ try {
   const withMirror = await evalJs(s, STATE);
   check(
     'over the mirror as well',
-    overMirror && withMirror.open && withMirror.path === '/advocates',
+    overMirror && withMirror.open && withMirror.path + withMirror.view === '/#advocates',
     withMirror.exists ? `at ${withMirror.path}, showing ${withMirror.frame}` : 'no drawer — the tab navigated'
   );
   await back(s);
@@ -993,7 +1001,7 @@ try {
   const stillUp = await evalJs(s, STATE);
   check(
     'and closing the sheet leaves you on the graph rather than closing the drawer',
-    !afterSheet.up && stillUp.open && stillUp.path === '/work',
+    !afterSheet.up && stillUp.open && stillUp.path + stillUp.view === '/#advocates',
     `sheet ${afterSheet.up ? 'still up' : 'closed'}, drawer ${stillUp.open ? 'open' : 'closed'} at ${stillUp.path}`
   );
   await back(s);
@@ -1020,7 +1028,7 @@ try {
   const dismissed = await evalJs(s, STATE);
   check(
     'the backdrop dismisses it',
-    !dismissed.open && dismissed.path === '/work',
+    !dismissed.open && dismissed.path + dismissed.view === '/#advocates',
     `at ${dismissed.path}, drawer ${dismissed.open ? 'still open' : 'closed'}`
   );
 

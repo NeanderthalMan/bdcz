@@ -842,7 +842,7 @@
     } else {
       outcome =
         `Filed as ${data.session?.id || 'a pass'} — ${filed.length} bead${filed.length === 1 ? '' : 's'}` +
-        ` under ${data.root?.id || 'the standing root'}${data.root?.made ? ', which this Save created' : ''}.`;
+        ` under ${data.root?.id || 'the standing effort'}${data.root?.made ? ', which this Save created' : ''}.`;
       say(`Filed as ${data.session?.id || 'a pass'}`);
     }
     paintList();

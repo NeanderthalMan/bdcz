@@ -129,7 +129,15 @@
       ...opts,
       headers: { 'x-beadcause-token': token(), ...(opts.headers || {}) },
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    // The server says why in the body (lib/server.js: `{ error, code: 'view-generator' }`
+    // and the header) — a bare status code threw that away, so a view whose generator
+    // timed out read as "HTTP 502" with nothing to act on. bc-yjekg.
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      const err = new Error(body?.error || `HTTP ${res.status}`);
+      err.generator = res.headers.get('x-beadcause-view-generator') === '1';
+      throw err;
+    }
     return res.json();
   }
 
@@ -449,9 +457,15 @@
       ctx._emit();
     } catch (err) {
       ctx.meta = { ...ctx.meta, problem: err.message };
+      // A generator that has never finished is the repo's to fix, not a fault in the app:
+      // said as a wait, naming whose generator and what it said, with the retry beside it.
       ctx.note(
-        ctx.data ? `could not read it again — ${err.message}` : `this view has never built — ${err.message}`,
-        'stop'
+        ctx.data
+          ? `could not read it again — ${err.message}`
+          : err.generator
+            ? `Not built yet — ${v.workspace}'s generator for this view did not finish (${err.message}). ⟳ tries again.`
+            : `this view has never built — ${err.message}`,
+        err.generator && !ctx.data ? 'warn' : 'stop'
       );
       ctx._emit();
     }

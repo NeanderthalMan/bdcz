@@ -436,7 +436,7 @@
    */
   function indexHtml(rows) {
     if (!rows.length) {
-      return `<div class="empty"><strong>No beadepics yet</strong>A docket is drawn for a bead that has
+      return `<div class="empty"><strong>No efforts yet</strong>A docket is drawn for a bead that has
         children under it. Nothing in this workspace has any — which is a fact about the
         tracker rather than about this page.</div>`;
     }
@@ -459,7 +459,7 @@
       </a>`;
     });
     return `<section class="dk-block">
-      <div class="section-label">Beadepics <span>${rows.length}, most recently touched first</span></div>
+      <div class="section-label">Efforts <span>${rows.length}, most recently touched first</span></div>
       <div class="dk-index">${items.join('')}</div>
     </section>`;
   }
@@ -467,7 +467,7 @@
   /* ----------------------------------------------------------------- rendering */
 
   function setTitle() {
-    const name = state.docket ? state.docket.root.title : bead ? 'Docket' : 'Beadepics';
+    const name = state.docket ? state.docket.root.title : bead ? 'Docket' : 'Efforts';
     titleEl.textContent = name;
     document.title = `Beadcause · ${name}`;
     // Nothing is posted up to a drawer panel from here. public/drawer.js reads the
@@ -523,7 +523,7 @@
       }
     } catch (err) {
       state.stopped = {
-        title: bead ? 'That docket could not be drawn' : 'The beadepics could not be listed',
+        title: bead ? 'That docket could not be drawn' : 'The efforts could not be listed',
         detail: err.message,
       };
     } finally {

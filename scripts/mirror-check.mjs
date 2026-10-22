@@ -46,6 +46,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CHROME, launchChrome } from './helpers/chrome.mjs';
+import { hopLocation, viewHops } from '../lib/pagealias.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PUBLIC = path.join(ROOT, 'public');
@@ -163,6 +164,9 @@ function moveTo(where) {
   release(presenceWaiters);
 }
 
+/* The paths that are a 302 to a pane of the shell, read out of lib/server.js (bc-l75v7). */
+const HOPS = viewHops();
+
 function serve() {
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, 'http://x');
@@ -217,8 +221,15 @@ function serve() {
       return res.end(body);
     }
 
+    // `/work`, `/sessions` and `/advocates` hop to the shell's Advocates pane, as the
+    // daemon's do; public/monitor.html, which they used to serve, is deleted (bc-l75v7).
+    const hop = hopLocation(p, new URL(req.url, 'http://x').search, HOPS);
+    if (hop) {
+      res.writeHead(302, { location: hop });
+      return res.end();
+    }
     // The daemon serves these as pages, not as files on disk.
-    const PAGES = { '/': 'index.html', '/work': 'monitor.html', '/sessions': 'monitor.html', '/advocates': 'monitor.html' };
+    const PAGES = { '/': 'index.html' };
     const file = path.join(PUBLIC, PAGES[p] || p.replace(/^\/+/, ''));
     if (!file.startsWith(PUBLIC) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {
       res.writeHead(404).end('no');

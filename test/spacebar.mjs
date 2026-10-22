@@ -874,8 +874,9 @@ check('and no page publishes counts to it any more', () => {
 
 /* Which pages have the bar, and the one that deliberately does not: admin acts on every
    repo at once (see the header of public/admin.js), and a control it ignored would be a
-   lie about what its buttons do. */
-const PAGES = ['index.html', 'monitor.html', 'console.html', 'foundations.html'];
+   lie about what its buttons do. monitor.html left the list with the file (bc-l75v7): its
+   panes are in index.html, which is already here. */
+const PAGES = ['index.html', 'console.html', 'foundations.html'];
 
 check('every page with a filterable list loads /spacebar.js', () => {
   const missing = PAGES.filter((p) => !read(`public/${p}`).includes('/spacebar.js'));

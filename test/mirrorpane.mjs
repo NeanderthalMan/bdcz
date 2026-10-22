@@ -110,20 +110,22 @@ check(
 /* ---------------------------------------------------------- the pane is still there */
 
 // The other half of the same claim: "not a tab" is only true while it is a pane. A
-// Mirror that had quietly been deleted would pass everything above.
-const monitor = uncommentHtml(read('monitor.html'));
+// Mirror that had quietly been deleted would pass everything above. The row is the
+// Advocates pane of the shell (bc-khoe.4); monitor.html, where it used to be the whole
+// page, is deleted (bc-l75v7).
+const shell = uncommentHtml(read('index.html'));
 
 check(
-  () => assert.match(monitor, /id="mon-tabs"[\s\S]*?data-tab="mirror"[\s\S]*?<\/nav>/, 'the Mirror chip is not in #mon-tabs on monitor.html'),
-  'the Mirror is a chip in the advocates page\'s own tab row'
+  () => assert.match(shell, /id="mon-tabs"[\s\S]*?data-tab="mirror"[\s\S]*?<\/nav>/, 'the Mirror chip is not in #mon-tabs in index.html'),
+  'the Mirror is a chip in the Advocates pane\'s own tab row'
 );
 check(
-  () => assert.match(monitor, /<section id="mirror" class="work pagescroll" hidden>/),
-  'and the pane it swaps to is a .work section on that same page'
+  () => assert.match(shell, /<section id="mirror" class="work pagescroll" hidden>/),
+  'and the pane it swaps to is a .work section in that same pane'
 );
 check(
-  () => assert.match(monitor, /<script src="\/mirror\.js"><\/script>/),
-  'which monitor.html loads mirror.js to fill'
+  () => assert.match(read('panelazy.js'), /\['advocates', \[[^\]]*'\/mirror\.js'/),
+  'which public/panelazy.js loads mirror.js to fill'
 );
 
 // The pane-swap is one `hidden` attribute and this one rule. The bead named dropping it
@@ -147,16 +149,14 @@ check(
 );
 /* The second half moved when the chip row grew a third pane (bc-d4d5): mirror.js no
    longer owns the swap, so the report is public/montabs.js's, and *which* view each chip
-   reports is declared on the chip itself in monitor.html. The claim is unchanged and is
+   reports is declared on the chip itself in index.html. The claim is unchanged and is
    now two facts — the Mirror chip names no view, and the row publishes whatever the chip
    names. Asserting only the second would pass a Mirror chip that had quietly been given
    one, which is exactly the regression this pair exists to catch. */
-check(() => {
-  assert.match(monitor, /data-tab="mirror"[^>]*data-view=""/);
-  // And in the shell, where the same row is the Advocates pane (bc-khoe.4). One chip in
-  // two documents, and a `data-view` quietly added to either would be the regression.
-  assert.match(uncommentHtml(read('index.html')), /data-tab="mirror"[^>]*data-view=""/);
-}, 'and the Mirror chip still claims no view of its own, in both documents');
+check(
+  () => assert.match(shell, /data-tab="mirror"[^>]*data-view=""/),
+  'and the Mirror chip still claims no view of its own'
+);
 check(
   () => assert.match(decomment(read('montabs.js')), /presence\?\.report\(\{ view: \(eff && viewOf\.get\(eff\)\) \|\| null \}\)/),
   'and the row that swaps the panes is what publishes it'

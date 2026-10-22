@@ -267,6 +267,7 @@
           p.mergeCommit ? ` · <code>${esc(p.mergeCommit.slice(0, 7))}</code>` : ''
         }
       </div>
+      ${/* The bead links the shut row cannot hold — it is a button (bc-yjekg). */ (p.beads || []).length ? `<div class="board-where">${card.beadsHtml(p)}</div>` : ''}
       <div class="board-actions">${buttons.join('')}</div>
       ${p.merged ? `<div class="board-hint">${shipHint(p)}</div>` : ''}
       <div class="board-say">
@@ -756,9 +757,6 @@
       state.armed = null;
       return render();
     }
-
-    // A bead pill inside a row is a link into the graph, not a fold.
-    if (ev.target.closest('.pill.id')) return;
 
     const row = ev.target.closest('[data-pr]');
     if (row) {

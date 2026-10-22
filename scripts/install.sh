@@ -302,8 +302,18 @@ say "installing dependencies"
 # booted out and the running service is untouched, than to hand somebody that. `2` is a
 # step that failed and may work next time — no network, ssh locked — and the daemon's own
 # sync banner keeps saying so, so the install carries on.
+# Interactive only when the setup questions would be (UNATTENDED_WHY, near the top): a
+# tracker that lives inside a checkout is asked where that clone is on this Mac, because
+# team.json cannot know. Read from /dev/tty for the same reason configure.js is — `npm run`
+# pipes stdin — and with no terminal to read, it asks nothing rather than waiting.
+ONBOARD_ARGS=(--yes)
+ONBOARD_IN=/dev/tty
+if [ -n "$UNATTENDED_WHY" ] || ! { : < /dev/tty; } 2>/dev/null; then
+  ONBOARD_ARGS+=(--non-interactive)
+  ONBOARD_IN=/dev/null
+fi
 ONBOARD_RC=0
-( cd "$ROOT" && node scripts/onboard.mjs --yes ) || ONBOARD_RC=$?
+( cd "$ROOT" && node scripts/onboard.mjs "${ONBOARD_ARGS[@]}" < "$ONBOARD_IN" ) || ONBOARD_RC=$?
 if [ "$ONBOARD_RC" = 1 ]; then
   warn "the service was left exactly as it was; nothing has been loaded or unloaded."
   die "the team's tracker needs a decision first — see above, then re-run this."

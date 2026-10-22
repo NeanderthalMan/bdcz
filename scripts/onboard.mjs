@@ -40,8 +40,12 @@ import {
   describeState,
   readSyncRemote,
   withSyncRemote,
+  resolveTrackerDir,
+  repoOfRemote,
+  sameRepo,
   PER_MACHINE,
 } from '../lib/team.js';
+import { expandHome } from '../lib/repos.js';
 import { tildeHome } from '../lib/reposcan.js';
 
 const bold = (s) => `\x1b[1m${s}\x1b[0m`;
@@ -56,14 +60,32 @@ if (argv.includes('-h') || argv.includes('--help')) {
 
   npm run onboard                 create and bootstrap what is missing
   npm run onboard -- --dry-run    print the plan and change nothing
+  npm run onboard -- --dir <workspace>=<path>
+                                  where a checkout tracker's clone is on this Mac
+  npm run onboard -- --non-interactive
+                                  ask nothing; find the clone or use team.json's dir
 
 Exit 1 means something needs a person and nothing was changed; exit 2 means a step
 failed and may work next time. With no team.json this does nothing at all.`);
   process.exit(0);
 }
 const dryRun = argv.includes('--dry-run') || argv.includes('-n');
-for (const arg of argv) {
-  if (!['--dry-run', '-n', '--yes', '-y'].includes(arg)) {
+const nonInteractive = argv.includes('--non-interactive');
+/** `--dir architecture=~/src/architecture`, repeatable: the answer to the question, given up front. */
+const dirArgs = {};
+for (let i = 0; i < argv.length; i += 1) {
+  const arg = argv[i];
+  if (arg === '--dir' || arg.startsWith('--dir=')) {
+    const value = arg === '--dir' ? argv[++i] : arg.slice('--dir='.length);
+    const at = String(value || '').indexOf('=');
+    if (at < 1) {
+      warn(`--dir wants <workspace>=<path>, not ${JSON.stringify(value)} — ignored`);
+      continue;
+    }
+    dirArgs[value.slice(0, at)] = path.resolve(expandHome(value.slice(at + 1)));
+    continue;
+  }
+  if (!['--dry-run', '-n', '--yes', '-y', '--non-interactive'].includes(arg)) {
     warn(`ignoring unknown option ${arg}`);
   }
 }
@@ -123,9 +145,10 @@ const asJson = (text) => {
 function observe(tracker) {
   const beadsDir = path.join(tracker.dir, '.beads');
   const configFile = path.join(beadsDir, 'config.yaml');
+  const dirExists = fs.existsSync(tracker.dir);
   const beadsExists = fs.existsSync(beadsDir);
   const configRemote = fs.existsSync(configFile) ? readSyncRemote(fs.readFileSync(configFile, 'utf8')) : null;
-  const bare = { beadsExists, configRemote, hasDb: false, remote: null, issues: null };
+  const bare = { dirExists, beadsExists, configRemote, hasDb: false, remote: null, issues: null };
   if (!beadsExists) return bare;
 
   const probe = bd(['dolt', 'remote', 'list', '--json'], { cwd: tracker.dir, beadsDir, timeout: 60_000 });
@@ -142,7 +165,7 @@ function observe(tracker) {
     : null;
   const stats = asJson(bd(['stats', '--json'], { cwd: tracker.dir, beadsDir, timeout: 60_000 }).stdout);
   const total = stats?.summary?.total_issues;
-  return { beadsExists, configRemote, hasDb: true, remote, issues: typeof total === 'number' ? total : null };
+  return { dirExists, beadsExists, configRemote, hasDb: true, remote, issues: typeof total === 'number' ? total : null };
 }
 
 /** One step, for real. Returns null when it worked, or the sentence that says it did not. */
@@ -195,6 +218,119 @@ const { trackers, policy, note } = team.profile;
 say(`${bold(`the team's tracker${trackers.length === 1 ? '' : 's'}`)} ${dim(`(${tildeHome(team.path)})`)}`);
 if (note) console.log(dim(`  ${note}`));
 
+/* ------------------------------------------------- where each one is on this Mac */
+
+/** Every git remote URL of a directory, or [] when it is not a checkout. */
+function gitRemotes(dir) {
+  const r = spawnSync('git', ['-C', dir, 'remote', '-v'], { encoding: 'utf8', timeout: 10_000 });
+  if (r.status !== 0) return [];
+  return [...new Set((r.stdout || '').split('\n').map((l) => l.split(/\s+/)[1]).filter(Boolean))];
+}
+
+const isCloneOf = (dir, tracker) => fs.existsSync(dir) && gitRemotes(dir).some((u) => sameRepo(u, tracker.remote));
+
+/**
+ * Clones of the tracker's repo near where people keep repos: the team's suggestion, then
+ * `~/*\/<repo>` and `~/*\/*\/<repo>`. Named by the repo's own basename, which is what
+ * `git clone` calls the directory unless somebody said otherwise — and somebody who did
+ * is the person the question is for.
+ */
+function findClones(tracker) {
+  const base = (repoOfRemote(tracker.remote) || '').split('/').pop();
+  const seen = new Set();
+  const out = [];
+  const consider = (dir) => {
+    const abs = path.resolve(dir);
+    if (seen.has(abs)) return;
+    seen.add(abs);
+    if (isCloneOf(abs, tracker)) out.push(abs);
+  };
+  consider(tracker.dir);
+  if (!base) return out;
+  const HOME = process.env.HOME || '';
+  const children = (dir) => {
+    try {
+      return fs
+        .readdirSync(dir, { withFileTypes: true })
+        .filter((d) => d.isDirectory() && !d.name.startsWith('.') && !['Library', 'node_modules'].includes(d.name))
+        .map((d) => path.join(dir, d.name));
+    } catch {
+      return [];
+    }
+  };
+  for (const one of children(HOME)) {
+    consider(path.join(one, base));
+    for (const two of children(one)) consider(path.join(two, base));
+  }
+  return out;
+}
+
+const rl =
+  !dryRun && !nonInteractive && process.stdin.isTTY
+    ? (await import('node:readline/promises')).createInterface({ input: process.stdin, output: process.stdout })
+    : null;
+
+/**
+ * The directory a checkout tracker is in on this Mac. In order: `--dir`, this Mac's
+ * `workspaceDirs`, then a question whose default is the clone we found (or team.json's
+ * `dir`). Without a terminal the default is the answer, and a wrong default is what
+ * `trackerPlan` refuses — an install never plants a tracker beside somebody's real clone.
+ */
+async function locate(tracker, cfg) {
+  if (dirArgs[tracker.workspace]) {
+    const dir = dirArgs[tracker.workspace];
+    if (fs.existsSync(dir) && !isCloneOf(dir, tracker)) {
+      warn(`${tildeHome(dir)} is not a clone of ${repoOfRemote(tracker.remote)} by its git remotes — using it as told.`);
+    }
+    return { dir, explicit: true };
+  }
+  const resolved = resolveTrackerDir(tracker, cfg);
+  if (resolved.source === 'machine') return { dir: resolved.dir, explicit: true };
+  const found = findClones(tracker);
+  const suggestion = { dir: found[0] || tracker.dir, explicit: false };
+  if (!rl) {
+    if (found.length) console.log(dim(`  ${tracker.workspace}: found the clone at ${tildeHome(suggestion.dir)}`));
+    return suggestion;
+  }
+  const repo = repoOfRemote(tracker.remote);
+  if (found.length > 1) console.log(dim(`  clones of ${repo} on this Mac: ${found.map(tildeHome).join(', ')}`));
+  for (let tries = 0; tries < 3; tries += 1) {
+    let answer;
+    try {
+      answer = (await rl.question(`  Where is your clone of ${bold(repo)}? [${tildeHome(suggestion.dir)}] `)).trim();
+    } catch {
+      // Ctrl+D or Ctrl+C at the prompt: no answer, which is the non-interactive case.
+      console.log('');
+      return suggestion;
+    }
+    const dir = path.resolve(expandHome(answer || suggestion.dir));
+    if (isCloneOf(dir, tracker)) return { dir, explicit: false };
+    if (!fs.existsSync(dir)) console.log(dim(`    there is nothing at ${tildeHome(dir)}.`));
+    else console.log(dim(`    ${tildeHome(dir)} is not a clone of ${repo} — none of its git remotes point there.`));
+  }
+  return suggestion;
+}
+
+const machineCfg = loadConfig();
+const dirs = {};
+/** Whether each checkout tracker's directory is the clone — by its remotes, or because somebody named it. */
+const verified = {};
+for (const [i, tracker] of trackers.entries()) {
+  if (!tracker.checkout && !dirArgs[tracker.workspace]) {
+    const resolved = resolveTrackerDir(tracker, machineCfg);
+    trackers[i] = { ...tracker, dir: resolved.dir };
+    continue;
+  }
+  const { dir, explicit } = await locate(tracker, machineCfg);
+  trackers[i] = { ...tracker, dir };
+  const clone = isCloneOf(dir, tracker);
+  verified[tracker.workspace] = explicit || clone;
+  // Kept only for a clone, or a directory somebody named with --dir: remembering a guess
+  // would make the next run skip the question and refuse with the same wrong answer.
+  if (dirArgs[tracker.workspace] ? fs.existsSync(dir) : clone) dirs[tracker.workspace] = dir;
+}
+rl?.close();
+
 /* ------------------------------------------------------------------ the trackers */
 
 let refused = 0;
@@ -210,7 +346,7 @@ for (const tracker of trackers) {
     warn(`${tracker.workspace}: could not read the workspace, so nothing was planned for it — ${observed.probeError}`);
     continue;
   }
-  const plan = trackerPlan(tracker, observed);
+  const plan = trackerPlan(tracker, { ...observed, checkoutVerified: verified[tracker.workspace] });
   console.log(`\n  ${describeState(plan.state, tracker)}`);
 
   if (plan.refusal) {
@@ -261,7 +397,7 @@ for (const tracker of trackers) {
 /* -------------------------------------------------------------------- the policy */
 
 const cfg = loadConfig();
-const { patch, changes } = configPatch(team.profile, cfg);
+const { patch, changes } = configPatch(team.profile, cfg, dirs);
 
 console.log(`\n  ${bold('policy')} ${dim(tildeHome(CONFIG_PATH))}`);
 if (!changes.length) {
