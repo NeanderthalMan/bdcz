@@ -195,7 +195,13 @@ jobs:
     # The `ghrunner` runners on the studio Mac — see the header. The labels are every one
     # they were registered with, so a job cannot land on some future runner that happens
     # to share one of them.
-    runs-on: [self-hosted, macOS, ARM64]
+    #
+    # Private repositories only. The public snapshot (bdcz) has no runner registered, so
+    # every job there queued forever, and a self-hosted runner on a public repository would
+    # run any fork's pull request on this Mac. Hosted minutes cost nothing on a public
+    # repository, and billing was the only reason for the self-hosted runner, so a public
+    # repository uses `macos-latest`.
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","macOS","ARM64"]') || 'macos-latest' }}
     # About 20 minutes for the full roster on a loaded Mac at `--jobs 6`, and less for a
     # narrowed PR. 45 rather than the 20 a hosted runner needed: the job shares the machine
     # with local gates and the live daemon, and #105's own first run lost a shard to the
@@ -334,8 +340,9 @@ jobs:
           mkdir -p /tmp/beadcause-ci 2>/dev/null || true
           LOG=/tmp/beadcause-ci/${{ github.run_id }}-shard-0.log
           set -o pipefail
-          # Fixed, not load-based: see "Why `--jobs 6`" in the header (bc-s57oe).
-          node bin/b7e-gate --jobs 6 $ONLY_ARGS 2>&1 | tee "$LOG"
+          # Fixed, not load-based: see "Why `--jobs 6`" in the header (bc-s57oe). 3 on a
+          # hosted runner, which has three cores — the same header says why not more.
+          node bin/b7e-gate --jobs ${{ github.event.repository.private && 6 || 3 }} $ONLY_ARGS 2>&1 | tee "$LOG"
           STATUS=$?
           chmod 644 "$LOG" 2>/dev/null || true
           exit $STATUS
