@@ -117,6 +117,46 @@
 # for any change under it, which is what covers a brand-new file nothing names yet; and a
 # suite the gate has never heard of is dropped before `--only` ever sees it.
 #
+# ## …but not a downmerged one (bc-rcrt.2)
+#
+# That argument had a hole, because this repo has no GitHub merge queue. A private
+# repository on a personal free plan cannot turn one on (the API answers 403), so
+# `merge_group` never fires here. Our own queue (`lib/mergequeue.js`) stands in for it. It
+# brings `main` into a branch that has fallen behind (`pr.updateBranch`), waits for the
+# checks to run again, and then merges. That re-run is a `pull_request` run, and it
+# narrows. After the downmerge the merge-base *is* `main`'s tip, so the diff holds only the
+# branch's own files. `main`'s newly arrived files are in the tree being tested but not in
+# the list of changed files. `lib/affected.js` still follows imports across the
+# combination, but it does not see the couplings that are not imports: a suite that walks
+# a directory, a pairing by shared name, or a bare filename that belongs to a file only
+# `main` touched. So a pull request whose branch carries a merge commit of its own used to
+# run the whole roster. That rule covers the queue's downmerges and a worker's own
+# `git merge main` alike, because both leave the same hole.
+#
+# ## …downmerged ones narrow too (bc-3crv6)
+#
+# That made every queue merge cost a whole roster: `main` takes about forty merges a day,
+# so nearly every branch is behind by the time it is first in line. The hole was not
+# worth that price, and nothing cheaper closes it. Putting what the downmerge brought in
+# into the changed list was tried and measured. Over the last thirty downmerged merges a
+# downmerge brought in 296-1,283 files, at least one of them a file `lib/affected.js`
+# cannot place, so every one of the thirty fell back to the whole roster.
+#
+# So a downmerged branch narrows on its own diff against `main`'s tip, the same as any
+# other pull request. This was Adam's call, made knowing what it gives up. A suite that
+# breaks only through a non-import coupling to a file `main` just brought in (a doc
+# `main` added that names a tool the branch deleted, say) is not run before the merge.
+# It is run by `push: main`, on what actually landed, and turns `main` red there instead.
+# That retires the safety argument two sections up: the merge is no longer where
+# narrowing is turned off, and `push: main` is the only whole-roster run left.
+#
+# Why this rather than `lib/basegate.js` in reverse (a local, clean, full `b7e-gate` run
+# pinned to the head sha): that would mean the daemon starting a whole-suite run on this
+# Mac for every downmerge and holding the merge until it finished. That is a slot in the
+# shared gate queue, and minutes of every other session's CPU, spent on each merge. The
+# workflow already runs the whole suite on some events. Asking it to do that on one more
+# kind of event is a few lines here and costs nothing locally.
+#
 # **An empty slice must never become a bare `b7e-gate`.** With the full roster a shard is
 # never empty, so the old version of this step could interpolate `$ONLY_ARGS` unguarded.
 # A narrowed list shorter than `SHARD_TOTAL` leaves some shard with nothing, and
@@ -201,7 +241,17 @@ jobs:
     # run any fork's pull request on this Mac. Hosted minutes cost nothing on a public
     # repository, and billing was the only reason for the self-hosted runner, so a public
     # repository uses `macos-latest`.
-    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","macOS","ARM64"]') || 'macos-latest' }}
+    #
+    # **Pull requests go to `macos-latest` too, and pay for it (bc-4fyq1).** On
+    # 2026-10-26 the studio Mac sat at load 30-87 on 12 cores, and every merge spent 35-45
+    # minutes on a pull-request run that a quiet machine finishes in a few minutes, because a
+    # PR run is narrowed. Adam's call, made knowing what it costs: hosted minutes, billed at
+    # the 10x macOS multiplier on a private repository, in exchange for PR checks that do not
+    # wait on whatever else the Mac is doing. `push: main`, `merge_group` and
+    # `workflow_dispatch` run the whole roster, which takes ~40 minutes on a 3-core hosted
+    # runner, so those stay on the Mac. If the bill fails again, every PR check fails
+    # instantly with no steps (bc-hkval): revert this condition, nothing else.
+    runs-on: ${{ (github.event.repository.private && github.event_name != 'pull_request') && fromJSON('["self-hosted","macOS","ARM64"]') || 'macos-latest' }}
     # About 20 minutes for the full roster on a loaded Mac at `--jobs 6`, and less for a
     # narrowed PR. 45 rather than the 20 a hosted runner needed: the job shares the machine
     # with local gates and the live daemon, and #105's own first run lost a shard to the
@@ -297,8 +347,21 @@ jobs:
       # exactly the fallback being asked for.
       - name: Work out which suites this pull request affects
         if: steps.decide.outputs.code == 'true' && github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          BASE=$(git merge-base "${{ github.event.pull_request.base.sha }}" HEAD)
+          # A downmerged branch narrows like any other, on what it changes against the
+          # base's tip (bc-3crv6, "…downmerged ones narrow too" above). HEAD here is
+          # GitHub's synthetic merge of the PR onto the base, so the merge-base is the
+          # base's tip and the diff is the branch's own changes, downmerge or not. A sha
+          # the clone cannot read runs the whole roster, because that is the conservative
+          # answer.
+          if ! MERGES=$(git rev-list --merges --count "$BASE_SHA..$HEAD_SHA"); then
+            echo "could not read $BASE_SHA..$HEAD_SHA — not narrowing"; exit 0
+          fi
+          [ "$MERGES" -eq 0 ] || echo "the branch carries $MERGES merge commit(s) of its own — narrowing on its own changes all the same"
+          BASE=$(git merge-base "$BASE_SHA" HEAD)
           git diff --name-only "$BASE" HEAD > changed.txt
           echo "changed files:"; cat changed.txt
           # No changed files at all is not "narrow to nothing" — leave affected.txt absent
@@ -342,7 +405,8 @@ jobs:
           set -o pipefail
           # Fixed, not load-based: see "Why `--jobs 6`" in the header (bc-s57oe). 3 on a
           # hosted runner, which has three cores — the same header says why not more.
-          node bin/b7e-gate --jobs ${{ github.event.repository.private && 6 || 3 }} $ONLY_ARGS 2>&1 | tee "$LOG"
+          # Keyed on the same condition as `runs-on`, so a hosted pull-request run gets 3.
+          node bin/b7e-gate --jobs ${{ (github.event.repository.private && github.event_name != 'pull_request') && 6 || 3 }} $ONLY_ARGS 2>&1 | tee "$LOG"
           STATUS=$?
           chmod 644 "$LOG" 2>/dev/null || true
           exit $STATUS

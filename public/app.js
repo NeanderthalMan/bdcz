@@ -5,7 +5,6 @@
   const $ = (sel) => document.querySelector(sel);
   const listEl = $('#list');
   const filtersEl = $('#filters');
-  const pulseEl = $('#pulse');
   const toastEl = $('#toast');
 
   // Which slice of the tracker the list is. See the settings panel in index.html:
@@ -294,6 +293,38 @@
      */
     p0status: localStorage.getItem('beadcause.p0status') || 'live',
     /**
+     * Which order the Questions list is in — `urgent` (the default) or `oldest`. bc-iaju1.5.
+     *
+     * The default is the order the server sent, which is priority and then age
+     * (`byUrgency` in lib/server.js), and it is the right one on a queue you are keeping
+     * up with. It is the wrong one on a queue you are not: measured on 2026-09-19 the
+     * 58 open questions had a median age of 26 days, and priority-first means the oldest
+     * P2 is never on screen at all, because there is always a P1 above it. So the order
+     * is a control rather than a fact, and the control is a chip row on the same filter
+     * pill row as everything else that narrows this list.
+     *
+     * Persisted for `p0status`'s reason: "I am working the backlog oldest-first this
+     * week" is a standing preference, not where you happen to be looking. An unknown
+     * value off a hand-edited key reads as the default, because `sortOldest` tests for
+     * `oldest` rather than against `urgent`.
+     */
+    qsort: localStorage.getItem('beadcause.qsort') || 'urgent',
+    /**
+     * The question cards ticked for a bulk set-aside, as `workspace/id` keys. bc-iaju1.5.
+     *
+     * **Not persisted, and not `state.picked`** — that one is which *option* each card's
+     * answer is making, and the two would have silently shared a name. A selection is a
+     * gesture you are in the middle of rather than a preference: a phone that came back
+     * two days later with eleven cards ticked and a bulk button over them is an accident
+     * waiting for a thumb. `pruneTicks` is what drops a key whose row has left the list,
+     * exactly as public/endorse.js drops one whose bead has left the queue.
+     */
+    ticked: new Set(),
+    /** The outcome of the last bulk set-aside, drawn on the bar. `{ text, bad }`. */
+    tickSaid: null,
+    /** Is a bulk set-aside in flight? One at a time — see `asideTicked`. */
+    tickBusy: false,
+    /**
      * Which epic groups on the question list are folded, by `<workspace>/<id>` (or `none`).
      * bc-yjekg. Persisted, like `p0status`: folding an effort you are not working on this
      * week is a standing preference, and a list that unfolded it again on every reload would
@@ -349,27 +380,19 @@
     // hangs over a half-written comment, so it is shown and hidden by hand, and
     // this is what paints it back when a poll rebuilds the list underneath it.
     agentMenu: null,
-    // Per-bead decisions on an advocate's proposal: key → Map(1-based index →
-    // 'yes' | 'no'). Held here rather than on the question so a background refresh
-    // cannot wipe a half-made decision, the same reason drafts live outside it.
-    picks: new Map(),
-    // Which proposal rows you have unfolded, as `${key}|${n}`. Out here with the
-    // picks for the same reason: a background refresh must not fold a row back up
-    // while you are reading it.
-    propOpen: new Set(),
+    // Per-bead decisions on an advocate's proposal, which rows you have unfolded and
+    // which you are adjusting live in public/proposal.js now (bc-yjekg.5). They were four
+    // fields here — `picks`, `propOpen`, `propEdit`, `edits` — held outside the question
+    // so a background refresh cannot wipe a half-made decision. What changed is whose
+    // state it is: the Advocates page and the Mirror draw the same proposal on this very
+    // page, and a ✓ that counted here and nowhere else was the duplication to end.
+    //
     // Keys whose answer is written but not yet acknowledged. The card leaves the
     // list on the tap so the bead has somewhere to collapse into — but the bead is
     // still open on the server until the write lands, so a poll that overlapped the
     // write would put the card straight back underneath the flight. Held until the
     // write resolves either way; see submit().
     inFlight: new Set(),
-    // Which rows you are *adjusting*, as `${key}|${n}`, and what you have changed:
-    // key → Map(1-based index → patch). ✓ and ✕ are a verdict on someone else's
-    // sentence, and the common case is neither — the bead is worth filing but the
-    // title is wrong. Without a third option that lands as a decline, and the work
-    // comes back next week phrased exactly the same way.
-    propEdit: new Set(),
-    edits: new Map(),
     // The pull request board, whole, from `/api/prs` — the rows this list draws its PR
     // cards from (see prRows). Its own fetch on its own clock, never merged into
     // `questions`: a pull request is not a bead and every consumer of that array is.
@@ -639,9 +662,9 @@
   /**
    * Don't yank the textarea out from under a thumb mid-sentence.
    *
-   * The adjust fields count too. They hold their value in `state.edits` rather than
-   * in the DOM, so a repaint would not *lose* anything — but it would drop focus and
-   * put the caret back at the end, which mid-word is the same insult.
+   * The adjust fields count too. They hold their value in public/proposal.js's `edits`
+   * map rather than in the DOM, so a repaint would not *lose* anything — but it would
+   * drop focus and put the caret back at the end, which mid-word is the same insult.
    */
   // The full view's two boxes count, and they had to be named here rather than left to
   // the card's own repaints: a poll rebuilds the list every 25 seconds, and a comment or
@@ -1062,8 +1085,15 @@
     const on = state.menu === q.key;
     const open = state.open.has(q.key);
     const bulk = propBulkHtml(q);
-    if (!open && !bulk) return '';
-    return `<div class="card-top">
+    // And the tick, which is a third thing that acts on the whole card — bc-iaju1.5.
+    // Hard left, where a proposal's bulk pair is, for the reason given above: what acts
+    // on the card as a whole belongs up here rather than queued at the foot among the
+    // controls that answer it. Shut cards only, and only on the Questions view, so no
+    // other pill's rows change shape at all; see `tickable`.
+    const tick = !open && tickable(q) ? tickHtml(q) : '';
+    if (!open && !bulk && !tick) return '';
+    return `<div class="card-top${tick ? ' has-tick' : ''}">
+      ${tick}
       ${bulk}
       ${
         open
@@ -1399,392 +1429,112 @@
     </div>`;
   }
 
-  /** What you have said about each proposed bead so far. */
-  const picksFor = (key) => {
-    if (!state.picks.has(key)) state.picks.set(key, new Map());
-    return state.picks.get(key);
-  };
-
-  /* ------------------------------------------------------------- adjusting */
-
-  /** What you have rewritten on this proposal so far: 1-based index → partial bead. */
-  const editsFor = (key) => {
-    if (!state.edits.has(key)) state.edits.set(key, new Map());
-    return state.edits.get(key);
-  };
+  /* ------------------------------------------------------------- proposals */
 
   /**
-   * A proposed bead as it stands: what the agent wrote, under whatever you changed.
+   * This page's mount of the one proposal card — public/proposal.js (bc-yjekg.5).
    *
-   * Every surface reads beads through this rather than off `q.proposal` — the row,
-   * the fold height, the primary button's count — so an adjusted bead looks adjusted
-   * everywhere, and there is never a moment where the card shows one title and the
-   * create sends another.
+   * Everything that used to be written out here — the rows, the fold, the duplicate
+   * flag, the adjust editor, the two bulk controls and the in-place painters for all of
+   * them — is in that file now, because it was written out twice more in
+   * public/monitor.js and public/mirror.js and the three had drifted into three
+   * different grammars for one decision. See the head of that file for the argument.
+   *
+   * What stays here is what is about *this* screen rather than about a proposal: the
+   * markdown renderer (which rewrites local image and file links, and renders bd's
+   * hard-wrapped prose with `breaks: false`), the list the question comes from, the arm
+   * token shared with merge, ship and every option tap, the re-render, and `submit()` —
+   * the inbox's own in-flight queue, which no other mount has.
    */
-  const beadAt = (key, b, n) => ({ ...b, ...(editsFor(key).get(n) || {}) });
+  const props = window.beadcause.proposal.bind({
+    // Every one of these is a thunk, and that is load-bearing rather than tidy. This
+    // mount is built thousands of lines above `byKey` and `listEl`, and both are
+    // `const` — so handing the function itself (`byKey,`) reads it in its temporal dead
+    // zone and throws a ReferenceError as this file loads, taking the whole inbox with
+    // it. No unit suite would see that: they lift renderers and never load app.js as a
+    // script. test/proposalmount.mjs holds the rule.
+    root: () => listEl,
+    markdown: (text) => renderMarkdown(text, FROM_BD),
+    byKey: (key) => byKey(key),
+    // Every in-place painter on this page holds while the screen is frozen, and this
+    // card is one of them — see `isFrozen` and test/editfreeze.mjs.
+    gate: () => isFrozen(),
+    armed: () => state.armed,
+    arm: (token, repaint, key) => {
+      // The same two taps every other answer needs, and the same six seconds. This one
+      // creates beads.
+      //
+      // The timer repaints through `paintPicks` by name rather than through the
+      // `repaint` handed in, and that is not style: test/editfreeze.mjs slices the body
+      // of every `state.armedTimer` timeout and fails the repo for any call that is not
+      // one of the gated painters.
+      state.armed = token;
+      clearTimeout(state.armedTimer);
+      state.armedTimer = setTimeout(() => {
+        disarm();
+        paintPicks(key);
+        paintArmed();
+      }, 6000);
+      paintArmed();
+    },
+    disarm: () => disarm(),
+    rerender: () => render(true),
+    /**
+     * The answer, through the queue every other answer on this page goes through.
+     *
+     * `close: true` because filing what an advocate asked for settles the question
+     * either way — creating three beads and creating none are both endings. `onRestore`
+     * is what puts a refused write's card back exactly as it was: the picks, the
+     * rewrites, the folds and the open editors, all four snapshotted by proposal.js
+     * before it cleared them.
+     */
+    submit: (key, q, answer, restore) =>
+      submit(key, answer.text, {
+        close: true,
+        create: answer.create,
+        edits: answer.edits,
+        onRestore: restore,
+      }),
+  });
 
-  /** Whether row `n` differs from what was proposed. Drives the "adjusted" flag. */
-  const isAdjusted = (key, n) => {
-    const patch = editsFor(key).get(n);
-    return !!patch && Object.keys(patch).length > 0;
-  };
-
-  /** The fields adjusting exposes, and nothing else. */
-  const EDIT_FIELDS = [
-    { key: 'title', label: 'Title', tag: 'input' },
-    { key: 'description', label: 'Description', tag: 'textarea', rows: 5 },
-    { key: 'acceptance', label: 'Done when', tag: 'textarea', rows: 2 },
-  ];
-
-  const TYPES = ['task', 'bug', 'feature', 'epic', 'chore', 'decision'];
-  /** Matches `TIERS` in lib/complexity.js, plus the empty one: no tier is a real answer. */
-  const TIERS = ['', 'low', 'medium', 'high'];
+  /** The rows. Named as it always was, so every call site here is unchanged. */
+  const proposalHtml = (q) => props.rowsHtml(q);
 
   /**
-   * The row, in edit mode.
-   *
-   * The five things the chat session lets you change — title, type, priority,
-   * description, acceptance — and deliberately not labels or dependencies. Those are
-   * structural, they are rarely what is wrong with a proposed bead, and a chip editor is
-   * not something to build on a card you are trying to keep short. What you do not
-   * adjust is created exactly as proposed.
-   *
-   * Complexity is the sixth, and it is here for a reason none of the other five have:
-   * it is the only field on the row that spends money. An agent rated its own work, you
-   * are the last reader before a session runs on that rating, and "this is harder than
-   * it thinks" is a correction with nowhere else to go — the alternative is declining a
-   * good bead over a wrong tier. `unrated` is a real choice and not a blank: it is what
-   * every bead filed before bc-nc6o carries, and it takes the expensive model.
-   *
-   * Values come out of `state.edits`, never out of the DOM, so a background poll
-   * that does manage to repaint cannot lose a word of it — the same discipline the
-   * answer box keeps with its draft.
+   * The two bulk controls, in the card's top bar — see cardTopHtml. Their shape and the
+   * argument for it are in public/proposal.js; what this preserves is that they are
+   * drawn *above* the rows on this screen and below them on the Advocates page, which is
+   * a fact about the two cards and not about the proposal.
    */
-  function propEditHtml(key, b, n) {
-    const cur = beadAt(key, b, n);
-    const field = (f) => {
-      const v = esc(cur[f.key] || '');
-      const attrs = `data-role="edit-field" data-key="${esc(key)}" data-idx="${n}" data-field="${f.key}"`;
-      return `<label class="edit-field">
-        <span class="prop-label">${f.label}</span>
-        ${
-          f.tag === 'input'
-            ? `<input type="text" ${attrs} value="${v}">`
-            : `<textarea rows="${f.rows}" ${attrs}>${v}</textarea>`
-        }
-      </label>`;
-    };
-    return `<div class="prop-edit">
-      ${EDIT_FIELDS.map(field).join('')}
-      <div class="edit-row">
-        <label class="edit-field small">
-          <span class="prop-label">Type</span>
-          <select data-role="edit-field" data-key="${esc(key)}" data-idx="${n}" data-field="type">
-            ${TYPES.map((t) => `<option value="${t}"${t === cur.type ? ' selected' : ''}>${t}</option>`).join('')}
-          </select>
-        </label>
-        <label class="edit-field small">
-          <span class="prop-label">Priority</span>
-          <select data-role="edit-field" data-key="${esc(key)}" data-idx="${n}" data-field="priority">
-            ${[0, 1, 2, 3, 4]
-              .map((p) => `<option value="${p}"${p === Number(cur.priority) ? ' selected' : ''}>P${p}</option>`)
-              .join('')}
-          </select>
-        </label>
-        <label class="edit-field small">
-          <span class="prop-label">Complexity</span>
-          <select data-role="edit-field" data-key="${esc(key)}" data-idx="${n}" data-field="complexity">
-            ${TIERS.map(
-              (t) => `<option value="${t}"${t === (cur.complexity || '') ? ' selected' : ''}>${t || 'unrated'}</option>`
-            ).join('')}
-          </select>
-        </label>
-      </div>
-      <button class="linkish" data-act="prop-edit" data-key="${esc(key)}" data-idx="${n}">Done adjusting</button>
-    </div>`;
-  }
+  const propBulkHtml = (q) => props.bulkHtml(q);
 
   /**
-   * The fields a proposed bead would be created with, in the order proposalBody
-   * prints them (lib/proposal.js) — the row and the question body it came from
-   * should read the same way round. Rationale is deliberately absent here: it is an
-   * argument for the bead rather than part of it, so the row prints it last.
+   * What a bulk button says, armed or not. The label is public/proposal.js's; this hands
+   * it the armed flag rather than letting it read one, because `state.armed` is shared
+   * with merge, ship and every option tap and that module deliberately owns no arm.
    */
-  const PROP_FIELDS = [
-    // The description needs no label: it is what a bead obviously is, and a row with
-    // one short line in it should not carry a heading saying so.
-    { key: 'description', label: '' },
-    { key: 'acceptance', label: 'Done when' },
-    { key: 'design', label: 'Design' },
-    { key: 'notes', label: 'Notes' },
-    { key: 'labels', label: 'Labels', pills: true },
-    { key: 'deps', label: 'Depends on', pills: 'id' },
-    // The files this bead says it expects to touch (bc-42ow). As pills, like labels,
-    // because a path is a token and not prose — and last of the six for the reason
-    // `proposalBody` prints it last: it is the one line here that says something about
-    // the *other* rows, so it reads best after you have read this one.
-    { key: 'files', label: 'Expects to touch', pills: true },
-  ];
+  const propBulkLabel = (key, beads, side) =>
+    window.beadcause.proposal.bulkLabel(key, beads, side, state.armed === `${key}|prop-${side}`);
 
   /**
-   * Everything that would end up on the bead, each under a quiet label.
-   *
-   * Prose goes through the markdown renderer rather than out as escaped text: an
-   * advocate writes a description as a bulleted list, and a list rendered as one
-   * run-on line is a list you skip — which is the whole failure this row had.
-   */
-  function propFieldsHtml(b) {
-    return PROP_FIELDS.map((f) => {
-      const v = b[f.key];
-      const body = f.pills
-        ? (Array.isArray(v) ? v : [])
-            .map((x) => `<span class="pill${f.pills === 'id' ? ' id' : ''}">${esc(x)}</span>`)
-            .join('')
-        : v
-        ? `<div class="md">${renderMarkdown(v, FROM_BD)}</div>`
-        : '';
-      if (!body) return '';
-      const label = f.label ? `<span class="prop-label">${f.label}</span>` : '';
-      return `<div class="prop-field${f.pills ? ' pills' : ''}">${label}${body}</div>`;
-    }).join('');
-  }
-
-  /**
-   * "This already exists" — outside the fold, deliberately.
-   *
-   * Every other field on a row lives in `.prop-body`, which a long row starts folded
-   * (see below). This one cannot: it is the only thing on the card that changes what
-   * ✓ *means*, and a warning you have to tap "Show the rest" to find is a warning that
-   * arrives after the decision. It is stamped on by lib/dupe.js when the proposal is
-   * written, and it rides through the stored bead in the `beadproposal` block, so what
-   * is drawn here is what the server itself would find.
-   */
-  function dupeHtml(b) {
-    const d = b.duplicate;
-    if (!d?.id) return '';
-    const where = d.status === 'proposed' ? 'already proposed in' : `already ${esc(d.status)} as`;
-    return `<div class="prop-dupe">
-      <span class="prop-dupe-flag">Possible duplicate</span>
-      <span>${where} <span class="pill id">${esc(d.id)}</span>${d.title ? ` — ${esc(d.title)}` : ''}</span>
-    </div>`;
-  }
-
-  // A phone column fits about this many characters, and this many lines of one row
-  // is as much as can sit above the next proposal and still leave it scannable.
-  const PHONE_COLS = 42;
-  const COLLAPSE_AT = 9;
-
-  /**
-   * Roughly how tall a row's prose will be. Cheap on purpose: the alternative is
-   * measuring after layout, and this only has to be right about "is this a wall of
-   * text", which counting wrapped lines settles well enough.
-   */
-  function propLines(b) {
-    const prose = [b.description, b.acceptance, b.design, b.notes, b.rationale].filter(Boolean).join('\n');
-    if (!prose) return 0;
-    return prose.split('\n').reduce((n, line) => n + Math.max(1, Math.ceil(line.length / PHONE_COLS)), 0);
-  }
-
-  /**
-   * An advocate asking to create beads.
-   *
-   * Every other question in the inbox is one decision, which is why the rest of this
-   * file can treat an option tap as the answer. A proposal is *n* decisions that
-   * happen to arrive together, and flattening them into "all or nothing" is what
-   * makes an agent's suggestions annoying: one good bead in three is a perfectly
-   * ordinary outcome, and having to decline all three to avoid the two bad ones
-   * teaches you to decline everything.
-   *
-   * So: approve and decline per row, and — in the card's top bar rather than under
-   * the rows, see propBulkHtml — the two bulk controls that say exactly how many
-   * each of them will file. It paints in place, see paintPicks, because a re-render
-   * would rebuild the card under a decision you are halfway through making.
-   */
-  function proposalHtml(q) {
-    const beads = q.proposal?.beads || [];
-    if (!beads.length) return '';
-    const picks = picksFor(q.key);
-
-    const rows = beads
-      .map((raw, i) => {
-        const n = i + 1;
-        // Everything below reads the *adjusted* bead, so a row you have rewritten
-        // looks rewritten — there is never a moment where the card shows one title
-        // and pressing create sends another.
-        const b = beadAt(q.key, raw, n);
-        const choice = picks.get(n) || '';
-        const editing = state.propEdit.has(`${q.key}|${n}`);
-        const adjusted = isAdjusted(q.key, n);
-        // Long rows start folded so three proposals still fit on the screen you are
-        // deciding from. A fold and not the old three-line clamp, because a clamp
-        // cuts markdown mid-list-item and leaves no way at all to see the rest.
-        // A row being adjusted is never folded: you cannot edit what is hidden.
-        const long = propLines(b) > COLLAPSE_AT && !editing;
-        const collapsed = long && !state.propOpen.has(`${q.key}|${n}`);
-        return `<div class="prop-row ${choice ? `pick-${choice}` : ''}${collapsed ? ' is-collapsed' : ''}${
-          editing ? ' is-editing' : ''
-        }" data-idx="${n}" data-key="${esc(q.key)}">
-          <div class="prop-main">
-            <div class="prop-head"><span class="prop-n">${n}</span><span class="prop-title">${esc(b.title)}</span>${
-          adjusted ? '<span class="pill adjusted">adjusted</span>' : ''
-        }</div>
-            ${dupeHtml(b)}
-            ${
-              editing
-                ? propEditHtml(q.key, raw, n)
-                : `<div class="prop-body">
-              <div class="prop-meta">
-                <span class="pill">${esc(b.type)}</span><span class="pill p${b.priority}">P${b.priority}</span>${
-                  // How hard the agent thinks it is, which is what picks the model a
-                  // session on it will run (bc-nc6o). Beside the type and the priority
-                  // because it is the same kind of fact, and shown only when it was
-                  // named: an untiered bead is the ordinary case for everything that
-                  // predates this, and a pill saying "unrated" on most of the tracker
-                  // is a pill nobody reads.
-                  b.complexity ? `<span class="pill">${esc(b.complexity)} complexity</span>` : ''
-                }
-              </div>
-              ${propFieldsHtml(b)}
-              ${
-                b.rationale
-                  ? `<div class="prop-why"><span class="prop-label">Why</span><div class="md">${renderMarkdown(
-                      b.rationale,
-                      FROM_BD
-                    )}</div></div>`
-                  : ''
-              }
-            </div>`
-            }
-            ${
-              long
-                ? `<button class="prop-more" data-act="prop-more" data-key="${esc(q.key)}" data-idx="${n}"
-                    aria-expanded="${!collapsed}">${collapsed ? 'Show the rest' : 'Show less'}</button>`
-                : ''
-            }
-          </div>
-          <div class="prop-choice">
-            <button class="prop-btn yes" data-act="pick" data-key="${esc(q.key)}" data-idx="${n}" data-pick="yes"
-              aria-label="Approve bead ${n}" aria-pressed="${choice === 'yes'}">✓</button>
-            <button class="prop-btn edit${editing ? ' on' : ''}" data-act="prop-edit" data-key="${esc(q.key)}" data-idx="${n}"
-              aria-label="Adjust bead ${n}" aria-pressed="${editing}">✎</button>
-            <button class="prop-btn no" data-act="pick" data-key="${esc(q.key)}" data-idx="${n}" data-pick="no"
-              aria-label="Decline bead ${n}" aria-pressed="${choice === 'no'}">✕</button>
-          </div>
-        </div>`;
-      })
-      .join('');
-
-    return `<div class="proposal" data-key="${esc(q.key)}">
-      <div class="section-label">${beads.length} bead${beads.length === 1 ? '' : 's'} proposed <span>nothing is created until you say so</span></div>
-      ${rows}
-    </div>`;
-  }
-
-  /**
-   * The two bulk controls, in the card's top bar — see cardTopHtml.
-   *
-   * There used to be three buttons at the foot of a proposal: Approve all and
-   * Decline all, which only *marked* every row, and a primary underneath that did
-   * the filing. Two of the three were a way of setting up the third, which is a lot
-   * of screen for one decision. Now the two are the decision: each arms on the first
-   * tap and files on the second, and `state.armed` is the same mechanism every other
-   * two-tap answer in this app uses.
-   *
-   * What each one does, and why they are not symmetrical:
-   *
-   * - **Approve** files everything you have not explicitly declined. That is what
-   *   keeps "2 of 3" reachable with the third button gone — pick ✕ on the one you
-   *   don't want, then approve — and it is why undecided rows are counted rather
-   *   than folded into the declines.
-   * - **Decline** files nothing at all, whatever the rows say. It is the full stop,
-   *   and a full stop that quietly created two beads would be the worst button in
-   *   the app.
-   *
-   * Both name their count before the second tap: the exact number this tap will
-   * create is the one fact the old primary carried that had to survive the move.
-   */
-  function propBulkHtml(q) {
-    const beads = q.proposal?.beads || [];
-    if (!beads.length) return '';
-    const undecided = undecidedCount(q.key, beads);
-    const canApprove = keepIndices(q.key, beads).length > 0;
-    return `<div class="prop-bulk">
-      <span class="prop-count">${undecided ? `${undecided} undecided` : ''}</span>
-      <button class="top-btn bulk approve${state.armed === `${q.key}|prop-yes` ? ' confirm' : ''}"
-        data-act="prop-bulk" data-key="${esc(q.key)}" data-pick="yes" ${canApprove ? '' : 'disabled'}
-        >${propBulkLabel(q.key, beads, 'yes')}</button>
-      <button class="top-btn bulk decline${state.armed === `${q.key}|prop-no` ? ' confirm' : ''}"
-        data-act="prop-bulk" data-key="${esc(q.key)}" data-pick="no"
-        >${propBulkLabel(q.key, beads, 'no')}</button>
-    </div>`;
-  }
-
-  /** Rows an approve would file: everything not explicitly declined. */
-  const keepIndices = (key, beads) =>
-    beads.map((_, i) => i + 1).filter((n) => picksFor(key).get(n) !== 'no');
-
-  /**
-   * Rows you have not answered either way. Counted, not silently treated as a no:
-   * "3 undecided" is the difference between a considered decline and a half-read card.
-   */
-  const undecidedCount = (key, beads) =>
-    beads.length - [...picksFor(key).values()].filter((v) => v === 'yes' || v === 'no').length;
-
-  /** What a bulk button will do, said as a count, armed or not. */
-  function propBulkLabel(key, beads, side) {
-    const total = beads.length;
-    const n = side === 'yes' ? keepIndices(key, beads).length : 0;
-    const armed = state.armed === `${key}|prop-${side}`;
-    const what = n === 0 ? 'create nothing' : n === total ? `create all ${total}` : `create ${n} of ${total}`;
-    if (armed) return `Tap again · ${what}`;
-    if (side === 'no') return total === 1 ? 'Decline it' : `Decline all ${total}`;
-    if (n === total) return total === 1 ? 'Approve it' : `Approve all ${total}`;
-    return `Approve ${n} of ${total}`;
-  }
-
-  /**
-   * Repaint one proposal in place: row states, the undecided count and the two bulk
-   * buttons. Deliberately not a render() — that rebuilds every card in the list, and
-   * this runs on every tap.
-   *
-   * Framed on the *card* rather than on `.proposal`, because the bulk controls live
-   * in the card's top bar now and the rows live in the block below it. One query for
-   * the card is what keeps the count and the buttons in step with the ✓/✕ that moved
-   * them.
+   * Repaint one proposal in place. Deliberately not a render() — that rebuilds every
+   * card in the list, and this runs on every tap.
    */
   function paintPicks(key) {
-    // Held while the screen is — this is one of the four in-place painters an arm timer
-    // can reach six seconds after the mode began. See `isFrozen`.
+    // Held while the screen is — this is one of the in-place painters an arm timer can
+    // reach six seconds after the mode began. See `isFrozen`. The guard stays here as
+    // well as in the mount's `gate`: edit mode is this page's idea, and the Advocates
+    // page and the Mirror have no such thing to freeze.
     if (isFrozen()) return;
-    const q = byKey(key);
-    const beads = q?.proposal?.beads || [];
-    const card = listEl.querySelector(`.card[data-key="${CSS.escape(key)}"]`);
-    const block = card?.querySelector('.proposal');
-    if (!card || !block || !beads.length) return;
-    const picks = picksFor(key);
-
-    for (const row of block.querySelectorAll('.prop-row')) {
-      const n = Number(row.dataset.idx);
-      const choice = picks.get(n) || '';
-      row.classList.toggle('pick-yes', choice === 'yes');
-      row.classList.toggle('pick-no', choice === 'no');
-      for (const btn of row.querySelectorAll('.prop-btn')) {
-        btn.setAttribute('aria-pressed', String(btn.dataset.pick === choice));
-      }
-    }
-
-    const undecided = undecidedCount(key, beads);
-    const count = card.querySelector('.prop-count');
-    if (count) count.textContent = undecided ? `${undecided} undecided` : '';
-    for (const btn of card.querySelectorAll('.prop-bulk .bulk')) {
-      const side = btn.dataset.pick;
-      btn.textContent = propBulkLabel(key, beads, side);
-      btn.classList.toggle('confirm', state.armed === `${key}|prop-${side}`);
-      // Only the approve side can run out of things to do: decline is always
-      // available, because "create nothing" is always an answer.
-      if (side === 'yes') btn.disabled = keepIndices(key, beads).length === 0;
-    }
+    props.repaint(key);
   }
+
+  // A phone column fits about this many characters, and this many lines of one summary
+  // is as much as can sit above the next card and still leave it scannable. The same two
+  // numbers public/proposal.js folds a proposal row on, kept as this file's own copy:
+  // the two folds answer to different cards, and if they drift that is a decision.
+  const PHONE_COLS = 42;
+  const COLLAPSE_AT = 9;
 
   /* --------------------------------------------------------------- delivery */
 
@@ -1954,7 +1704,10 @@
 
     const prose = [d.summary, d.tests, d.risk, d.left].filter(Boolean).join('\n');
     const long = prose.split('\n').reduce((n, l) => n + Math.max(1, Math.ceil(l.length / PHONE_COLS)), 0) > COLLAPSE_AT;
-    const collapsed = long && !state.propOpen.has(`${q.key}|pr`);
+    // The delivery summary folds with the proposal row's button, so it folds with the
+    // proposal row's open-state set too — public/proposal.js owns both (bc-yjekg.5).
+    // `pr` rather than a row number because there is one summary and it is the card's.
+    const collapsed = long && !window.beadcause.proposal.isUnfolded(q.key, 'pr');
     return `<div class="pr-summary${collapsed ? ' is-collapsed' : ''}">${parts.join('')}</div>${
       long
         ? `<button class="prop-more" data-act="prop-more" data-key="${esc(q.key)}" data-idx="pr"
@@ -3788,6 +3541,198 @@
       ? `<a class="pill muted" href="/endorse?bead=${encodeURIComponent(q.key)}">held for endorsement</a>`
       : '';
 
+  /* ------------------------------------------------------ triaging the Questions list
+
+     bc-iaju1.5. Three controls over one pill, and the reason they arrived together is
+     that they are the same complaint: 58 questions with a median age of 26 days were
+     sharing a screen with 90 beads held for endorsement whose median age was 36, and the
+     only way through either was one card at a time.
+
+     The split itself is public/inboxfilter.js's — `Asked` and `Held` are that pill's own
+     sub-filter and this file never reads `held` to decide what is in the list. What is
+     here is the three things a filter cannot do: say how many are on the other side of
+     it and where they are decided, put the list in age order, and act on more than one
+     card at once. */
+
+  /** Is the Questions pill the one that is lit? The gate on all three controls below. */
+  const onQuestions = () => (window.beadcause?.inboxFilter?.current?.() ?? null) === 'question';
+
+  /** And is it showing the held half? `Held` chosen — never the `asked` default. */
+  const onHeld = () => (window.beadcause?.inboxFilter?.selectedSub?.('question') || []).includes('held');
+
+  /**
+   * The bead list in the order the chips ask for.
+   *
+   * A copy, always, and never a sort in place: `visible` is filtered out of
+   * `state.questions`, whose order is the server's and is what `adopt` reconciles the
+   * next payload against. Sorting the array behind it would be this render rewriting the
+   * page's own state as a side effect of drawing it.
+   *
+   * **Only on Questions**, because that is the pill the control is offered on. The order
+   * switch is not drawn anywhere else (`filters` in public/inboxfilter.js names `qsort`
+   * under `question` alone), and a narrowing that went on applying with its control off
+   * the row is exactly what `said()` exists to prevent — the difference being that a
+   * *sort* has no honest way to confess itself in a note, so it simply does not persist
+   * past the pill.
+   *
+   * `createdAt` with `since` behind it: a human-side question always has the first, and
+   * an agent-side held bead carries both (`agentBeads` in lib/server.js). An empty one
+   * sorts last rather than first — a row whose age nobody knows is not the oldest thing
+   * on the screen, and putting it at the top of a list you are working oldest-first is
+   * the one place a missing field could quietly become a priority.
+   */
+  function byChosenOrder(rows) {
+    if (!sortOldest() || !onQuestions()) return rows;
+    const at = (q) => String(q.createdAt || q.since || '');
+    return [...rows].sort((a, b) => {
+      const x = at(a);
+      const y = at(b);
+      if (!x || !y) return (x ? 0 : 1) - (y ? 0 : 1);
+      return x.localeCompare(y);
+    });
+  }
+
+  /**
+   * The one row at the top of `Held`, and the only thing the inbox says about bulk.
+   *
+   * **It does not endorse anything.** /endorse already has the group-select, the Endorse
+   * all with its arm and its count of the repos it covers, and the ⚑ on a bead somebody
+   * has an open question about (public/endorse.js) — every one of which is a decision
+   * somebody made after getting it wrong once. A second copy of that on a card whose
+   * whole premise is that it is read-only would be the two-implementations problem with
+   * the highest stakes in the app: the control that queues work.
+   *
+   * So what this is, is the count and the door. The count because the pill's badge is
+   * about the list you are looking at and this is a claim about the one you are not, and
+   * the door because until now the only way to /endorse from here was the `held for
+   * endorsement` pill on a single card — which is a way through for one bead at a time,
+   * on a queue whose problem is that it is ninety.
+   *
+   * Drawn only on the held half: under `Asked` it would be a line about a screen you
+   * are not on, over cards it is not about.
+   */
+  const heldRowHtml = (n) =>
+    onQuestions() && onHeld() && n
+      ? `<a class="triage-held" href="/endorse">
+      <span class="triage-held-n">${n} held</span>
+      <span class="triage-held-go">review in bulk →</span>
+    </a>`
+      : '';
+
+  /**
+   * Can this row be ticked for a bulk set-aside?
+   *
+   * **Exactly the rows that offer a single one today**, and that is the whole rule
+   * rather than a convenience. Setting a card aside goes through `/api/dismiss`, which
+   * writes beadcause's own record and a comment on the thread and closes nothing — the
+   * button for it is `dismissHtml`, drawn by `freeformHtml`, drawn by the plain question
+   * path of `cardHtml`. An agent-held bead is drawn by `agentCardHtml`, which offers no
+   * such button because the decision on a held bead is an endorsement and belongs on
+   * /endorse; a JIRA ticket is drawn by `jiraRowHtml` and has no bead of its own to set
+   * aside at all. Ticking either would be a bulk control reaching somewhere no single tap
+   * can, which is the one direction a bulk control must never grow.
+   *
+   * The consequence is worth stating because it looks like a gap and is not: under
+   * `Held` nothing is tickable, so the bar never appears there — the row above the list
+   * is the way to act on that half, and it leads to the page built for it.
+   */
+  const tickable = (q) =>
+    onQuestions() && Boolean(q) && !q.agent && !q.session && !q.pr && !q.jira && !q.delivery;
+
+  /** The ticked rows, as rows, in the order the list is drawing them. */
+  const tickedRows = () => [...state.ticked].map((key) => byKey(key)).filter(Boolean);
+
+  /**
+   * Drop a tick whose card is no longer on the screen.
+   *
+   * Run from `render`, off `visible`, so it sees exactly what is about to be drawn: a
+   * poll that answered a question elsewhere, a pill tap that changed the list, a space
+   * picker that narrowed it. public/endorse.js does the same thing on every payload, and
+   * the failure it prevents is the same one — a count on a bar that no card on screen
+   * corresponds to, and a request aimed at beads you can no longer see.
+   */
+  function pruneTicks(visible) {
+    if (!state.ticked.size) return;
+    const live = new Set(visible.filter(tickable).map((q) => q.key));
+    for (const key of [...state.ticked]) if (!live.has(key)) state.ticked.delete(key);
+    if (!state.ticked.size && state.armed === TICK_ARM) disarm();
+  }
+
+  /** The arm token for the bulk set-aside. One string, because two would drift. */
+  const TICK_ARM = '@ticked|aside';
+
+  /**
+   * What you can do to the cards you ticked.
+   *
+   * The same bar public/endorse.js draws, in the same classes, deliberately: `.eq-bar`
+   * is sticky under the top of the scroller, holds a count, the acts and a Clear, and
+   * carries its outcome underneath. A second bar of our own would have looked like one
+   * control that behaves differently on two screens, which is the complaint
+   * public/filtermenu.js's header makes about the filter panel.
+   *
+   * **It arms, where the endorsement bar does not**, and the difference is the act
+   * rather than the count. Endorsing is idempotent and the worst a stray tap does is
+   * queue work you meant to queue eventually; setting a card aside takes it off the
+   * screen until something else moves, which is precisely the tap a pocket makes. The
+   * single set-aside on a card has armed for exactly that reason since it existed
+   * (`dismiss` in the click handler), and a bulk one that did not would be the same act
+   * made easier and less deliberate at once.
+   *
+   * Absent when nothing is ticked, with one exception: the outcome of the last run
+   * outlives the selection it emptied, because by then every card it names has gone and
+   * the line is the only evidence the tap worked.
+   */
+  function tickBarHtml() {
+    if (!onQuestions()) return '';
+    const n = state.ticked.size;
+    const said = state.tickSaid
+      ? `<div class="board-said${state.tickSaid.bad ? ' bad' : ''}">${esc(state.tickSaid.text)}</div>`
+      : '';
+    if (!n) return said ? `<section class="eq-bar">${said}</section>` : '';
+    const armed = state.armed === TICK_ARM;
+    return `<section class="eq-bar">
+      <div class="eq-bar-row">
+        <span class="eq-bar-n">${n} ${n === 1 ? 'card' : 'cards'} selected</span>
+        <button class="board-btn${armed ? ' armed' : ''}" data-act="tick-aside"${
+          state.tickBusy ? ' disabled' : ''
+        }>${armed ? `Set aside ${n} — sure?` : `Set aside ${n}`}</button>
+        <button class="board-btn link" data-act="tick-clear">Clear</button>
+      </div>
+      ${
+        armed
+          ? `<p class="board-hint">Nothing is closed and nothing is answered. Each one leaves
+             the inbox and comes back on its own — when what it is waiting on clears, or when
+             somebody comments. Anything you have typed into a card is left where it is.</p>`
+          : ''
+      }
+      ${said}
+    </section>`;
+  }
+
+  /**
+   * The tick itself, hard left on a shut card.
+   *
+   * public/endorse.js's `.eq-pick`: a 34×44 button rather than a checkbox, because a
+   * 20px box beside a full-width tap target is the control you miss every time on a
+   * phone, and because a `<button>` cannot legally live inside another one — which here
+   * is not a hypothetical, the shut card *is* a button-like tap target (`shutCardAct`)
+   * and the title inside it really is a `<button>`.
+   *
+   * It carries its own `data-act`, which is the whole of how it escapes the card's own
+   * tap: the delegated handler resolves `closest('[data-act]')`, so the nearer control
+   * wins and ticking a card cannot also open it.
+   *
+   * Only while shut. An open card is a full-screen sheet with its own set-aside at the
+   * foot of the answer box; a tick up in its corner would be a second, quieter way to do
+   * the same thing from a screen that is not a list.
+   */
+  const tickHtml = (q) => {
+    const on = state.ticked.has(q.key);
+    return `<button class="eq-pick" type="button" data-act="tick" data-key="${esc(q.key)}"
+      aria-pressed="${on}" aria-label="Select ${esc(q.question || q.title || q.id)}"><span
+      aria-hidden="true">${on ? '✓' : ''}</span></button>`;
+  };
+
   /**
    * A bead nobody is asking you about.
    *
@@ -3906,6 +3851,26 @@
 
     for (const img of d?.images || []) {
       parts.push(`<img src="${esc(assetUrl(img))}" alt="" loading="lazy">`);
+    }
+
+    /* Clips to listen to (bc-xl7n.167). A listening decision had no exhibit: /api/asset
+     * refused the file and the card had nothing to play it in, so the clips went to a
+     * shared drive and a link. One native player per clip, and `preload="none"` on purpose
+     * — six clips on a phone would otherwise fetch six files before anybody pressed play,
+     * on a card opened for a decision that may not be about any of them. `controls` is the
+     * whole interface: the browser's own player is the one that seeks, scrubs and sits
+     * in the lock-screen controls. */
+    if (d?.audio?.length) {
+      parts.push(
+        `<div class="clips">${d.audio
+          .map(
+            (clip) =>
+              `<figure class="clip"><figcaption>${esc(clip.label)}</figcaption><audio controls preload="none" src="${esc(
+                assetUrl(clip.path)
+              )}"></audio></figure>`
+          )
+          .join('')}</div>`
+      );
     }
 
     if (d?.docs?.length) {
@@ -5291,6 +5256,64 @@
     clear: () => clearBeads(),
   };
 
+  /** Is the Questions list in oldest-first order right now? One reading, two callers. */
+  const sortOldest = () => state.qsort === 'oldest';
+
+  /**
+   * Which order the Questions list is in — the one group on this row that is not a filter.
+   *
+   * bc-iaju1.5, and it is on the filter pill row rather than beside the list for the
+   * reason every other control on this page is: the alternative is a second strip of
+   * chrome above a phone screen, which is the two-rows-of-chrome problem bc-khoe.26 took
+   * apart. It is a page group like the search — public/inboxfilter.js's `KINDS` names it
+   * under `question` and nowhere else, so it is drawn on that pill alone, and `adopt`
+   * would warn out loud if no pill named it at all.
+   *
+   * **It says nothing on its pill while it is in the default order** (`narrowing`). The
+   * pill row's rule is that a control announces itself only while it is doing something,
+   * and `Order: Most urgent` over a list that is in the order the server sent it is a
+   * filter pill reporting a filter that is not filtering — the same noise `Bead status`
+   * refuses to make. Flipped, it is `Order: Oldest first`, which is a thing you want said
+   * out loud precisely because the top of the list stops being the most urgent thing.
+   *
+   * One of the two chips is always lit, which is why this needs a `narrowing` of its own:
+   * without one, filtermenu.js reads a selection as a narrowing and the pill would never
+   * go quiet.
+   */
+  const sortGroup = {
+    id: 'qsort',
+    legend: 'Order',
+    // A single choice: the list is in one order. On a touchscreen that also closes the
+    // panel on the tap, which is what you want — the thing it just changed is underneath.
+    multi: false,
+    options: () => [
+      {
+        id: 'urgent',
+        label: 'Most urgent',
+        note: 'Priority first, then age — the order the tracker sent.',
+        on: !sortOldest(),
+      },
+      {
+        id: 'oldest',
+        label: 'Oldest first',
+        note: 'The longest-waiting question at the top, whatever its priority.',
+        on: sortOldest(),
+      },
+    ],
+    pick: (id) => {
+      const next = id === 'oldest' ? 'oldest' : 'urgent';
+      if (next === state.qsort) return;
+      state.qsort = next;
+      try {
+        localStorage.setItem('beadcause.qsort', next);
+      } catch {
+        /* private mode: the order still changes, it just does not survive a reload */
+      }
+      render(true);
+    },
+    narrowing: () => sortOldest(),
+  };
+
   /**
    * Which kinds this scope can contain at all.
    *
@@ -5365,19 +5388,38 @@
    */
   function surveyKinds(rows, board = null) {
     const f = window.beadcause?.inboxFilter;
-    if (!f) return;
+    if (!f) return null;
     const counts = {};
     /** The level below: how many pull requests are on each rung of the ladder. */
     const status = {};
+    /**
+     * And the Questions pill's own two halves — bc-iaju1.5.
+     *
+     * Seeded at zero rather than filled in as rows arrive, because both chips are drawn
+     * on every paint and a chip with no number at all is one that could never grow one
+     * in place. `Held 0` is also the answer to the question the chip asks, which is the
+     * same reason `Unclaimed 0` is drawn rather than removed.
+     */
+    const asked = { asked: 0, held: 0 };
     for (const q of rows) {
       const kind = f.kindOf(q);
       if (!kind) continue;
       if (q.pr?.stage) status[q.pr.stage] = (status[q.pr.stage] || 0) + 1;
+      // Counted *outside* `inSub`, like the PR rungs above and for the same reason: what
+      // picking `Held` would leave you with is every held row, not the ones the current
+      // default already allows through. The `kind` test is what keeps a live bead out of
+      // it — `held` is false on those anyway, but `All Beads` is not this pill's list and
+      // a count taken over the wrong pill's rows is the lie this whole seam avoids.
+      if (kind === 'question') asked[q.held ? 'held' : 'asked'] += 1;
       // Counted *through* the row's own sub-filter, so `PRs 2` means the two you would
       // get and not the thirty-five that exist. Every kind without one answers true.
       if (f.inSub?.(q) ?? true) counts[kind] = (counts[kind] || 0) + 1;
     }
-    f.survey({ kinds: kindsForScope(), counts, sub: { status }, board });
+    f.survey({ kinds: kindsForScope(), counts, sub: { status, asked }, board });
+    // Handed back as well as pushed in, because `render` needs the held number for the
+    // one row at the top of Held that leads to /endorse — and a second count of the same
+    // rows, in a second loop, is the drift this function exists to prevent.
+    return { counts, asked };
   }
 
   /** Chips and the one line beside them, repainted in place. Never rebuilds either. */
@@ -8031,7 +8073,7 @@
     // now, so what that pill would leave you with is the cards and nothing else, and
     // there is no state in which the row sum is the honest answer for it. Home takes the
     // sum, and takes it from `survey`, which derives it rather than being handed it.
-    surveyKinds(forPills, cards);
+    const surveyed = surveyKinds(forPills, cards);
     /*
       An open card outranks the kind filter, and since bc-fwp2c it has to.
 
@@ -8048,6 +8090,11 @@
       opened it from, whatever the pill above it says its list is made of.
     */
     const visible = inBoard.filter((q) => state.open.has(q.key) || inKind(q));
+    // A tick whose card has left the list goes with it — bc-iaju1.5. public/endorse.js
+    // does the same on every payload, and for the same reason: a selection that outlived
+    // its row would be a bulk button counting beads that are not on the screen, and the
+    // request it made would land on whichever of them the server still recognised.
+    pruneTicks(visible);
 
     // The other channel, always first and never filtered. It is rare enough that
     // putting it at the top costs nothing on the days there is nothing in it, and on
@@ -8090,6 +8137,20 @@
     // read" first is the order those two sentences make sense in.
     const diverged = syncTroubleHtml();
     if (diverged) chunks.push({ key: '@synctrouble', html: diverged });
+
+    // The two rows bc-iaju1.5 puts over the Questions list, and they are **outside** the
+    // branch below on purpose. The bar carries the outcome of the last bulk set-aside,
+    // and the case where that is the only evidence the tap worked is precisely the one
+    // where every card it named has gone — setting aside the last two leaves a list with
+    // nothing in it, and a line that went with them would make "did that go through?" a
+    // question you answer on a laptop. Both are no-ops on every other view; see
+    // `tickBarHtml` and `heldRowHtml`.
+    if (listHere) {
+      const bar = tickBarHtml();
+      if (bar) chunks.push({ key: '@ticked', html: bar });
+      const heldRow = heldRowHtml(surveyed?.asked?.held || 0);
+      if (heldRow) chunks.push({ key: '@held', html: heldRow });
+    }
 
     // `rows`, not `state.questions`: with no beads at all but a pull request open or a
     // conversation on the go, the list is not empty — and the first-run copy `emptyHtml`
@@ -8141,7 +8202,7 @@
       // either and no pane key can, so a reconcile cannot mistake one for another. Which
       // is what lets a row be left alone on every poll where its own HTML did not change
       // — the spark starting or a count moving is the whole of what rebuilds a chat row.
-      const beads = visible.filter((q) => !q.pr && !q.session && !q.jira);
+      const beads = byChosenOrder(visible.filter((q) => !q.pr && !q.session && !q.jira));
       const prs = visible
         .filter((q) => q.pr)
         .sort(
@@ -8742,6 +8803,107 @@
       }
     };
     submits.add(key, job);
+  }
+
+  /**
+   * Set aside every ticked card — bc-iaju1.5. One request per bead, in order, reported
+   * as it goes.
+   *
+   * **Through `/api/dismiss`, the same route one card's `Set aside` uses**, and there is
+   * no bulk route on the server. That is deliberate rather than a shortcut: a dismissal
+   * writes beadcause's own record, puts anything you typed on the thread as a comment,
+   * emits the `answered` event that drops the notification on every other device and
+   * settles the Slack message (see the route in lib/server.js). A second, plural
+   * implementation of all that would be five things to keep in step instead of one, and
+   * `bd` is a single Dolt writer anyway, so the round trips were never going to be
+   * parallel on the wire.
+   *
+   * **No reason is sent.** The route takes whatever is in the answer box as a comment on
+   * the thread, and there is no box here — the same argument public/endorse.js's group
+   * revoke makes about a typed reason: one sentence about eleven beads is a sentence
+   * about none of them. A card that needs a word gets it by being opened.
+   *
+   * **Deliberately not `submit()`.** That one is the single-card path and carries the
+   * whole optimistic dance with it — a flight animation off the card's geometry, a toast
+   * per bead, a red card and a caret restored into its box on refusal. Eleven of those
+   * at once is eleven animations and eleven toasts over a list that is reflowing
+   * underneath them. What is worth keeping is the part that makes a tap feel finished,
+   * and that is here: the row leaves the list before the write, and comes back with the
+   * reason on it if the write is refused.
+   *
+   * **Serial, and it reports as it goes**, because the honest thing to say halfway
+   * through eleven `bd` writes is how far it has got. `state.tickSaid` is repainted
+   * after each one; a failure does not stop the run, because nine that would have
+   * landed should land.
+   */
+  async function asideTicked() {
+    const rows = tickedRows();
+    if (!rows.length || state.tickBusy) return;
+    state.tickBusy = true;
+    const total = rows.length;
+    let done = 0;
+    const bad = [];
+    const say = (text, isBad = false) => {
+      state.tickSaid = { text, bad: isBad };
+      render(true);
+    };
+    say(`Setting aside 0 of ${total}…`);
+
+    for (const q of rows) {
+      const key = q.key;
+      // Where it was in each channel, so a refused write puts it back where it was
+      // rather than at the end of a list you are part-way down — `submit`'s own rule,
+      // and the indexes have to be read now rather than before the loop, because every
+      // bead that has already gone has moved the ones under it.
+      const at = state.questions.indexOf(q);
+      const rAt = (state.requests || []).indexOf(q);
+      // The suppress set, for the reason `submit` uses it: a poll assembled before this
+      // write landed would otherwise merge the row straight back in.
+      state.inFlight.add(key);
+      q.failed = null;
+      if (at >= 0) state.questions.splice(at, 1);
+      if (rAt >= 0) state.requests.splice(rAt, 1);
+      state.ticked.delete(key);
+      state.open.delete(key);
+      say(`Setting aside ${done} of ${total}…`);
+      try {
+        await api('/api/dismiss', {
+          method: 'POST',
+          body: JSON.stringify({ workspace: q.workspace, id: q.id, reason: '' }),
+        });
+        done += 1;
+        // Inside the Android shell, drop this card's notification now — otherwise it
+        // sits in the shade with buttons that answer a card nobody is looking at.
+        window.BeadcauseNative?.answered?.(key);
+      } catch (err) {
+        bad.push({ id: q.id, error: err.message || 'the write did not go through' });
+        // Back where it was, carrying the reason. The red card is the same one a single
+        // refused set-aside leaves behind (`failedNoteHtml`), which matters more here
+        // than it does there: the summary line names only the first failure, so the rows
+        // are what say *which*.
+        q.failed = { reason: err.message || 'the write did not go through', from: 'dismiss', landed: null, unsure: false };
+        if (at >= 0 && !state.questions.includes(q)) {
+          state.questions.splice(Math.min(at, state.questions.length), 0, q);
+        }
+        if (rAt >= 0 && !(state.requests || []).includes(q)) {
+          state.requests.splice(Math.min(rAt, state.requests.length), 0, q);
+        }
+        // Still ticked, so pressing the button again is the right thing to do rather
+        // than a guess about which nine of the eleven went through — public/endorse.js's
+        // rule, and the reason `pruneTicks` keys off what is drawn.
+        state.ticked.add(key);
+      } finally {
+        state.inFlight.delete(key);
+      }
+    }
+
+    state.tickBusy = false;
+    // Never a flat "done". What each of these cards is waiting on differs per bead and
+    // the route says so per bead, so the sentence here is the count and the first thing
+    // that did not work — the rows carry the rest.
+    if (!bad.length) say(`Set aside ${done} — each comes back when what it is waiting on clears.`);
+    else if (!done) say(`None went through. ${bad[0].id}: ${bad[0].error}`, true);
+    else say(`Set aside ${done}. ${bad.length} did not — ${bad[0].id}: ${bad[0].error}`, true);
   }
 
   /**
@@ -9836,127 +9998,21 @@
       return;
     }
 
-    // Unfolds one row, by touching that row only. Emphatically not a render(), for
-    // the same reason paintPicks exists: rebuilding the card under a decision you
-    // are halfway through making loses the decision.
-    if (act === 'prop-more') {
-      // A proposal row folds its `.prop-body`; a delivery folds its `.pr-summary`
-      // and has no row around it. Same button, same state, whichever it found.
-      const fold = btn.closest('.prop-row') || btn.previousElementSibling;
-      const token = `${key}|${btn.dataset.idx}`;
-      const open = !state.propOpen.has(token);
-      if (open) state.propOpen.add(token);
-      else state.propOpen.delete(token);
-      fold?.classList.toggle('is-collapsed', !open);
-      btn.setAttribute('aria-expanded', String(open));
-      btn.textContent = open ? 'Show less' : 'Show the rest';
-      return;
-    }
-
-    if (act === 'pick') {
-      const n = Number(btn.dataset.idx);
-      const picks = picksFor(key);
-      // Tapping the choice you already made clears it — undecided is a real state,
-      // and there has to be a way back to it.
-      if (picks.get(n) === btn.dataset.pick) picks.delete(n);
-      else picks.set(n, btn.dataset.pick);
-      disarm();
-      paintPicks(key);
-      return;
-    }
-
     /**
-     * Open or close the editor on one row.
+     * Everything a proposal card can be tapped on — the fold, ✓/✕, ✎ and the two bulk
+     * controls — belongs to public/proposal.js now, and it answers true when it took the
+     * tap (bc-yjekg.5).
      *
-     * Opening it also approves the row, and that is not a shortcut — adjusting a
-     * bead is the strongest possible statement that you want it. Making you rewrite
-     * the title and *then* find the ✓ is how a considered edit turns into an
-     * accidental decline.
-     */
-    if (act === 'prop-edit') {
-      const n = Number(btn.dataset.idx);
-      const token = `${key}|${n}`;
-      if (state.propEdit.has(token)) state.propEdit.delete(token);
-      else {
-        state.propEdit.add(token);
-        picksFor(key).set(n, 'yes');
-      }
-      disarm();
-      render(true);
-      return;
-    }
-
-    /**
-     * The bulk answer: approve what you have not declined, or decline the lot.
+     * One line here rather than the four branches that used to be: the branches were the
+     * duplication. public/monitor.js had its own near-copy of the last of them and no
+     * copy at all of the other three, which is why a proposal could be adjusted in the
+     * inbox and then filed unadjusted from the Advocates page.
      *
-     * Both sides come through here because both *are* the same answer with a
-     * different set — which is what let the third button go. See propBulkHtml for
-     * why they are not symmetrical: `yes` files everything not explicitly declined,
-     * `no` files nothing whatever the rows say.
+     * `prop-more` goes through here too although it is also the *delivery* card's fold
+     * button (`data-idx="pr"`). Same button, same class, same open-state set — see
+     * `isUnfolded` there.
      */
-    if (act === 'prop-bulk') {
-      const q = byKey(key);
-      const beads = q?.proposal?.beads || [];
-      if (!beads.length) return;
-      const side = btn.dataset.pick;
-      const approved = side === 'yes' ? keepIndices(key, beads) : [];
-      const token = `${key}|prop-${side}`;
-      if (state.armed !== token) {
-        // The same two taps every other answer needs. This one creates beads.
-        state.armed = token;
-        clearTimeout(state.armedTimer);
-        state.armedTimer = setTimeout(() => {
-          disarm();
-          paintPicks(key);
-          paintArmed();
-        }, 6000);
-        paintPicks(key);
-        paintArmed();
-        return;
-      }
-      disarm();
-      // Only the rows being created carry their edits: a bead you adjusted and then
-      // declined is a bead nobody filed, and sending the rewrite for it would put
-      // your words in the record of something that does not exist.
-      const edits = {};
-      for (const n of approved) {
-        const patch = editsFor(key).get(n);
-        if (patch && Object.keys(patch).length) edits[n] = patch;
-      }
-      const adjusted = Object.keys(edits).length;
-
-      // All four are snapshotted, not just dropped: submit() can hand the card back
-      // if bd refuses the write, and a proposal that came back with every yes/no —
-      // and every rewrite you typed — wiped would cost far more than the failure did.
-      // See `onRestore` below.
-      const hadPicks = new Map(picksFor(key));
-      const hadEdits = new Map(editsFor(key));
-      const hadOpen = [...state.propOpen].filter((t) => t.startsWith(`${key}|`));
-      const hadEditOpen = [...state.propEdit].filter((t) => t.startsWith(`${key}|`));
-
-      state.picks.delete(key);
-      state.edits.delete(key);
-      for (const t of hadOpen) state.propOpen.delete(t);
-      for (const t of hadEditOpen) state.propEdit.delete(t);
-      const declined = beads.length - approved.length;
-      const text = approved.length
-        ? `CREATE: ${approved.join(',')} — filing ${approved.length} of ${beads.length} proposed bead${
-            beads.length === 1 ? '' : 's'
-          }${declined ? `, declining ${declined}` : ''}${adjusted ? `, ${adjusted} adjusted` : ''}.`
-        : `Not now — none of the ${beads.length} proposed beads.`;
-      submit(key, text, {
-        close: true,
-        create: approved.length ? approved : null,
-        edits: adjusted ? edits : null,
-        onRestore: () => {
-          state.picks.set(key, hadPicks);
-          state.edits.set(key, hadEdits);
-          for (const t of hadOpen) state.propOpen.add(t);
-          for (const t of hadEditOpen) state.propEdit.add(t);
-        },
-      });
-      return;
-    }
+    if (props.onClick(ev)) return;
 
     /**
      * Merge it. Two taps, like every other answer that closes a bead — except this
@@ -10480,6 +10536,61 @@
     }
 
     /**
+     * Tick a card for the bulk set-aside, and the two controls on the bar above them.
+     * bc-iaju1.5.
+     *
+     * The tick is one tap and nothing else: it changes no bead and can be taken back by
+     * tapping it again, so there is nothing here to be sure about. Arming belongs to the
+     * act, which is `tick-aside` below.
+     *
+     * A ticked card that has just left the screen does not need handling here —
+     * `pruneTicks` runs on every render off what is about to be drawn, which catches the
+     * poll and the pill tap as well as this.
+     */
+    if (act === 'tick') {
+      if (state.ticked.has(key)) state.ticked.delete(key);
+      else state.ticked.add(key);
+      // A selection that changed is a count that changed, so the armed press no longer
+      // says what the next tap will do. Disarm rather than leave a button promising to
+      // set aside six when you have just ticked a seventh.
+      if (state.armed === TICK_ARM) disarm();
+      // The outcome of the *last* run is about cards that have gone; starting a new
+      // selection is the point at which it stops being the newest thing on the bar.
+      state.tickSaid = null;
+      render(true);
+      return;
+    }
+
+    if (act === 'tick-clear') {
+      state.ticked.clear();
+      state.tickSaid = null;
+      disarm();
+      render(true);
+      return;
+    }
+
+    if (act === 'tick-aside') {
+      if (state.tickBusy || !state.ticked.size) return;
+      if (state.armed !== TICK_ARM) {
+        state.armed = TICK_ARM;
+        clearTimeout(state.armedTimer);
+        // The same six seconds every other armed control on this page uses, and a
+        // repaint rather than `paintArmed`: the bar is a chunk of the list, so putting
+        // the button back cold is the reconcile replacing one chunk, not a node this
+        // handler has a handle on.
+        state.armedTimer = setTimeout(() => {
+          disarm();
+          render(true);
+        }, 6000);
+        render(true);
+        return;
+      }
+      disarm();
+      await asideTicked();
+      return;
+    }
+
+    /**
      * The offer under a refused close: keep the answer, leave the bead open.
      *
      * It goes down the ordinary comment path — same endpoint, same `human-replied`
@@ -10558,12 +10669,12 @@
   // the phone killing the tab can't eat a half-written answer.
   listEl.addEventListener('input', (ev) => {
     // A rewrite of a proposed bead, kept the same way and for the same reason.
-    // `change` as well as `input`, because the two `<select>`s only fire the former.
-    const field = ev.target.closest('[data-role="edit-field"]');
-    if (field) return recordEdit(field);
+    // `change` as well as `input`, because the `<select>`s only fire the former. Into
+    // public/proposal.js's map, which answers true when the keystroke was its own.
+    if (props.onInput(ev)) return;
 
     // A handle typed into the 📮 panel, into `state.addressDraft` on every keystroke.
-    // Not out of the DOM at the tap, for `recordEdit`'s reason: the poll rebuilds this
+    // Not out of the DOM at the tap, for the adjust editor's reason: the poll rebuilds this
     // card every 25 seconds and a value living only in the input is lost by whichever
     // one lands first. The button under it enables itself off the same state, so it is
     // repainted here rather than left for the next render — a render() on a keystroke
@@ -10602,72 +10713,15 @@
   });
 
   listEl.addEventListener('change', (ev) => {
-    const field = ev.target.closest('[data-role="edit-field"]');
-    if (field) recordEdit(field);
+    props.onInput(ev);
   });
 
-  /**
-   * One field of one adjusted bead, into `state.edits`.
-   *
-   * A value equal to what the agent proposed is *removed* rather than stored, so
-   * typing a word and deleting it again leaves the row un-adjusted — the "adjusted"
-   * flag has to mean something, and a row that carries it because of a keystroke
-   * that was undone is a row that lies.
-   */
-  function recordEdit(el) {
-    const key = el.dataset.key;
-    const n = Number(el.dataset.idx);
-    const f = el.dataset.field;
-    const q = byKey(key);
-    const original = q?.proposal?.beads?.[n - 1];
-    if (!original) return;
-
-    const value = f === 'priority' ? Number(el.value) : el.value;
-    const patch = editsFor(key).get(n) || {};
-    if (value === original[f] || (typeof value === 'string' && value.trim() === String(original[f] ?? '').trim())) {
-      delete patch[f];
-    } else {
-      patch[f] = value;
-    }
-    if (Object.keys(patch).length) editsFor(key).set(n, patch);
-    else editsFor(key).delete(n);
-    paintAdjusted(key, n);
-  }
-
-  /**
-   * The heading over an open editor, repainted in place as you type.
-   *
-   * The row keeps its title above the fields, and while you are rewriting that title
-   * the two disagree — so the heading has to follow. In place rather than through
-   * render(), for the obvious reason: a re-render on every keystroke would take the
-   * field out from under the caret, which is the one thing this whole editor must
-   * never do.
-   *
-   * The **adjusted** flag matters more than the heading. It appears the moment a
-   * field differs and goes again when it matches, so the word is a fact about the row
-   * rather than a memory of having once tapped ✎.
-   */
-  function paintAdjusted(key, n) {
-    const row = listEl.querySelector(`.prop-row[data-key="${CSS.escape(key)}"][data-idx="${n}"]`);
-    const q = byKey(key);
-    const original = q?.proposal?.beads?.[n - 1];
-    if (!row || !original) return;
-
-    const b = beadAt(key, original, n);
-    const title = row.querySelector('.prop-title');
-    if (title && title.textContent !== b.title) title.textContent = b.title;
-
-    const head = row.querySelector('.prop-head');
-    const flag = head?.querySelector('.pill.adjusted');
-    if (isAdjusted(key, n) && !flag && head) {
-      const pill = document.createElement('span');
-      pill.className = 'pill adjusted';
-      pill.textContent = 'adjusted';
-      head.appendChild(pill);
-    } else if (!isAdjusted(key, n) && flag) {
-      flag.remove();
-    }
-  }
+  /*
+    `recordEdit` and `paintAdjusted` moved to public/proposal.js with the editor they
+    serve (bc-yjekg.5) — `props.onInput` is both of them. The rule they encode is
+    unchanged: a value equal to what the agent proposed is *removed* rather than stored,
+    so typing a word and deleting it again leaves the row un-adjusted.
+  */
 
   // Focus left an empty box: nothing is in flight, so let any deferred refresh in.
   listEl.addEventListener('focusout', (ev) => {
@@ -10946,7 +11000,6 @@
       return;
     }
     loading = true;
-    pulseEl.classList.add('busy');
     try {
       const asked = state.scope;
       const data = await api(questionsPath(asked));
@@ -10976,7 +11029,6 @@
       }
     } finally {
       loading = false;
-      pulseEl.classList.remove('busy');
       if (loadAgain) {
         loadAgain = false;
         load();
@@ -12107,7 +12159,10 @@
   function mountFilters() {
     const f = window.beadcause?.inboxFilter;
     f?.mount(filtersEl, {
-      groups: [beadGroup],
+      // The search, and since bc-iaju1.5 the Questions order beside it. Both are page
+      // groups — this file owns their state — and which pills offer them is
+      // public/inboxfilter.js's `filters`, not a condition here.
+      groups: [beadGroup, sortGroup],
       // Forced, because a filter tap is a decision and must not be deferred behind a
       // half-written answer. Nothing is refetched for the kinds themselves — they are a
       // view over rows already in hand — but selecting `PRs` may be the first time this
@@ -12115,6 +12170,11 @@
       // fires for a pill tap too: public/viewbar.js routes those through `pick`, which
       // is `set` underneath, which is this channel.
       onChange: () => {
+        // The outcome of the last bulk set-aside is about cards on the screen you were
+        // just on — bc-iaju1.5. `pruneTicks` already drops a tick whose card has gone,
+        // but a line saying "Set aside 2" is not a tick and would otherwise sit at the
+        // top of the Questions list for the rest of the day, over a list it is not about.
+        state.tickSaid = null;
         // Leaving All Beads hands back the scope it widened. `chooseScope` has emptied
         // the list and put the wait up, so a `render` here would draw an empty list over
         // "Asking bd…" — the refetch is what repaints.

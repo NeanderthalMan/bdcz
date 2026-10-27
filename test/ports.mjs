@@ -39,7 +39,9 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-import { CLAIM_DIR, claimPort, freePort, releasePorts } from './helpers/net.mjs';
+import http from 'node:http';
+import vm from 'node:vm';
+import { CLAIM_DIR, boundPort, claimPort, freePort, releasePort, releasePorts } from './helpers/net.mjs';
 import { EXITED, PORTLOST, PORT_ATTEMPTS, PORT_TAKEN_EXIT, STOPPED, exitKind, explain, poisonable } from '../lib/startup.js';
 import { cleanupTmp } from './helpers/tmp.mjs';
 
@@ -441,6 +443,27 @@ await check('a run that ends puts its ports back', async () => {
   }
 });
 
+await check('a listener nobody claimed is still never handed out (bc-jvt0.9)', async () => {
+  // The daemon holds loopback ports all day and claims none of the long-lived ones, so the
+  // acceptance test for "a suite is never handed a port the daemon holds" stands up a
+  // listener that is not in `CLAIM_DIR` and asks. The kernel is what answers — a bound
+  // port is not free — and the claim only ever covered the gap before a bind, which is the
+  // gap the router now writes a claim for (below). What this pins is that `freePort` did
+  // not grow a way to hand back a number it has not just probed: a cache, a counter, a
+  // "last port + 1".
+  const squatter = net.createServer();
+  squatter.listen(0, '127.0.0.1');
+  const servers = [squatter];
+  const held = await boundPort(servers);
+  try {
+    assert.ok(!fs.existsSync(path.join(CLAIM_DIR, String(held))), `:${held} was claimed by something — this needs an unclaimed listener`);
+    const handed = await Promise.all(Array.from({ length: 60 }, () => freePort()));
+    assert.ok(!handed.includes(held), `:${held} is held by a listener and was handed out anyway`);
+  } finally {
+    for (const server of servers) await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 /* ------------------------------------------------- and the code the router reads it by */
 
 console.log('\nbin/beadcause.js — a bind it cannot have says so in its exit code\n');
@@ -541,6 +564,144 @@ await check('the backend spawn classifies an exit by its code, and retries a los
     'the old timeout-only poison guard is back, which puts a lost port back in the poison branch'
   );
 });
+
+/* ------------------------------------- and that the router writes the note it reads */
+
+console.log("\nbin/router.js — a backend's port is claimed from the probe to the bind (bc-jvt0.9)\n");
+
+/**
+ * `spawnBackend` lifted out of bin/router.js (which has no exports and boots a daemon if
+ * imported) and run against the real claim code and a real child. The fake backend below
+ * answers `/internal/state` the way a bound one does, after a delay, so there is a stretch
+ * in which the port is probed, claimed and *not yet bound* — which is the whole window.
+ */
+const ROUTER_SRC = fs.readFileSync(path.join(ROOT, 'bin', 'router.js'), 'utf8');
+function liftRouter(name) {
+  const start = ROUTER_SRC.search(new RegExp(`^(async )?function ${name}\\(`, 'm'));
+  assert.ok(start >= 0, `${name} is not in bin/router.js`);
+  return ROUTER_SRC.slice(start, ROUTER_SRC.indexOf('\n}\n', start) + 2);
+}
+
+const backendDir = fs.mkdtempSync(path.join(os.tmpdir(), 'beadcause-portsrouter-'));
+const FAKE_BACKEND = path.join(backendDir, 'backend.mjs');
+fs.writeFileSync(
+  FAKE_BACKEND,
+  `import http from 'node:http';
+   const port = Number(process.argv[process.argv.indexOf('--port') + 1]);
+   if (process.env.FAKE_EXIT) process.exit(Number(process.env.FAKE_EXIT));
+   setTimeout(() => {
+     http.createServer((req, res) => res.end(JSON.stringify({ build: 'fake', role: 'standby', reaping: null })))
+       .listen(port, '127.0.0.1');
+   }, Number(process.env.FAKE_DELAY_MS || 0));`
+);
+
+const startup = await import(path.join(ROOT, 'lib', 'startup.js'));
+
+/** A context holding the lifted `spawnBackend`; `handed` collects every port `freePort` gave it. */
+function routerContext(env, root = ROOT) {
+  const handed = [];
+  const ctx = vm.createContext({
+    spawn: (cmd, args, opts) => spawn(cmd, args, { ...opts, env: { ...opts.env, ...env }, stdio: 'ignore' }),
+    process,
+    String,
+    Date,
+    Set,
+    Math,
+    Promise,
+    setTimeout,
+    BACKEND: FAKE_BACKEND,
+    ROOT: root,
+    LOADED_ENV: 'BEADCAUSE_TEST_LOADED',
+    freePort: async () => {
+      const port = await freePort();
+      handed.push(port);
+      return port;
+    },
+    releasePort,
+    localJson: (port) =>
+      new Promise((resolve, reject) => {
+        http
+          .get({ host: '127.0.0.1', port, path: '/internal/state', timeout: 1000 }, (res) => {
+            let body = '';
+            res.on('data', (c) => (body += c));
+            res.on('end', () => resolve(JSON.parse(body)));
+          })
+          .on('error', reject);
+      }),
+    onBackendExit: () => {},
+    startupError: startup.startupError,
+    exitKind: startup.exitKind,
+    STOPPED: startup.STOPPED,
+    PORTLOST: startup.PORTLOST,
+    TIMEOUT: startup.TIMEOUT,
+  });
+  vm.runInContext(`${liftRouter('spawnBackend')}\nthis.spawnBackend = spawnBackend;`, ctx);
+  return { ctx, handed };
+}
+
+/** The pid written in a port's claim, or null when there is no claim. */
+const claimHolder = (port) => {
+  try {
+    return Number(fs.readFileSync(path.join(CLAIM_DIR, String(port)), 'utf8').trim());
+  } catch {
+    return null;
+  }
+};
+const until = async (test, what) => {
+  for (let i = 0; i < 100; i++) {
+    if (test()) return;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  assert.fail(what);
+};
+
+await check('the port is claimed while the backend has not bound it, and put back once it has', async () => {
+  const { ctx, handed } = routerContext({ FAKE_DELAY_MS: '800' });
+  const starting = ctx.spawnBackend(10000);
+  await until(() => handed.length > 0, 'spawnBackend never asked for a port');
+  const port = handed[0];
+  // The child has been spawned and cannot have bound yet (it waits 800ms), so the kernel
+  // is not protecting this number and the note is all there is.
+  assert.equal(claimHolder(port), process.pid, `:${port} is in the probe-to-bind window with no claim on it — a suite's freePort can be handed it`);
+  const be = await starting;
+  try {
+    assert.equal(be.port, port);
+    assert.equal(claimHolder(port), null, `:${port} is still claimed after the backend answered from it — the kernel holds it now, and the note only ages`);
+  } finally {
+    be.child.kill('SIGKILL');
+  }
+});
+
+await check('a backend that dies before it binds does not leave its port claimed', async () => {
+  // The failure `attemptStart` retries on a fresh port, so a claim left behind here is one
+  // abandoned note per lost race, held until the router exits — which is weeks.
+  const { ctx, handed } = routerContext({ FAKE_EXIT: '1' });
+  const err = await ctx.spawnBackend(10000).then(
+    () => null,
+    (e) => e
+  );
+  assert.ok(err, 'a child that exited before answering resolved as a healthy backend');
+  await until(() => claimHolder(handed[0]) === null, `:${handed[0]} is still claimed by a router whose backend is gone`);
+});
+
+await check('a child that could not be spawned does not leave its port claimed either', async () => {
+  // A missing `cwd` is an `error` event with no `exit` after it — the shape bc-ek0fx found —
+  // so a release wired to `exit` alone would miss it.
+  const { ctx, handed } = routerContext({}, path.join(backendDir, 'gone'));
+  const err = await ctx.spawnBackend(5000).then(
+    () => null,
+    (e) => e
+  );
+  assert.equal(err?.kind, startup.STOPPED);
+  await until(() => claimHolder(handed[0]) === null, `:${handed[0]} is still claimed after a spawn that never happened`);
+});
+
+await check('the router takes its ports from the claiming helper and not from a probe of its own', () => {
+  assert.match(ROUTER_SRC, /from '\.\.\/lib\/portclaims\.js'/, 'bin/router.js does not import lib/portclaims.js');
+  assert.ok(!/^(async )?function freePort\(/m.test(ROUTER_SRC), 'bin/router.js has a freePort of its own again — one that claims nothing');
+});
+
+fs.rmSync(backendDir, { recursive: true, force: true });
 
 releasePorts();
 console.log(failures ? `\n${failures} check(s) failed` : '\nall checks passed');

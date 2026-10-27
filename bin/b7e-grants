@@ -1,0 +1,135 @@
+#!/usr/bin/env node
+/**
+ * `b7e-grants` — is this command granted to `dispatch` or withheld, and which paragraph
+ * decided it.
+ *
+ *   b7e-grants                every b7e-* command, one row each
+ *   b7e-grants b7e-x           just that command's verdict
+ *   b7e-grants b7e-x b7e-y     several, by name
+ *   b7e-grants --undecided    only the commands nobody has decided about at all
+ *   b7e-grants --json         one JSON object per line instead of the printed report
+ *   b7e-grants --dir <root>   another tree's bin/ and lib/tooldecl.js — this is how it is
+ *                              tested
+ *
+ * bc-dgx7.111, filed by the session audit against six sessions (bc-dgx7.87, bc-dgx7.90,
+ * bc-dgx7.92, bc-dgx7.91, bc-dgx7.86, bc-dgx7.97) that each had to answer this exact
+ * question for the command they had just written and each answered it by guessing which
+ * sibling was analogous and reading the registry at random offsets. See lib/grantsmap.js
+ * for the reading, and its own header for what changed under this bead between when it
+ * was filed and when it was built: the decision moved from lib/toolbelt.js's prose to
+ * each command's own `@grant` header line (bc-wbrhi), so `status` below is read from
+ * nothing else — a `reason` paragraph is attached only as *why*, for a command already
+ * decided the other way, and a bare `mention` for an undecided one is never a decision.
+ *
+ * Exit codes: `0` ran to completion, whatever it found — an undecided command is an
+ * ordinary result, not a failure this treats as bad usage. `2` refused — bad usage, an
+ * unknown command name, or `--dir` names something with no bin/ of its own.
+ *
+ * Read-only in the same construction sense as b7e-def/b7e-which/b7e-owes (bc-dgx7.111): it
+ * only reads bin/, lib/tooldecl.js and this repo's own package.json, never spawns a process
+ * or touches bd. Its whole occasion is a session that just wrote a b7e-* command and needs to
+ * know whether it belongs on DEFAULT_TOOL_LIST, or which paragraph says why not — six
+ * sessions each guessed the precedent by reading the registry at random offsets. See
+ * lib/grantsmap.js.
+ *
+ * @grant read
+ */
+import fs from 'node:fs';
+import path from 'node:path';
+
+import { allVerdicts, grantVerdict } from '../lib/grantsmap.js';
+import { candidateNames, repoRoot } from '../lib/which.js';
+
+const USAGE = `usage: b7e-grants [<name>...] [--undecided] [--json] [--dir <root>]
+
+Is a b7e-* command granted to dispatch or withheld, and which paragraph decided it.
+
+  <name>...    just these commands' verdicts, in the order given
+  (no name)     every b7e-* command, name-sorted
+  --undecided  only the commands with no @grant declaration at all
+  --json       one JSON object per line instead of the printed report
+  --dir <root> another tree's bin/ and lib/tooldecl.js`;
+
+const argv = process.argv.slice(2);
+if (argv.includes('--help') || argv.includes('-h')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+
+const JSON_MODE = argv.includes('--json');
+const UNDECIDED_ONLY = argv.includes('--undecided');
+let dirGiven;
+const names = [];
+for (let i = 0; i < argv.length; i += 1) {
+  const a = argv[i];
+  if (a === '--dir') {
+    dirGiven = argv[i + 1];
+    i += 1;
+    continue;
+  }
+  if (a === '--json' || a === '--undecided') continue;
+  if (a.startsWith('-') && a !== '-') {
+    console.error(`b7e-grants: unrecognised flag: ${a}`);
+    console.error(USAGE);
+    process.exit(2);
+  }
+  names.push(a);
+}
+
+const ROOT = path.resolve(dirGiven || repoRoot());
+if (!fs.existsSync(path.join(ROOT, 'bin')) || !fs.existsSync(path.join(ROOT, 'package.json'))) {
+  console.error(`b7e-grants: ${ROOT} does not look like this repo's checkout — no bin/ or package.json there`);
+  process.exit(2);
+}
+
+let rows;
+if (names.length) {
+  const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+  const known = new Set(candidateNames(ROOT, pkg));
+  const unknown = names.filter((n) => !known.has(n));
+  if (unknown.length) {
+    console.error(`b7e-grants: not a b7e-* command bin/ actually serves: ${unknown.join(', ')}`);
+    process.exit(2);
+  }
+  rows = names.map((n) => grantVerdict(ROOT, n));
+} else {
+  rows = allVerdicts(ROOT);
+}
+
+if (UNDECIDED_ONLY) rows = rows.filter((r) => r.status === 'undecided');
+
+if (JSON_MODE) {
+  for (const r of rows) console.log(JSON.stringify(r));
+  process.exit(0);
+}
+
+const dim = (s) => `\x1b[2m${s}\x1b[0m`;
+const bold = (s) => `\x1b[1m${s}\x1b[0m`;
+
+if (!rows.length) {
+  console.log(UNDECIDED_ONLY ? 'nothing undecided — every b7e-* command has a @grant line' : 'nothing to report');
+  process.exit(0);
+}
+
+console.log(bold(`${rows.length} b7e-* command${rows.length === 1 ? '' : 's'}`));
+console.log('');
+for (const r of rows) {
+  console.log(bold(r.name));
+  if (r.status === 'granted') {
+    console.log(`  granted — ${r.kind}, ${dim(`${r.decidedAt.file}:${r.decidedAt.line}`)}`);
+  } else if (r.status === 'withheld') {
+    console.log(`  withheld — excluded, ${dim(r.decidedAt ? `${r.decidedAt.file}:${r.decidedAt.line}` : '(no @grant line found)')}`);
+    if (r.reason) {
+      console.log(`  reason ${dim(`(${r.reason.file}:${r.reason.line})`)}: ${r.reason.text}`);
+    } else {
+      console.log(dim(`  reason: not recorded — ${r.decidedAt ? r.decidedAt.file : 'its header'} carries no paragraph naming it`));
+    }
+  } else {
+    console.log(dim('  undecided — no @grant line at all; dispatch cannot call it'));
+    if (r.mention) {
+      console.log(dim(`  mentioned in passing at lib/tooldecl.js:${r.mention.line} — not a decision`));
+    }
+  }
+  console.log('');
+}
+process.exit(0);

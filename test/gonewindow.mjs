@@ -589,6 +589,54 @@ await check('and the whole thing switches off, back to the two-hour timeout', as
   assert.equal(a.readState().parked['alpha/x-1'], undefined, 'and no park, because timeout never parked');
 });
 
+/* --------------------------------------- whose conversation it is, not just which bead */
+
+/**
+ * The park record is keyed by workspace and bead, and four kinds of window park under that
+ * key — bc-cigq6. `resumeFor` has one caller and it opens workers, so a record left by an
+ * epic advocate can only ever come back into a window briefed to do something else. It
+ * also spends the conversation's one trip on the way in, which is what turns the
+ * *worker's* own first quiet park into a charged attempt.
+ */
+const parkRec = (over = {}) => ({
+  at: minutesAgo(20),
+  sessionId: GONE_ID,
+  dir: REPO,
+  workspace: 'alpha',
+  bead: 'x-1',
+  kind: 'worker',
+  title: 'x-1',
+  waitingOn: 'quiet for 20m — it is waiting on you',
+  ending: 'idle',
+  resumes: 0,
+  ...over,
+});
+
+await check("a worker does not resume an epic advocate's conversation", async () => {
+  transcript(GONE_ID);
+  const a = await tick({
+    beads: [bead('x-1')],
+    parked: { [beadKey('alpha', 'x-1')]: parkRec({ kind: 'epic-advocate' }) },
+  });
+  const back = a.opened.find((o) => o.id === 'x-1');
+  assert.ok(back, 'the bead is still dispatched — the guard is about the transcript, not the work');
+  assert.equal(back.resume, null, 'and briefed fresh, because that transcript is about planning, not doing');
+  const rec = a.readState().parked[beadKey('alpha', 'x-1')];
+  assert.ok(rec, "left on disk — it is not this window's record to clear");
+  assert.equal(Number(rec.resumes) || 0, 0, 'and its one trip is unspent, so the next quiet park is still free');
+});
+
+await check("but it does resume a worker's, which is the whole feature", async () => {
+  transcript(GONE_ID);
+  const a = await tick({
+    beads: [bead('x-1')],
+    parked: { [beadKey('alpha', 'x-1')]: parkRec() },
+  });
+  const back = a.opened.find((o) => o.id === 'x-1');
+  assert.ok(back && back.resume, `a worker's own conversation still comes back — got ${JSON.stringify(back)}`);
+  assert.equal(back.resume.rec.sessionId, GONE_ID);
+});
+
 /* ------------------------------------------------------------------------- end */
 
 await cleanupTmp(tmp);

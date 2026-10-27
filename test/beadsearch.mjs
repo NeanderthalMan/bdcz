@@ -603,8 +603,11 @@ await check('app.js hands the box over as the page’s own group, and asks for n
   // (public/filterpills.js). The box stayed and became a pill of its own in bc-khoe.26: a
   // typeahead with a dropdown under it is the one group that genuinely wants a panel
   // behind its pill rather than chips drawn flat.
+  // bc-iaju1.5 put a second page group beside it — the Questions order switch — which
+  // does not change what this is about: the box is the page's, handed over as a group,
+  // and the scope is not in that list.
   const app = read('public/app.js');
-  assert.match(app, /groups: \[beadGroup\]/, 'the box is not among the filter pills');
+  assert.match(app, /groups: \[beadGroup, sortGroup\]/, 'the box is not among the filter pills');
   // And the page no longer answers "is the list narrowed" for a line that no longer
   // exists: the pill says its own picks, which names the control doing it.
   assert.ok(!/narrowed: \(\) =>/.test(app), 'app.js still answers for a summary line there is none of');

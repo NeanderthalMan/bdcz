@@ -1,0 +1,90 @@
+#!/usr/bin/env node
+/**
+ * `b7e-held` — who holds this bead's lease, whether it is still live, and whether it is
+ * this Mac's own.
+ *
+ *     b7e-held -w beadcause -b bc-rcrt
+ *     b7e-held -w beadcause -b bc-rcrt --json
+ *
+ * bc-dgx7.198: three sessions each grepped lib/ for `held:` to learn what the label on
+ * their own bead meant. The reading is in lib/leaseheld.js over lib/lease.js; argv and
+ * printing here.
+ *
+ * Exit codes: `0` ran (including "nobody holds it"); `2` bad usage; `4` unknown workspace
+ * or bead; `1` the tracker could not be read.
+ *
+ * Read-only: one `bd show`. Never a write.
+ *
+ * @grant read
+ */
+import { loadConfig } from '../lib/config.js';
+import { Bd } from '../lib/bd.js';
+import { handleFor, LEASE_DEFAULTS } from '../lib/lease.js';
+import { heldReport } from '../lib/leaseheld.js';
+
+const argv = process.argv.slice(2);
+const has = (f) => argv.includes(f);
+const value = (...names) => {
+  for (const f of names) {
+    const inline = argv.find((a) => a.startsWith(`${f}=`));
+    if (inline) return inline.slice(f.length + 1);
+    const at = argv.indexOf(f);
+    if (at > -1) return argv[at + 1];
+  }
+  return undefined;
+};
+
+const USAGE = `usage: b7e-held -w <workspace> -b <bead> [--json]
+
+One line per held: label on the bead — handle, stamp, age, live or expired (against the
+configured leaseMinutes), and "yours" when it is this Mac's handle — then the verdict:
+who holds it, or "nobody holds it".
+
+  -w, --workspace <name>   which tracker (required)
+  -b, --bead <id>          the bead (required)
+  --json                   machine-readable`;
+
+if (has('--help') || has('-h')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+
+function fail(msg, code = 2) {
+  console.error(`b7e-held: ${msg}`);
+  process.exit(code);
+}
+
+const wsName = value('-w', '--workspace');
+const beadId = value('-b', '--bead');
+if (!wsName) fail(`-w/--workspace is required\n${USAGE}`);
+if (!beadId) fail(`-b/--bead is required\n${USAGE}`);
+
+const cfg = loadConfig();
+const ws = cfg.workspaces.find((w) => w.name === wsName);
+if (!ws) fail(`no workspace named "${wsName}"\nconfigured workspaces: ${cfg.workspaces.map((w) => w.name).join(', ') || 'none'}`, 4);
+
+const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me, accounts: cfg.accounts });
+let issue;
+try {
+  issue = await bd.show(ws, beadId);
+} catch (err) {
+  const msg = String(err?.message || err).split('\n')[0];
+  if (/no issues? found|not found/i.test(msg)) fail(`${ws.name} has no bead ${beadId}: ${msg}`, 4);
+  fail(`${ws.name} could not be read for ${beadId} — a tracker failure (lock/timeout?), not "not found": ${msg}`, 1);
+}
+if (!issue) fail(`${ws.name} has no bead ${beadId}`, 4);
+
+const report = heldReport(issue.labels || [], handleFor(cfg), {
+  minutes: cfg.advocates?.leaseMinutes ?? LEASE_DEFAULTS.leaseMinutes,
+});
+
+if (has('--json')) {
+  console.log(JSON.stringify({ bead: beadId, ...report }, null, 2));
+  process.exit(0);
+}
+
+console.log(`b7e-held ${beadId} · ${ws.name} · ${report.handle ? `this Mac is ${report.handle}` : 'this Mac has no handle (me unset)'} · lease life ${report.leaseMinutes}m`);
+for (const l of report.leases) {
+  console.log(`  ${l.handle}  ${l.at}  ${l.ageMinutes}m old  ${l.live ? 'live' : 'expired'}${l.mine ? '  yours' : ''}${l.holder ? '  holder' : ''}`);
+}
+console.log(report.summary + (report.won ? ' (and another Mac also claimed it — this Mac won)' : report.lost ? ' (not this Mac)' : ''));

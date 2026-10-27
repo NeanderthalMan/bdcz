@@ -63,6 +63,7 @@ const {
 } = await import(LIB('finishedepic.js'));
 const { toQuestion } = await import(LIB('decision.js'));
 const { createAdvocates } = await import(LIB('advocate.js'));
+const { ANSWERED_CLOSE_LABEL } = await import(LIB('answeredclose.js'));
 
 /* ------------------------------------------------------------------- the stub bd */
 
@@ -233,10 +234,26 @@ const reset = () => {
           'zz-done': issue('zz-done', { issue_type: 'epic', title: 'the finished theme' }),
           'zz-done.1': issue('zz-done.1', { status: 'closed' }),
           'zz-done.2': issue('zz-done.2', { status: 'closed' }),
+          // bc-eqn1.5.2. Same shape as `zz-done` — 2/2 children closed — but Adam already
+          // answered close on its commission, so this is the one the sweep must not ask
+          // about a third time. lib/mergequeue.js's epic branch is the door meant to act
+          // on the marker once the commissioned work lands; this fixture has no such
+          // door running, which is the whole point — the sweep is the fallback, and the
+          // fallback here is "do not ask", not "ask again".
+          'zz-marked': issue('zz-marked', { issue_type: 'epic', title: 'already answered close', labels: [ANSWERED_CLOSE_LABEL] }),
+          'zz-marked.1': issue('zz-marked.1', { status: 'closed' }),
+          'zz-marked.2': issue('zz-marked.2', { status: 'closed' }),
           'zz-live': issue('zz-live', { issue_type: 'epic', title: 'the live theme' }),
           'zz-live.1': issue('zz-live.1', { status: 'closed' }),
           'zz-live.2': issue('zz-live.2'),
           'zz-empty': issue('zz-empty', { issue_type: 'epic', title: 'a standing root, nothing filed yet' }),
+          // bc-rcrt.7. A parent typed feature, every child closed: the card, as an epic.
+          'zz-feat': issue('zz-feat', { issue_type: 'feature', title: 'a feature that works as an epic' }),
+          'zz-feat.1': issue('zz-feat.1', { status: 'closed' }),
+          'zz-feat.2': issue('zz-feat.2', { status: 'closed' }),
+          'zz-featlive': issue('zz-featlive', { issue_type: 'feature', title: 'a feature with an open child', assignee: 'adam' }),
+          'zz-featlive.1': issue('zz-featlive.1', { assignee: 'adam' }),
+          'zz-featalone': issue('zz-featalone', { issue_type: 'feature', title: 'a feature that is the work', assignee: 'adam' }),
           'zz-fup': issue('zz-fup', {
             title: 'Review follow-up #12 — 2 findings the merge did not wait for (round 1)',
             labels: ['review-followup', 'review-followup:owner/repo#12:r1'],
@@ -329,10 +346,10 @@ await check('the sweep flags the finished epic and the finished follow-up parent
   reset();
   const result = await sweepFinishedEpics(bd, ws);
   assert.equal(result.ok, true);
-  assert.deepEqual(result.flagged.map((f) => f.id).sort(), ['zz-done', 'zz-fup']);
+  assert.deepEqual(result.flagged.map((f) => f.id).sort(), ['zz-done', 'zz-feat', 'zz-fup']);
   assert.deepEqual(
     result.flagged.map((f) => `${f.id}:${f.total}:${f.followUp ? 'followup' : 'epic'}`).sort(),
-    ['zz-done:2:epic', 'zz-fup:2:followup'],
+    ['zz-done:2:epic', 'zz-feat:2:epic', 'zz-fup:2:followup'],
     'and it knows which of the two questions each one is'
   );
   assert.match(describeFinishedEpics(result), /zz-done \(2\/2 closed\)/);
@@ -343,10 +360,25 @@ await check('the sweep flags the finished epic and the finished follow-up parent
   );
 });
 
+await check('an epic Adam already answered close on is not asked a third time (bc-eqn1.5.2)', async () => {
+  // Same shape as `zz-done` above — 2/2 children closed — but carrying the marker
+  // `commission()` writes when the picked option said `closesOnLanding: true`. The sweep
+  // above already proved `zz-marked` is absent from `result.flagged`; this pins *why*,
+  // and that nothing else about it moved.
+  reset();
+  const result = await sweepFinishedEpics(bd, ws);
+  assert.ok(!result.flagged.some((f) => f.id === 'zz-marked'), JSON.stringify(result.flagged));
+  assert.equal(beadOf('zz-marked').labels.includes('human'), false, 'never put in the inbox');
+  assert.equal(beadOf('zz-marked').notes || '', '', 'and no card written to its notes');
+  assert.equal(world().comments['zz-marked'], undefined, 'nor a comment on the thread');
+});
+
 await check('a live epic, a live follow-up and an empty epic are left alone, quietly', async () => {
   const live = world().issues['zz-live'];
   assert.equal(live.labels.includes('human'), false);
   assert.equal(world().issues['zz-empty'].labels.includes('human'), false);
+  assert.equal(world().issues['zz-featlive'].labels.includes('human'), false, 'a feature with an open child');
+  assert.equal(world().issues['zz-featalone'].labels.includes('human'), false, 'a childless feature is the work');
   assert.equal(world().issues['zz-flive'].labels.includes('human'), false, 'its one finding is still open');
 });
 
@@ -366,6 +398,17 @@ await check('an ordinary task with a closed subtask, and a finding child, are no
   assert.equal(result.checked, 0, 'and neither cost a `bd children` call to find that out');
   assert.equal(beadOf('zz-task').labels.includes('human'), false);
   assert.equal(beadOf('zz-fkid').labels.includes('human'), false);
+});
+
+await check('a parent typed feature is asked about, and a childless one is not (bc-rcrt.7)', async () => {
+  reset();
+  const alone = await sweepFinishedEpics(bd, ws, { rows: [beadOf('zz-featalone')] });
+  assert.deepEqual(alone.flagged, [], 'a feature with no children is the work itself');
+  assert.equal(alone.checked, 1);
+  const feat = await sweepFinishedEpics(bd, ws, { rows: [beadOf('zz-feat')] });
+  assert.deepEqual(feat.flagged.map((f) => f.id), ['zz-feat']);
+  assert.equal(feat.flagged[0].followUp, false, 'it is worded as an epic, not a follow-up');
+  assert.match(beadOf('zz-feat').notes, /is the epic finished\?/);
 });
 
 await check('the follow-up parent gets the card in its own words, and it parses on a phone', async () => {
@@ -536,7 +579,7 @@ await check('with the sweep on (the default), the advocate asks instead of openi
   assert.ok(beadOf('zz-done').labels.includes('human'), 'the epic went to the inbox in the same tick');
   assert.ok(beadOf('zz-fup').labels.includes('human'), 'and so did the follow-up parent');
   const card = advocates.snapshot().find((a) => a.workspace === 'demo2');
-  assert.equal(card.finishedEpic.flagged, 2, 'and the sweep is on the advocate card, not only in the log');
+  assert.equal(card.finishedEpic.flagged, 3, 'and the sweep is on the advocate card, not only in the log');
 });
 
 /* ----------------------------------------------------- the real endpoint, one tap */
@@ -847,7 +890,7 @@ await check('the advocate asks in its ordinary tick, over the checkout mapped to
   assert.equal(opened.includes('zz-one'), false, `and no session on it, got ${opened.join(', ')}`);
   assert.equal(beadOf('zz-mid').labels.includes('human'), false, 'the one still being worked is untouched');
   const card = advocates.snapshot().find((a) => a.workspace === 'demo3');
-  assert.equal(card.finishedEpic.flagged, 3, 'both questions count onto the one card — zz-done, zz-fup and zz-one');
+  assert.equal(card.finishedEpic.flagged, 4, 'both questions count onto the one card — zz-done, zz-feat, zz-fup and zz-one');
   assert.match(card.finishedEpic.summary, /finished whole-job epic/);
 });
 

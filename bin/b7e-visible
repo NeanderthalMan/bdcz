@@ -1,0 +1,117 @@
+#!/usr/bin/env node
+/**
+ * `b7e-visible` — is this path tracked, ignored, or a tracked-but-unmaterialised LFS
+ * pointer, and what follows from that (bc-dgx7.141).
+ *
+ *     b7e-visible webseries/episodes/x/script.txt reference/maps/c1_02.png
+ *     b7e-visible --dir <root> some/path
+ *     b7e-visible --changed                  # what's dirty right now, before you deliver
+ *     b7e-visible --json some/path
+ *
+ * Six delmar sessions (dv-2uu.20, dv-2uu.21, dv-5eu.40, dv-5i2.122, dv-5i2.93,
+ * dv-5eu.39) each worked out by hand, in four different spellings, whether a path was
+ * tracked by git — because that single fact decides three things at once: whether
+ * `EnterWorktree` gives you a copy of it, whether the worktree-guard hook lets
+ * `Edit`/`Write` touch it in the main checkout, and whether a normal `git add -A` before
+ * a delivery would pick it up. `lib/visible.js` does the classification and derives the
+ * three verdicts; this is the argv parsing and printing.
+ *
+ * Exit codes: `0` every path classified (this always succeeds unless usage is bad — a
+ * path that doesn't exist is still classifiable, as `untracked`). `2` bad usage.
+ *
+ * @grant read
+ */
+import path from 'node:path';
+import { changedPaths, classifyPath, repoRoot, toRepoRel, usesWorktreeWorkflow } from '../lib/visible.js';
+
+const USAGE = `usage: b7e-visible [--dir <root>] <path> [<path> ...]
+       b7e-visible [--dir <root>] --changed
+
+  --dir <root>   a checkout to resolve paths against, instead of the cwd's own repo
+  --changed      classify every path \`git status --porcelain\` shows right now,
+                 instead of paths given on the command line
+  --json         print the structure instead of the plain report`;
+
+const argv = process.argv.slice(2);
+if (argv.includes('--help') || argv.includes('-h')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+
+const value = (f, fallback) => {
+  const inline = argv.find((a) => a.startsWith(`${f}=`));
+  if (inline) return inline.slice(f.length + 1);
+  const at = argv.indexOf(f);
+  return at === -1 ? fallback : (argv[at + 1] ?? fallback);
+};
+const has = (f) => argv.includes(f);
+
+const dirArg = value('--dir', null);
+const CHANGED = has('--changed');
+const JSON_MODE = has('--json');
+
+const positional = [];
+for (let i = 0; i < argv.length; i++) {
+  const a = argv[i];
+  if (a === '--dir') {
+    i++;
+    continue;
+  }
+  if (a.startsWith('-')) continue;
+  positional.push(a);
+}
+
+if (!CHANGED && positional.length === 0) {
+  console.error('b7e-visible: give at least one path, or pass --changed');
+  console.error(USAGE);
+  process.exit(2);
+}
+if (CHANGED && positional.length > 0) {
+  console.error('b7e-visible: --changed classifies the working tree itself, not the paths given');
+  process.exit(2);
+}
+
+const ROOT = dirArg ? path.resolve(dirArg) : repoRoot(process.cwd());
+// With --dir, a bare path on argv is relative to *that* tree, not to wherever this
+// process actually runs from — the whole point of --dir is testing against a tree this
+// process is not sitting in. Without it, ordinary CLI use: relative to the real cwd.
+const CWD_BASE = dirArg ? ROOT : process.cwd();
+
+const rows = CHANGED
+  ? changedPaths(ROOT)
+  : (() => {
+      const worktreeWorkflow = usesWorktreeWorkflow(ROOT);
+      return positional.map((p) => classifyPath(ROOT, toRepoRel(ROOT, CWD_BASE, p), { worktreeWorkflow }));
+    })();
+
+if (JSON_MODE) {
+  console.log(JSON.stringify({ root: ROOT, rows }, null, 2));
+  process.exit(0);
+}
+
+const dim = (s) => `\x1b[2m${s}\x1b[0m`;
+const bold = (s) => `\x1b[1m${s}\x1b[0m`;
+const green = (s) => `\x1b[32m${s}\x1b[0m`;
+const red = (s) => `\x1b[31m${s}\x1b[0m`;
+const yes = (b) => (b ? green('yes') : red('no'));
+
+if (CHANGED && rows.length === 0) {
+  console.log(dim('working tree is clean — nothing git status would show'));
+  process.exit(0);
+}
+
+for (const row of rows) {
+  console.log(bold(row.path));
+  const stateLabel = row.state === 'lfs-pointer' ? 'tracked, unmaterialised LFS pointer' : row.state;
+  console.log(`  state: ${row.state === 'ignored' ? red(stateLabel) : stateLabel}`);
+  if (row.ignoreRule) {
+    console.log(`  ignored by: ${row.ignoreRule.file}:${row.ignoreRule.line ?? '?'}  (${dim(row.ignoreRule.pattern ?? '')})`);
+  }
+  console.log(`  exists on disk: ${row.existsOnDisk ? 'yes' : 'no'}`);
+  console.log(`  present in a fresh worktree: ${yes(row.presentInFreshWorktree)}`);
+  console.log(`  editable in the main checkout: ${yes(row.editableInMainCheckout)}`);
+  console.log(`  carried by a delivery: ${yes(row.carriedByDelivery)}`);
+  console.log('');
+}
+
+process.exit(0);

@@ -44,6 +44,9 @@ links:
     url: https://example.com/payouts
 images:
   - /Users/you/code/acme/current-flow.png
+audio:
+  - label: Mix A, drums forward
+    path: /Users/you/code/acme/clips/mix-a.m4a
 ```
 ````
 
@@ -98,12 +101,19 @@ images:
   text/log/csv shown as-is, PDFs embedded. Relative links inside a rendered markdown
   doc resolve against that doc's directory, so a spec that links its sibling files
   stays navigable — and follows into the same drawer. Servable extensions are images plus
-  `.md .markdown .txt .log .csv .json .jsonl .yaml .yml .pdf` — source files are
-  refused, deliberately.
+  `.md .markdown .txt .log .csv .json .jsonl .yaml .yml .pdf` and the sounds
+  `.mp3 .m4a .aac .wav .ogg .oga .opus .flac` — source files are refused, deliberately.
+- **A clip is played on the card, not opened.** Each `audio` entry (a path, or a
+  `label` and `path`) draws a native player under the images, and a `docs` entry whose
+  file is a sound is sorted into the same list — so a listening decision has an exhibit
+  without publishing the clips anywhere. Players do not fetch anything until pressed,
+  and `/api/asset` answers `Range` requests, which is what lets a phone start a clip
+  and seek in it. Opened straight in the reader tab (`/doc?p=…`) a sound is a player
+  too.
 - **A local path written inline in the prose becomes a reader link too** —
   `[the spec](/Users/you/code/acme/SPEC.md)` needs no `docs` entry. Every link in
   a brief opens in a new tab so you never navigate away mid-answer.
-- `images` may be absolute paths on the Mac — they're served through
+- `images` and `audio` may be absolute paths on the Mac — they're served through
   `/api/asset`, restricted to `config.assetRoots`.
 - A block that isn't valid YAML shows the parse error on the card rather than
   silently dropping to free-text. Two spellings that are obvious and invalid are

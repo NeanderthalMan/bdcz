@@ -192,6 +192,23 @@ ancestor is `$HOME` itself, so every path under it inherited the refusal regardl
 `BEADS_DIR` or `--prefix`. `BEADCAUSE_BD_TEMPLATE_DIR` moves the cache, mainly so
 `test/bdtemplate.mjs` never touches the real one.
 
+### A red suite gets one more run, alone — `lib/gate.js`, bc-iaju1.2
+
+Over the fortnight to 2026-09-19, 14 of the last 40 full gates went red, and the suites
+responsible were not a fixed set — b7esheet, pagealias, adoptsweepreal, routerdrain,
+plansurface and claimqueue each failed 14-32% of the runs they were in, and two weeks
+earlier the worst were advswitch, monitoronce and teardown. A roster of known flakes would
+be stale before it merged. What they share is the shape `SOLO` already names: they fail
+in a loaded pool and pass with the machine to themselves.
+
+So `runGate` re-runs every failed suite once, serially, after the pool and the solo
+suites have finished. A suite that passes then counts as passed, and the summary says so —
+`all 560 suites passed (1 only on a solo retry: test/b7esheet.mjs)` — so a real
+intermittent bug that passes on its second try is named, not buried. The run record keeps
+both lines (the retry carries `retry: true`, and `readRun` keeps the last), so failure
+tallies still see the first. `b7e-gate --no-retry` turns it off. CI runs `b7e-gate`, so
+it gets the same rule.
+
 ### GitHub runs it too — `.github/workflows/test.yml`
 
 The same suite, on `macos-latest` runners, on every pull request, every push to `main`,
@@ -2234,11 +2251,31 @@ some reason other than the claim root. The scratch numbers those checks use are 
 anything binds, and a directory shared by every account on the machine is no longer a
 place to type 65000 and hope.
 
-What this does *not* close is the other half of the same bead: the live daemon takes
-loopback ephemeral ports for its backends and claims nothing, because `CLAIM_DIR`
-coordinates gate runs with each other and the daemon is not one. No claim-file protocol
-can reach a process that will never participate — `boundPort`, which hands over the
-listener rather than the number, is what has no window against anybody at all.
+#### The daemon claims too — bc-jvt0.9
+
+The claim code lives in `lib/portclaims.js`, and `test/helpers/net.mjs` re-exports it
+under the names every suite already imports. It moved because a note only works if
+*everybody who picks a port writes one*, and `bin/router.js` picks a port for every
+backend it starts. It used to run a probe of its own and claim nothing, so a suite's
+`freePort` could be handed the number the live daemon had probed and not yet bound — the
+suite's child then exited on a lost port (`listen()` calls `process.exit(1)`), which
+reads as a regression in whatever was under test (PR #82, `test/routerdrain.mjs`, an
+`ECONNREFUSED` and not an `EADDRINUSE`) — and the daemon's probe could take a number a
+suite had claimed. Now `spawnBackend` takes its port from the same claiming `freePort`
+and holds the claim for exactly the interval it protects: from the probe until the
+backend first answers `/internal/state` (a child that can answer has bound it, and from
+there the kernel is the claim), or until the child is gone — `exit` *and* `error`,
+because a child that could not be spawned emits only the second.
+
+It is not held for the backend's life, deliberately. A bound port needs no note beside it
+(a suite asking the kernel is never handed one), and a router lives for weeks and starts a
+backend per release, so a claim per backend would be a file the two-hour backstop has to
+age out. A claim that cannot be made — even by throwing — never fails a backend start:
+the note is an improvement on the probe and not a precondition of it.
+
+What it still cannot reach is a process that never writes a note: a stranger, or anything
+that is not beadcause. `boundPort`, which hands over the listener rather than the number,
+is what has no window against anybody at all, and is still the one to reach for.
 
 `node test/ports.mjs` covers both halves, and the check that earns the rest spawns four
 separate processes that each take twenty-five ports and hold them while the others are
@@ -3168,7 +3205,8 @@ were not.** A colour off the palette is a literal hex in a sheet where every oth
 says `var(--…)`, and it fails review on sight; `9px` in a sheet that also says `10px`,
 `11px` and `12px` fails nothing and looks like every line around it.
 
-So bc-03pz gave two of the three axes a scale and a suite. **Radius is 6 / 10 / 14 / 18,
+So bc-03pz gave two of the three axes a scale and a suite, and bc-ka5y.22 the third.
+**Radius is 6 / 10 / 14 / 18,
 four apart, plus `999px` and `50%`** — four apart because `vocabulary.mjs` calls two values
 within 2px of each other a smear, so a scale with 2px steps would be one, and the suite
 asserts that spacing about *itself* as well as about the sheet. **Weight is 400 / 550 / 600
@@ -3184,12 +3222,30 @@ what `999px` gives. That rewrite is provably pixel-identical and it says what th
 means. And **the two chat bubbles landed together**: `.msg.you` and `.queued-text` are the
 same bubble either side of a send, and they had drifted to 14px and 12px.
 
-**Type sizes are deliberately not enforced, and that is the open half.** A radius cannot
-move a box and a weight barely can — the whole snap moved seven text runs by 1–3px and not
-one box height, which `scripts/design/baseline.mjs` is what proved. A type scale moves
-layout on a 360px phone, so which one to snap to is a design decision rather than a
-normalization, and it is filed rather than guessed. When it is settled its allowed set
-belongs in `test/metricscale.mjs` beside the other two.
+**Type is 9 / 11 / 13 / 16 / 19 / 24, and it is the axis that had to be asked about.** A
+radius cannot move a box and a weight barely can — bc-03pz's whole snap moved seven text
+runs by 1–3px and not one box height, which `scripts/design/baseline.mjs` is what proved.
+A type scale moves layout on a 360px phone, so which one to snap to was a design decision
+rather than a normalization, and bc-ka5y.22 was filed rather than guessed.
+
+**It was then decided on a measurement rather than on the argument.** Each candidate scale
+was applied to the real sheet, all 77 cards re-rendered, and the fingerprints diffed —
+about a minute per candidate, which is cheaper than the paragraph that would otherwise have
+argued for one. Three things came out of that and none of them was reachable by reading.
+The width risk the bead was filed on had already been fixed by bc-khoe.5: `topbar-check`
+says every page has at least 24px of slack at 360px, and three of the four candidates *gain*
+8px because the picker face narrows. "No box height changes" turned out to be impossible for
+*any* type scale, because the line-heights here are unitless multipliers — 292 elements move
+by ≤4px and none of them is a wrap. And the rounding of the three ties (10px, 12px, 14.5px,
+98 declarations between them) mattered more than the choice of scale: **down** gives 6 boxes
+taller and 27 shorter, **up** gives 29 taller and one card 83px longer.
+
+So the sheet moved 356 declarations by no more than 2px, 11 / 13 / 16 / 24 stayed exactly
+where they were, five cards lost a line and none gained one — the single card that grows on
+the 440px design board is `decisions/options.html`, whose option hint was already two lines
+at 360px and 393px before the change. The allowed set lives in `test/metricscale.mjs` beside
+the other two, and the rounding rule is in its header, because a later 12px is not a
+near-miss to wave through: it is 11px or 13px and the sheet has already decided which.
 
 ## Notes on bd
 
@@ -3223,6 +3279,13 @@ belongs in `test/metricscale.mjs` beside the other two.
   that worktree is retired. Verify with a staged file containing conflict markers and
   running `.git/hooks/pre-commit` directly; it should exit non-zero and name the
   markers.
+- **The `jsonmerge` driver is per-clone too** (bc-g95u9). `.gitattributes` sends
+  `package.json` and `package-lock.json` through `merge=jsonmerge`, and the name only
+  means something once `node scripts/jsonmerge.mjs --install` has run in that clone.
+  Run it once; any worktree can run it, since it always records the main checkout's
+  copy of the script. `node scripts/jsonmerge.mjs --check` says whether it is
+  installed. Without it, git falls back to an ordinary text merge for those two files,
+  so they conflict instead of merging by key.
 - **`bd human respond` is broken in bd 1.1.2** — it dies with `storage is nil`.
   Beadcause does the two steps it documents (`bd comment` then `bd close`) itself.
   If a later bd fixes it, the two-step is still fine.

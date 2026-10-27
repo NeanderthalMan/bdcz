@@ -92,6 +92,45 @@
   const P_LABEL = ['P0', 'P1', 'P2', 'P3', 'P4'];
   const pri = (n) => (n == null ? '' : P_LABEL[n] ?? `P${n}`);
 
+  /** The key a card is filed under here — the question payload may not carry one. */
+  const keyOf = (q) => q.key || `${q.workspace}/${q.id}`;
+
+  /**
+   * This pane's mount of the one proposal card — public/proposal.js (bc-yjekg.5).
+   *
+   * The mirror only ever holds one card at a time, so `byKey` answers off `state.detail`
+   * rather than searching a list, and it checks the key: a repaint driven by the phone
+   * can swap the card underneath a tap, and answering for whatever happens to be on
+   * screen is exactly the bug a mirror is most able to cause.
+   *
+   * `armed` is this pane's own — nothing else here arms, and the two-tap rule has to
+   * hold here for the reason it holds everywhere else: this button creates beads.
+   */
+  const props = window.beadcause.proposal.bind({
+    root: () => pane,
+    markdown: (text) => md(text),
+    byKey: (key) => {
+      const q = state.detail;
+      if (!q?.proposal) return null;
+      return keyOf(q) === key ? { ...q, key } : null;
+    },
+    armed: () => state.armedProp,
+    arm: (token, repaint) => {
+      state.armedProp = token;
+      clearTimeout(state.armedPropTimer);
+      state.armedPropTimer = setTimeout(() => {
+        state.armedProp = null;
+        repaint();
+      }, 6000);
+    },
+    disarm: () => {
+      state.armedProp = null;
+      clearTimeout(state.armedPropTimer);
+    },
+    rerender: () => render(),
+    submit: (key, q, answer, restore) => submitProposal(q, answer, restore),
+  });
+
   const VIEW_NAME = {
     inbox: 'the inbox',
     card: 'a card',
@@ -136,6 +175,12 @@
     // phone; this is what remembers the click after you have edited its words, and
     // it is the only thing that can say whether the answer commissions work.
     picks: new Map(),
+    // The armed bulk control on a proposal, as `${key}|prop-yes` / `|prop-no`. Named
+    // apart from `picks` above on purpose: that one is a *decision option* clicked into
+    // the composer, this is the second tap owed before beads are created. The per-bead
+    // ✓/✕ are neither — they are shared with the phone, in public/proposal.js.
+    armedProp: null,
+    armedPropTimer: null,
     busy: '',
     note: null,
     // Whether the Mirror chip is the one that is up. Set from public/montabs.js, which
@@ -352,24 +397,16 @@
     if (!q) return `<div class="empty">That card is gone — it may have been answered.</div>`;
     const opts = q.decision?.options || [];
     const sections = (q.sections || []).map((s) => `<div class="md">${md(s.markdown)}</div>`).join('');
-    const proposal = q.proposal?.beads?.length
-      ? `<div class="mir-block">
-          <h3>${q.proposal.beads.length} bead${q.proposal.beads.length === 1 ? '' : 's'} it wants to file</h3>
-          ${q.proposal.beads
-            .map(
-              (b, i) => `<div class="mir-prop">
-                <div class="mir-prop-head"><span class="mir-rank">${i + 1}</span><strong>${esc(b.title || '')}</strong></div>
-                ${b.description ? `<div class="md">${md(b.description)}</div>` : ''}
-                <div class="mir-sub">${[b.type ? esc(b.type) : '', b.priority != null ? esc(pri(b.priority)) : '']
-                  .filter(Boolean)
-                  .join(' · ')}</div>
-              </div>`
-            )
-            .join('')}
-          <p class="subtitle">Per-bead buttons live on the Advocates tab. From here, answer in words —
-            <code>CREATE: 1,3</code> files those two and declines the rest.</p>
-        </div>`
-      : '';
+    /*
+      The beads it wants to file — the real card, with the real buttons (bc-yjekg.5).
+
+      This block used to draw the titles and then send you somewhere else, telling you
+      to answer in the server's own syntax (`CREATE: 1,3`) or go to the Advocates tab.
+      It is public/proposal.js's card now, exactly as the inbox and the Advocates page
+      draw it, with the pick state shared between all three.
+    */
+    const pq = q.proposal?.beads?.length ? { ...q, key: keyOf(q) } : null;
+    const proposal = pq ? `<div class="mir-block">${props.rowsHtml(pq)}${props.bulkHtml(pq)}</div>` : '';
     // A click fills the composer below; it does not answer. The phone settled that
     // — a choice you may want to qualify in a sentence has to reach the box before
     // it reaches the thread — and a mirror that answered on one click while the
@@ -596,6 +633,16 @@
     // from — a backward selection restored as forward grows out of the wrong end.
     const held = document.activeElement;
     const focus = held?.dataset?.draft || '';
+    // The proposal card's adjust fields count too (bc-yjekg.5). They are not
+    // `[data-draft]` — they are addressed by key, row and field — so the composer's
+    // one-attribute lookup cannot find them, and a repaint the phone caused mid-title
+    // would drop the caret. The *value* is never at risk: it lives in proposal.js's map.
+    const editField =
+      held?.matches?.('[data-role="edit-field"]') && pane.contains(held)
+        ? `[data-role="edit-field"][data-key="${CSS.escape(held.dataset.key)}"][data-idx="${CSS.escape(
+            held.dataset.idx
+          )}"][data-field="${CSS.escape(held.dataset.field)}"]`
+        : '';
     const caret = held?.selectionStart ?? null;
     const upto = held?.selectionEnd ?? null;
     const way = held?.selectionDirection || 'none';
@@ -614,13 +661,18 @@
 
     // Put the cursor back. Repaints here are driven by the phone, which means they
     // land at the least convenient moment by definition.
-    if (focus) {
-      const el = pane.querySelector(`[data-draft="${CSS.escape(focus)}"]`);
+    const back = focus ? `[data-draft="${CSS.escape(focus)}"]` : editField;
+    if (back) {
+      const el = pane.querySelector(back);
+      // A `<select>` has no selection range and throws on `setSelectionRange`, so the
+      // caret half is for the fields that take text and the focus half is for all.
       if (el) {
         el.focus();
-        const from = caret == null ? el.value.length : caret;
-        const to = upto == null ? from : upto;
-        el.setSelectionRange(from, to, way);
+        if (typeof el.setSelectionRange === 'function') {
+          const from = caret == null ? el.value.length : caret;
+          const to = upto == null ? from : upto;
+          el.setSelectionRange(from, to, way);
+        }
       }
     }
     // A live chat session is read from the bottom, like every other terminal.
@@ -686,6 +738,39 @@
     return ensureDetail(true);
   }
 
+  /**
+   * File what you picked on a proposal, from here (bc-yjekg.5).
+   *
+   * `/api/respond` with `create` and `edits` beside the sentence — the same fields the
+   * inbox and the Advocates page send, because there is one endpoint and it reads one
+   * shape. `restore` on a failure, then a repaint: a refusal must not also cost you the
+   * decisions you had made.
+   */
+  async function submitProposal(q, answer, restore) {
+    try {
+      await api('/api/respond', {
+        method: 'POST',
+        body: JSON.stringify({
+          workspace: q.workspace,
+          id: q.id,
+          response: answer.text,
+          ...(answer.create ? { create: answer.create } : {}),
+          ...(answer.edits ? { edits: answer.edits } : {}),
+        }),
+      });
+      note(
+        answer.create
+          ? `Filed ${answer.create.length} bead${answer.create.length === 1 ? '' : 's'} — the card is closed.`
+          : 'Declined — nothing was created, and the card is closed.'
+      );
+      await ensureDetail(true);
+    } catch (err) {
+      restore();
+      render();
+      note(err.message, true);
+    }
+  }
+
   async function respond(t, text, close, option = null) {
     const key = t.key || `${t.workspace}/${t.id}`;
     try {
@@ -728,6 +813,10 @@
   }
 
   pane.addEventListener('input', (e) => {
+    // A rewrite of a proposed bead, kept in public/proposal.js's map rather than in the
+    // DOM — this pane is repainted by whatever the phone does next (bc-yjekg.5).
+    if (props.onInput(e)) return;
+
     const box = e.target.closest('[data-draft]');
     if (!box) return;
     const was = draftFor(box.dataset.draft);
@@ -740,7 +829,15 @@
     if (Boolean(was) !== Boolean(box.value.trim())) render();
   });
 
+  /* The adjust editor's `<select>`s only fire `change`, never `input`. */
+  pane.addEventListener('change', (e) => props.onInput(e));
+
   pane.addEventListener('click', async (e) => {
+    // A proposal card's own taps — the fold, ✓/✎/✕ and the two bulk controls — belong
+    // to public/proposal.js, which answers true when it took one (bc-yjekg.5). Before
+    // the `data-mact` lookup because the shared card speaks `data-act`.
+    if (props.onClick(e)) return;
+
     const btn = e.target.closest('[data-mact]');
     if (!btn) return;
     e.preventDefault();

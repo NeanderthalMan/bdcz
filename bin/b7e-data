@@ -1,0 +1,115 @@
+#!/usr/bin/env node
+/**
+ * `b7e-data` — run a repo script with the data environment it needs in this worktree,
+ * instead of a remembered env prefix (bc-dgx7.175).
+ *
+ *     b7e-data python3 reference/maps/export_funday_overlay.py
+ *     b7e-data --print                     # the export lines and why, then exit
+ *     b7e-data --path reference/maps/web/elevation.bin --print
+ *     b7e-data --discover                  # draft .beadcause/data.json from env reads
+ *     b7e-data --dir <root> ...            # another checkout; this is how it is tested
+ *
+ * A worktree's git-LFS assets are ~130-byte pointers; the main checkout holds the real
+ * bytes. Three delmar sessions (dv-k4n.70, dv-k4n.73, dv-k4n.105) pointed scripts at the
+ * main checkout by hand, more than twenty-five times, under two different variable names.
+ * The table of variable -> module -> file lives in the checkout's `.beadcause/data.json`
+ * (see lib/data.js); the pointer question is lib/visible.js's. Output says where the
+ * answer came from: the manifest, or `--discover`'s heuristic scan.
+ *
+ * Exit codes: `0` ran / printed. `1` a needed file's bytes are nowhere on this machine
+ * (nothing is run), or the command's own exit code when it ran. `2` bad usage or an
+ * unreadable manifest.
+ *
+ * b7e-data is deliberately NOT on DEFAULT_TOOL_LIST: its main use runs an arbitrary
+ * command given on its own command line, so a grant would let an agent run anything under a
+ * `b7e-data` prefix that a bare `Bash(...)` rule would otherwise have to approve; `--print`
+ * is the read-only half and needs no grant of its own.
+ *
+ * @grant excluded
+ */
+import { spawnSync } from 'node:child_process';
+import { discover, envFor, printLine, resolveAll } from '../lib/data.js';
+import { repoRoot } from '../lib/visible.js';
+
+const USAGE = `usage: b7e-data [--dir <root>] [--path <file>] [--print] [--json] [--] <command> [args...]
+       b7e-data [--dir <root>] --discover
+
+  --print      show each variable, who reads it and where the bytes are, as export lines
+  --path FILE  only the entry whose holds-path is FILE
+  --discover   draft a .beadcause/data.json by scanning sources for *_DIR/_PATH env reads
+  --json       machine-readable report`;
+
+const argv = process.argv.slice(2);
+const opts = { dir: null, path: null, print: false, json: false, discover: false };
+let i = 0;
+for (; i < argv.length; i += 1) {
+  const a = argv[i];
+  if (a === '--help' || a === '-h') {
+    console.log(USAGE);
+    process.exit(0);
+  } else if (a === '--dir') opts.dir = argv[(i += 1)];
+  else if (a === '--path') opts.path = argv[(i += 1)];
+  else if (a === '--print') opts.print = true;
+  else if (a === '--json') opts.json = true;
+  else if (a === '--discover') opts.discover = true;
+  else if (a === '--') {
+    i += 1;
+    break;
+  } else if (a.startsWith('--')) {
+    console.error(`b7e-data: unknown flag ${a}\n${USAGE}`);
+    process.exit(2);
+  } else break;
+}
+const command = argv.slice(i);
+if ((opts.dir === undefined) || (opts.path === undefined)) {
+  console.error(`b7e-data: a flag is missing its value\n${USAGE}`);
+  process.exit(2);
+}
+
+const root = repoRoot(opts.dir || process.cwd());
+
+if (opts.discover) {
+  console.log(JSON.stringify(discover(root), null, 2));
+  console.error('b7e-data: heuristic draft from a source scan — fill in each "holds" and save as .beadcause/data.json');
+  process.exit(0);
+}
+if (!opts.print && !command.length) {
+  console.error(USAGE);
+  process.exit(2);
+}
+
+const { main, problems, results, declared } = resolveAll(root, { onlyPath: opts.path });
+if (problems.length) {
+  for (const p of problems) console.error(`b7e-data: ${p}`);
+  process.exit(2);
+}
+if (opts.path && !results.length) {
+  console.error(`b7e-data: ${opts.path} is not declared in .beadcause/data.json (${declared} entries) — try --discover`);
+  process.exit(1);
+}
+
+const env = envFor(results);
+const missing = results.filter((r) => r.source === 'nowhere');
+
+if (opts.json) {
+  console.log(JSON.stringify({ source: '.beadcause/data.json', main, results, env }, null, 2));
+} else if (opts.print || missing.length) {
+  console.error(`# from .beadcause/data.json (${declared} entries); main checkout ${main}`);
+  for (const r of results) {
+    const why = r.source === 'here' ? 'real bytes in this tree' : r.source === 'main' ? `this tree has ${r.localState}; real bytes in the main checkout` : `${r.holds} is ${r.state} here and not materialised anywhere`;
+    console.error(`# ${r.var} (read by ${r.reads.join(', ') || 'unspecified'}) — ${why}`);
+  }
+  if (opts.print && !missing.length) console.log(printLine(env));
+}
+if (missing.length) {
+  console.error(`b7e-data: bytes for ${missing.map((r) => r.holds).join(', ')} are nowhere on this machine — not running`);
+  process.exit(1);
+}
+if (opts.print || opts.json) process.exit(0);
+
+const child = spawnSync(command[0], command.slice(1), { stdio: 'inherit', env: { ...process.env, ...env }, cwd: process.cwd() });
+if (child.error) {
+  console.error(`b7e-data: cannot run ${command[0]} — ${child.error.message}`);
+  process.exit(1);
+}
+process.exit(child.status ?? 1);

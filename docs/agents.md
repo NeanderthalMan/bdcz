@@ -959,7 +959,7 @@ loremia's. Every one of those pairs is the same subject filed twice.
 
 Rewriting an existing key is never refused on these grounds, because that is how a note is
 corrected. Notes written before these rules are left as they are; cleaning up that backlog
-is the curator's job (`bc-u1ltu.5`). After checking that a note still holds, a session runs
+is [the curator's job](#the-weekly-curator-archive-promote-merge-split) (`bc-u1ltu.5`). After checking that a note still holds, a session runs
 `note --verify <key>`, which moves `verified` and nothing else.
 
 **Stale by evidence, and the archive** (`bc-u1ltu.4`). `staleNotes`, and
@@ -996,6 +996,67 @@ went and why. It is out of every brief, listing and search. You can reach it onl
 - `notes --archived [<key>]` lists the archive or reads one note from it.
 - `notes --search <words> --archived` searches the archive.
 - `note --archive=<key> [--reason=]` and `note --restore=<key>` move a note by hand.
+
+**Health, on the Memory tab** (`bc-u1ltu.6`). `notesHealth` computes the pragma's four
+numbers for one agent's notes in one repo, and the Memory tab shows them as a card under
+the notes store. The first two are marked red or green against their target:
+
+- **Hit rate** (target 90%): reads that found what they asked for in the last 30 days.
+- **Read share** (target 70%): the share of live notes read by name in that window.
+- **Bytes a session start loads:** the index, against the size of the whole store.
+- **Notes retired:** notes archived and superseded in the window, counted from the ref's
+  own commit subjects. Promotions show as "not measured", rather than zero, until the
+  curator files them.
+
+On 2026-09-30:
+
+| Store | Hit rate | Read share |
+|---|---|---|
+| Worker, this repo | 95% | 20% (233 of 1,146) |
+| Worker, delmar | 97% | 53% |
+
+The read share is the number the stale rule and the curator exist to move. The numbers
+come from `memory-reads.jsonl`, so they start on 13 August, when the log started.
+
+#### The weekly curator: archive, promote, merge, split
+
+`lib/curator.js` (`bc-u1ltu.5`) works through the backlog the rules above leave alone. Once
+a week per checkout, from the daemon's poll cycle, it does four things to every agent's
+notes in that repo:
+
+- **Archive** under the policy decided in `bc-ltgld`. A note that is stale by evidence goes
+  on sight. A note that is only *unused* goes only when it is older than 60 days **and** the
+  read log reaches back that far, at most 50 a run, oldest first. The second condition
+  matters: the log started on 14 August, so until mid-October "nobody read it" may only mean
+  "nobody was counting", and the curator holds every unused note back and says how many.
+- **Promote.** A note read 25 times or more is a rule every session has to rediscover. The
+  curator files a bead (label `note-promotion`) asking for that rule to become a test, a
+  lint or a README section, and for the note to be archived. At most five a run, most-read
+  first, and never the same note twice.
+- **Merge** the largest prefix clusters (five or more keys sharing their first two words,
+  such as the 24 `sw-cache-*` notes), and **split** the largest notes over the 4 KB cap.
+  These need prose, so they are one headless `claude -p` per run, given at most two
+  clusters and three notes. It answers in a fenced `curate` block, and the daemon checks
+  every proposal against the rules `note` holds a session to: the cap, evidence and kind,
+  only keys it was given, a merge that actually merges, and no collision with a live key.
+  A cluster the model leaves alone is not offered again for four weeks.
+
+**Every action is a commit.** An archive is `archiveNotes`, undone by `note --restore`.
+Each merge or split is its own commit on the store's ref (`replaceNotes`), and the notes it
+replaced are still in that ref's history, and named in the new note's `from`. The run itself
+is a commit on `refs/beadcause/curator`, whose `state.json` is the ledger that makes the
+weekly cadence and "never the same promotion twice" survive a restart.
+
+The first dry run against this repo, on 2026-10-01, planned 25 archives across four agents,
+promotions for `no-claude-md-readme-is-the-spec` (235 reads), `worktree-setup` (169),
+`tests`, `test-filter-mjs-guards-every-lib-file` and
+`a-new-lib-module-must-be-claimed-by-the-evidence-register`, merges of `sw-cache` (24) and
+`b7e-gate` (17), and a split of the 237 KB note. To see what next week's run would do:
+
+    node scripts/memory-curate.mjs [<repo>] [--json]
+
+It is read-only. `advocates.memoryCurator: false` switches the sweep off, and
+`advocates.memoryCuratorDays` sets the interval.
 
 **A linked worktree shares its parent's ref store, and that is what makes this usable
 here at all.** Nearly all work in this repo happens in a worktree under

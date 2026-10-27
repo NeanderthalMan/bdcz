@@ -1728,6 +1728,13 @@
    * predict, because the sheet already knows the status. Predicting it as a *missing*
    * item would leave the reader to work out whether the app has an editor at all; greyed
    * out with the reason under it is the same fact, said.
+   *
+   * **Move is on every bead, closed ones included** (bc-ka5y.44), which is the opposite
+   * call to Edit's and rests on the same distinction. Editing a closed bead rewrites the
+   * record of what was done; moving one only says where that record is filed, and a
+   * finished bead under a retired epic is exactly the thing somebody tidying the tracker
+   * from a phone wants to pick up. lib/beadmove.js refuses nothing on status either, so
+   * an item drawn here has a route behind it.
    */
   function sheetMenuHtml(b) {
     const shut = String(b?.status || '').trim() === 'closed';
@@ -1738,10 +1745,15 @@
       ${
         shut
           ? // `role="none"` because a `role="menu"` may only hold menu items, and this is
-            // the disabled one's explanation rather than a second thing to choose.
+            // the disabled one's explanation rather than a second thing to choose. It sits
+            // between the two items and still reads as Edit's, because it is the greyed
+            // item it is under that raises the question.
             '<p class="menu-why" role="none">A closed bead is the record of what was done — say it in a comment instead.</p>'
           : ''
       }
+      <button class="menu-item" role="menuitem" data-sheet-act="move">
+        <span class="glyph">↳</span> Move this bead
+      </button>
     </div>`;
   }
 
@@ -1836,6 +1848,117 @@
       <p class="board-hint">Saving rewrites the bead itself — this is not the endorsement
         queue, so nothing here endorses, revokes or moves any marker. The labels the daemon
         owns are not in the box because a save could not take them off.</p>
+    </div>`;
+  }
+
+  /* ---------------------------------------------------------------- the move card */
+
+  /** As much of a departing bead's title as the stand-in's prefill carries. */
+  const STAND_IN_TITLE_MAX = 90;
+
+  /**
+   * What a minted stand-in would be called — `standInFor` in lib/beadmove.js, restated.
+   *
+   * A copy for `bylineBase`'s reason: nothing under public/ imports from lib/. Unlike the
+   * protected-label list, though, drift here is harmless in a way worth saying out loud —
+   * the route takes a typed title as authoritative, and this box is always on screen and
+   * always filled before Save can be pressed. So the two only ever have to agree about a
+   * default, and where they disagree the phone wins, which is the half a person read.
+   */
+  const standInTitle = (title, id) => {
+    const t = String(title || '').trim();
+    const short = t.length > STAND_IN_TITLE_MAX ? `${t.slice(0, STAND_IN_TITLE_MAX - 1).trimEnd()}…` : t;
+    return `What was under ${short || String(id || '').trim() || 'the bead that moved'}`;
+  };
+
+  /**
+   * Where a bead should go, and what happens to what is under it. bc-ka5y.44.
+   *
+   * The edit card's shape a second time (`.eq-edit`, `.eq-lab`, `.board-actions`) and
+   * deliberately not a new one — it swaps into the sheet body the same way, it is
+   * dismissed by the same Cancel, and it adds no class `style.css` does not already have.
+   *
+   * **The destination always starts on where the bead already is**, so the first thing
+   * Save can do is nothing. That matters more here than on most forms: this control is
+   * reached by tapping ⋮ on a bead you are reading, the list under it is every open root
+   * in the workspace, and a picker that defaulted to whichever of those sorted first
+   * would put one thumb-slip between reading a bead and reparenting it. When the current
+   * parent is an ordinary task it is not in `/api/roots` at all, so it is prepended as its
+   * own option — the list is what you may move it *to*, and where it is now has to be one
+   * of them or the form cannot express "leave it".
+   *
+   * **The children question is drawn only when there are children**, and its second
+   * option names where they would land: the grandparent by id, or "a new epic" when there
+   * is no grandparent to name. That is the whole of what lib/beadmove.js decides, said in
+   * the words of this bead's own family rather than in general.
+   *
+   * **The stand-in's title box is `style="display:none"` rather than `hidden`**, and the
+   * toggle sets `style.display` for the same reason: `.eq-lab` is `display: flex`, which
+   * outranks the UA's `[hidden]` rule, so a `hidden` attribute on this element would draw
+   * it anyway. Doing it this way also keeps the whole card inside the CSS the app already
+   * ships — no new rule, so no cached-stylesheet pairing to reason about.
+   */
+  function sheetMoveHtml(b, { roots = [], children = [], parent = null } = {}) {
+    const id = String(b?.id || '');
+    const here = String(parent?.id || '').trim();
+    const opts = (roots || []).filter((c) => c.id && c.id !== id);
+    const known = opts.some((c) => c.id === here);
+    const opt = (value, label, on) => `<option value="${esc(value)}"${on ? ' selected' : ''}>${esc(label)}</option>`;
+    const destinations = [
+      opt('', 'no parent — top level', !here),
+      // Where it is now, when the roots list cannot say it. Labelled, because an id in a
+      // list of epics with no note beside it is indistinguishable from a place to move to
+      // — and labelled *before* the title rather than after it, because a collapsed
+      // `<select>` at 360px shows about 36 characters and a note in the 50th is a note
+      // nobody sees until they open the list they were meant to be warned about.
+      // The title is only there when the edges arrived — `relations` falls back to
+      // `{id}` off `b.parent` alone — so it is appended rather than assumed, or a payload
+      // that lost the row draws an option ending in a dash with nothing after it.
+      here && !known
+        ? opt(here, `${here} (where it is now)${parent?.title ? ` — ${String(parent.title).slice(0, 50)}` : ''}`, true)
+        : '',
+      ...opts.map((c) =>
+        opt(c.id, `${c.id}${c.priority != null ? ` P${c.priority}` : ''} — ${String(c.title || '').slice(0, 50)}`, c.id === here)
+      ),
+    ]
+      .filter(Boolean)
+      .join('');
+    const kids = (children || []).length;
+    const leaveLabel = here ? `leave them under ${here}` : 'leave them under a new epic';
+    const kidsRow = kids
+      ? `<label class="eq-lab">${esc(kids === 1 ? 'Its one child' : `Its ${kids} children`)}
+        <select data-move="children">
+          ${opt('with', 'move with it', true)}
+          ${opt('leave', leaveLabel, false)}
+        </select>
+      </label>
+      ${
+        here
+          ? ''
+          : `<label class="eq-lab" id="sheet-move-standin" style="display:none">The epic to leave them under
+        <input type="text" data-move="standin" value="${esc(standInTitle(b?.title, id))}">
+      </label>`
+      }`
+      : '';
+    return `<div class="eq-edit" id="sheet-move" data-id="${esc(id)}">
+      <label class="eq-lab">Move it under
+        <select data-move="parent">${destinations}</select>
+      </label>
+      ${kidsRow}
+      <div class="board-actions">
+        <button class="board-btn merge" data-sheet-act="move-save">Move</button>
+        <button class="board-btn link" data-sheet-act="cancel">Cancel</button>
+      </div>
+      <p class="edit-err" id="sheet-move-err" hidden></p>
+      <p class="board-hint">${
+        kids
+          ? esc(
+              here
+                ? `Leaving them puts each one under ${here}, which is what decides them today.`
+                : 'Nothing decides this bead, so there is no grandparent to leave them with — leaving them mints that epic and puts them under it, rather than dropping them somewhere no session would ever open on.'
+            )
+          : 'Choosing top level means nothing decides it, and nothing will open a session on it until something does.'
+      }</p>
     </div>`;
   }
 
@@ -2050,6 +2173,7 @@
     if (!btn || btn.disabled) return;
     ev.preventDefault();
     if (btn.dataset.sheetAct === 'save') return saveEdit();
+    if (btn.dataset.sheetAct === 'move-save') return saveMove();
     // Cancel: the bead as the server last described it, which is the copy `paintSheet`
     // kept. Nothing typed is written anywhere, so there is nothing to undo.
     if (btn.dataset.sheetAct === 'cancel' && sheetBead) {
@@ -2063,16 +2187,36 @@
     }
   });
 
-  // Edit lives in the popover, which hangs off the head rather than the body — so it is
-  // caught here, one listener up, rather than by the delegate above.
+  // The ⋮'s own items live in the popover, which hangs off the head rather than the body
+  // — so they are caught here, one listener up, rather than by the delegate above. Both
+  // of them dismiss the menu first: the card replaces what is under it, and a popover
+  // left open over a form is a popover you have to dismiss before you can use the form.
   sheet.addEventListener('click', (ev) => {
-    const btn = ev.target.closest('.sheet-head [data-sheet-act="edit"]');
+    const btn = ev.target.closest('.sheet-head [data-sheet-act]');
     if (!btn || btn.disabled || !sheetBead) return;
     ev.preventDefault();
+    const act = btn.dataset.sheetAct;
     closeSheetMenu();
+    if (act === 'move') return openMoveCard();
+    if (act !== 'edit') return;
     $('sheet-body').innerHTML = sheetEditHtml(sheetBead);
     $('sheet-body').scrollTop = 0;
     $('sheet-body').querySelector('[data-edit="title"]')?.focus();
+  });
+
+  /**
+   * The one control on the move card that changes the card — see `sheetMoveHtml` on why
+   * this sets `style.display` and not `hidden`.
+   *
+   * Delegated from the body for the click delegate's reason: the card is written into
+   * `innerHTML` and a listener bound to a node inside it dies with the node. Guarded on
+   * the box existing, because it is drawn only for a bead with no parent — everywhere
+   * else "leave them" names a grandparent and nothing has to be typed.
+   */
+  $('sheet-body').addEventListener('change', (ev) => {
+    if (!ev.target.matches?.('[data-move="children"]')) return;
+    const box = $('sheet-move-standin');
+    if (box) box.style.display = ev.target.value === 'leave' ? '' : 'none';
   });
 
   /** The card as the route wants it: the six fields, labels split on commas. */
@@ -2123,6 +2267,97 @@
       if (save) {
         save.disabled = false;
         save.textContent = 'Save';
+      }
+      return;
+    }
+    await paintSheet(id, sheetSeq);
+  }
+
+  /**
+   * Ask what there is to move it to, and what is under it — then draw the card.
+   *
+   * **Both answers first, and a refusal if either is missing.** Every other late call on
+   * this sheet degrades to a sheet that reads correctly with one control absent, which is
+   * the right trade for a control that only *adds* something. This one is not that: a
+   * card drawn without `/api/bead-links` would be a card with no children question on a
+   * bead that has six, and Save on it would drag all six across the tracker without ever
+   * having asked. So a failed read leaves the bead you were reading exactly as it is,
+   * with one line above it saying why there is no card — one line with an id, so a second
+   * tap replaces it rather than stacking another under it.
+   *
+   * `/api/roots` is `wait: true` on the server (it would rather take a second and a half
+   * on a cold graph than draw "there is nowhere to put this" over a tracker full of
+   * epics), so the wait is real and is said out loud rather than left as a dead tap.
+   */
+  async function openMoveCard() {
+    const b = sheetBead;
+    if (!b) return;
+    const seq = sheetSeq;
+    const notice = (cls, text) => {
+      $('sheet-move-err')?.remove();
+      $('sheet-body').insertAdjacentHTML('afterbegin', `<p class="${cls}" id="sheet-move-err">${esc(text)}</p>`);
+    };
+    notice('board-hint', 'Reading the tracker for somewhere to put it…');
+    let roots = [];
+    let children = [];
+    try {
+      const [got, links] = await Promise.all([
+        api(`/api/roots?workspace=${encodeURIComponent(workspace)}`),
+        api(`/api/bead-links?workspace=${encodeURIComponent(workspace)}&id=${encodeURIComponent(b.id)}`),
+      ]);
+      roots = got?.roots || [];
+      children = links?.children || [];
+    } catch (err) {
+      if (seq !== sheetSeq) return;
+      notice('edit-err', `Can't offer a move — ${err.message}`);
+      return;
+    }
+    if (seq !== sheetSeq) return;
+    $('sheet-body').innerHTML = sheetMoveHtml(b, { roots, children, parent: relations(b).parent });
+    $('sheet-body').scrollTop = 0;
+  }
+
+  /**
+   * Post the move, then draw the bead the server now holds.
+   *
+   * `saveEdit`'s shape and its reasons, down to the disabled button: the failure this
+   * has is a double tap, and the second *repaint* would land under a sheet the first had
+   * already replaced. A refusal leaves the card as it is — the two that matter here are a
+   * loop and a destination with nothing decided above it (lib/beadmove.js), and both are
+   * answered by picking somewhere else in the select that is still on screen.
+   *
+   * `children` is `with` when the card drew no question, which is a bead with none: that
+   * is the mode the route defaults to anyway, and sending it explicitly keeps the one
+   * place that decides it in the card rather than half here and half in the parser.
+   */
+  async function saveMove() {
+    const card = $('sheet-move');
+    if (!card) return;
+    const id = card.dataset.id;
+    const err = $('sheet-move-err');
+    const go = card.querySelector('[data-sheet-act="move-save"]');
+    const val = (name) => card.querySelector(`[data-move="${name}"]`)?.value ?? '';
+    if (err) err.hidden = true;
+    if (go) {
+      go.disabled = true;
+      go.textContent = 'Moving…';
+    }
+    try {
+      await post('/api/bead/reparent', {
+        workspace,
+        id,
+        parent: val('parent'),
+        children: card.querySelector('[data-move="children"]') ? val('children') : 'with',
+        standIn: val('standin'),
+      });
+    } catch (e) {
+      if (err) {
+        err.textContent = e.message;
+        err.hidden = false;
+      }
+      if (go) {
+        go.disabled = false;
+        go.textContent = 'Move';
       }
       return;
     }

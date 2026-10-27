@@ -162,6 +162,10 @@ const old = retire('old-and-merged', { age: 5 });
 const young = retire('young', { age: 0.5 });
 const locked = retire('locked-one', { age: 5 });
 const dirty = retire('dirty-one', { age: 5 });
+// bc-iaju1.8: the entry whose *contents* are gone. Five real entries sat in this repo's
+// attic for 29 days being reported as "465 uncommitted tracked files" — every one of
+// those lines a deletion, nothing edited, and no amount of waiting could clear it.
+const emptied = retire('emptied-one', { age: 5 });
 const messy = retire('untracked-only', { age: 5 });
 const unmerged = retire('unmerged-one', { age: 5, merged: false });
 const occupied = retire('someone-in-it', { age: 5 });
@@ -179,6 +183,11 @@ const remoteOnly = retire('merged-on-origin', { age: 5, land: 'remote' });
 
 git(main, 'worktree', 'lock', locked.dest);
 fs.writeFileSync(path.join(dirty.dest, 'file.txt'), 'edited by hand\n');
+// Emptied rather than edited: every tracked file removed from disk, exactly as the five
+// stuck entries were. `git status` then reports one ` D` per file and no modifications.
+for (const f of fs.readdirSync(emptied.dest)) {
+  if (f !== '.git') fs.rmSync(path.join(emptied.dest, f), { recursive: true, force: true });
+}
 // Untracked *and* ignored, which is the normal state of a retired worktree and must
 // not count: a build directory and a stray dotfile are why the soft delete exists.
 fs.mkdirSync(path.join(messy.dest, 'ignored'), { recursive: true });
@@ -254,6 +263,10 @@ for (const [entry, want] of [
     assert.match(why(entry.name), want, `reason was: ${why(entry.name) || '(none)'}`);
   }, `${entry.name} is kept, and named with the reason`);
 }
+
+await check(async () => {
+  assert.ok(!fs.existsSync(emptied.dest), `kept it: ${why(emptied.name)}`);
+}, 'an entry whose tracked files are all deleted expires — a deletion is not unsaved work');
 
 await check(async () => {
   const line = describeExpiry(swept);

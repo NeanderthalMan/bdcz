@@ -76,7 +76,6 @@
 
   const token = localStorage.getItem('beadcause.token') || '';
   const out = document.getElementById('eq');
-  const pulse = document.getElementById('pulse');
 
   /* Which events matter to this screen is `QUEUE_EVENTS` in public/stream.js, next to
      the board's own list and for the same reason: the inbox holds a copy of this queue
@@ -1264,7 +1263,6 @@
     }
     stale = false;
     loading = true;
-    pulse.classList.add('busy');
     try {
       const res = await fetch(`/api/unendorsed${refresh ? '?refresh=1' : ''}`, {
         headers: { 'x-beadcause-token': token },
@@ -1308,7 +1306,6 @@
       render();
     } finally {
       loading = false;
-      pulse.classList.remove('busy');
     }
   }
 

@@ -1,0 +1,162 @@
+#!/usr/bin/env node
+/**
+ * `b7e-premise` — does the symptom a bead describes still reproduce at a ref?
+ *
+ *     b7e-premise -w beadcause -b bc-dgx7.70
+ *     b7e-premise -w beadcause -b bc-dgx7.70 --ref origin/main
+ *     b7e-premise -w beadcause -b bc-dgx7.70 --json
+ *
+ * bc-dgx7.70: five sessions (dv-gr6.48, dv-3rn.5, dv-b5d.30, dv-gr6.47, dv-gr6.44) each
+ * arrived at a bead, hand-checked whether the problem it describes still exists, and
+ * found it already fixed — every one of them re-deriving the same four kinds of check
+ * from scratch. See lib/premise.js for the claim extraction, the four checkable shapes,
+ * and what HOLDS/GONE/UNCHECKABLE and the exit code mean; this file is only the argv
+ * parsing and the printing around it, same split as `bin/b7e-prior` and `bin/b7e-checks`.
+ *
+ * **This is not `b7e-prior` or `b7e-landed`/`b7e-unlanded`.** Those ask where a bead's
+ * *work* is sitting — a branch, a pull request, a worktree. This asks whether the
+ * *symptom* it reports is still true at a ref, which in the founding cases had no branch
+ * and no pull request behind it at all: the defect had been fixed incidentally by
+ * somebody else's merge.
+ *
+ * Exit codes: `0` ran to completion and at least one checkable claim came back GONE (or
+ * every claim was UNCHECKABLE, or nothing checkable was found at all) — worth a look.
+ * `4` ran to completion and every checkable claim HOLDS — nothing has changed since the
+ * bead was filed. `2` bad usage. `5` `-w`/`-b` named something this checkout's tracker
+ * does not have, or the ref does not resolve.
+ *
+ * Running a `python3 scripts/*.py` claim for real needs a throwaway detached `git
+ * worktree` at the ref (lib/checks.js's `makeRefWorktree`, the same one `b7e-checks
+ * --baseline` and `b7e-at` are withheld for) — the other three claim shapes are plain
+ * `git` plumbing reads, but one write-shaped path is enough.
+ *
+ * b7e-premise is deliberately NOT on DEFAULT_TOOL_LIST, on the same reasoning as
+ * `b7e-checks` and `b7e-at`: that one write-shaped path — the lazy `makeRefWorktree` a
+ * script claim needs — is the step those two are withheld for, even though bc-dgx7.70's own
+ * text asks for the grant.
+ *
+ * @grant excluded
+ */
+import { loadConfig } from '../lib/config.js';
+import { Bd } from '../lib/bd.js';
+import { resolveSessionDir } from '../lib/session.js';
+import { checkPremise, describeResult, verdictLine, groupPromptFor, beadIdsIn } from '../lib/premise.js';
+import { prefixFor } from '../lib/beadref.js';
+import { prefixOf } from '../lib/mentions.js';
+import { planFrom } from '../lib/plan.js';
+
+const argv = process.argv.slice(2);
+const has = (f) => argv.includes(f);
+const value = (...names) => {
+  for (const f of names) {
+    const inline = argv.find((a) => a.startsWith(`${f}=`));
+    if (inline) return inline.slice(f.length + 1);
+    const at = argv.indexOf(f);
+    if (at > -1) return argv[at + 1];
+  }
+  return undefined;
+};
+
+const USAGE = `usage: b7e-premise -w <workspace> -b <bead> [--ref <ref>] [--json]
+
+Does the symptom this bead describes still reproduce at a ref — before anyone opens a
+worktree to find out by hand? Extracts every checkable claim from the bead's description
+acceptance criteria and the parent's plan-group prompt (a commit sha, a \`python3 scripts/*.py\`-shaped command, a repo
+path, a \`grep\`-shaped literal-in-file check, a bead id, or a worktree branch name), checks each against the ref, and
+reports HOLDS / GONE / UNCHECKABLE with its evidence, plus a closing verdict.
+
+  -w, --workspace <name>   which tracker (required; one of the configured workspaces)
+  -b, --bead <id>          the bead to check (required)
+  --ref <ref>              the git ref to check against (default: origin/main)
+  --json                   the machine-readable form instead of the printed report`;
+
+if (has('--help') || has('-h')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+
+const wsName = value('-w', '--workspace');
+const beadId = value('-b', '--bead');
+const ref = value('--ref') || 'origin/main';
+const JSON_MODE = has('--json');
+
+function fail(msg, code = 2) {
+  console.error(`b7e-premise: ${msg}`);
+  process.exit(code);
+}
+
+if (!wsName) fail(`-w/--workspace is required\n${USAGE}`);
+if (!beadId) fail(`-b/--bead is required\n${USAGE}`);
+
+const cfg = loadConfig();
+const ws = cfg.workspaces.find((w) => w.name === wsName);
+if (!ws) {
+  fail(`no workspace named "${wsName}"\nconfigured workspaces: ${cfg.workspaces.map((w) => w.name).join(', ') || 'none'}`, 5);
+}
+
+const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me, accounts: cfg.accounts });
+
+let row;
+try {
+  row = await bd.show(ws, beadId);
+} catch (err) {
+  fail(`${ws.name} has no bead ${beadId}: ${String(err?.message || err).split('\n')[0]}`, 5);
+}
+if (!row) fail(`${ws.name} has no bead ${beadId}`, 5);
+
+let dir;
+try {
+  dir = resolveSessionDir(cfg, ws, row);
+} catch (err) {
+  fail(`could not resolve a checkout for ${ws.name}: ${String(err?.message || err).split('\n')[0]}`, 5);
+}
+
+// The parent's plan-group prompt is a third claim source (bc-dgx7.133). Best effort: a
+// bead with no parent, or a parent with no plan, simply has no group prompt.
+let group = null;
+if (row.parent) {
+  try {
+    group = groupPromptFor(planFrom(await bd.comments(ws, row.parent)), beadId);
+  } catch {
+    group = null;
+  }
+}
+
+const text = [row.description, row.acceptance_criteria || row.acceptance, row.notes, group?.prompt].filter(Boolean).join('\n\n');
+
+// A bead id names a tracker by its prefix, so look each one up in whichever configured
+// workspace owns that prefix — not just the one -w names.
+const owners = new Map();
+for (const w of cfg.workspaces) {
+  const p = await prefixFor(bd, w);
+  if (p) owners.set(p.toLowerCase(), w);
+}
+const beads = new Map();
+for (const id of beadIdsIn(text, [...owners.keys()], [beadId])) {
+  try {
+    beads.set(id, await bd.show(owners.get(prefixOf(id)), id));
+  } catch {
+    beads.set(id, null);
+  }
+}
+
+let outcome;
+try {
+  outcome = checkPremise(dir, text, { ref, beadPrefixes: [...owners.keys()], beads, self: beadId });
+} catch (err) {
+  fail(`could not check against "${ref}": ${String(err?.message || err).split('\n')[0]}`, 5);
+}
+
+if (JSON_MODE) {
+  console.log(JSON.stringify({ workspace: ws.name, bead: beadId, ...outcome }, null, 2));
+} else {
+  console.log(`b7e-premise ${beadId} · ${ws.name} @ ${ref}${group ? ` · incl. group prompt "${group.name}"` : ''}\n`);
+  if (!outcome.results.length) {
+    console.log('  nothing checkable found in the description or acceptance criteria\n');
+  } else {
+    for (const r of outcome.results) console.log(`  ${describeResult(r)}`);
+    console.log('');
+  }
+  console.log(verdictLine(outcome));
+}
+process.exitCode = outcome.exitCode;

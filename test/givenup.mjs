@@ -68,6 +68,9 @@ fs.mkdirSync(REPO, { recursive: true });
 fs.mkdirSync(SESSIONS, { recursive: true });
 
 const MONITOR = fs.readFileSync(path.join(HERE, '..', 'public', 'monitor.js'), 'utf8');
+// monitor.js mounts the shared proposal card at IIFE time (bc-yjekg.5), so this runs in
+// the context first — the order public/monitor.html loads them in.
+const PROPOSAL = fs.readFileSync(path.join(HERE, '..', 'public', 'proposal.js'), 'utf8');
 
 const { createAdvocates } = await import(LIB('advocate.js'));
 
@@ -501,6 +504,7 @@ async function drawConsole(payload) {
       return { ok: true, status: 200, json: async () => body };
     },
   });
+  vm.runInContext(PROPOSAL, ctx, { filename: 'proposal.js' });
   vm.runInContext(MONITOR, ctx, { filename: 'monitor.js' });
   // The boot is async and the IIFE hands nothing back, so settle on the stubs' own
   // microtasks. Bounded rather than timed: nothing here waits on a clock.

@@ -4,6 +4,7 @@
  *
  *   beadcause-controls show <id>                  one control, its crosswalk, and its evidence
  *   beadcause-controls declare <workspace> <bead> <id...>   what this bead exercises
+ *   beadcause-controls none <workspace> <bead>    say out loud that it exercises nothing
  *   beadcause-controls files <path...>            the reverse lookup — what these files evidence
  *   beadcause-controls coverage [--months=N]      what is unevidenced, forecast-only, or stale
  *   beadcause-controls rebuild [<repo-dir>]       rebuild the index from that repo's git notes
@@ -19,6 +20,11 @@
  * that the merge, when it comes, has something to promote. That is the whole design, and
  * it is why this command cannot be run against a bead that has already landed and expect
  * to change anything.
+ *
+ * **`none` is the other declaration**, and the claim gate (lib/claimgate.js) is why it
+ * exists: while management is on, a merge whose bead declares nothing is refused, and a
+ * bead that genuinely bears on no control says so with the `exercises:none` label rather
+ * than by staying silent. It writes only the label — the same one `bd label add` would.
  *
  * An id the corpus does not have is **refused by name** rather than dropped quietly, and
  * the refusal is the point: a fabricated `ISO42001.A.6.2.9` sitting beside the real
@@ -36,6 +42,7 @@ import { byFramework, control, corpus, crosswalk, FRAMEWORK_TOKENS, keepControls
 import { edgesFor, edgesForFiles, everything, rebuildFrom } from '../lib/controlindex.js';
 import { coverage, describeCoverage } from '../lib/controlcoverage.js';
 import { readControls, withControls } from '../lib/beadcontrols.js';
+import { NO_CLAIM_LABEL } from '../lib/claimgate.js';
 
 const argv = process.argv.slice(2);
 const [verb, ...rest] = argv.filter((a) => !a.startsWith('--'));
@@ -79,6 +86,7 @@ async function main() {
         'beadcause-controls corpus [<framework>]',
         'beadcause-controls show <id>',
         'beadcause-controls declare <workspace> <bead> <id...>',
+        'beadcause-controls none <workspace> <bead>',
         'beadcause-controls files <path...>',
         'beadcause-controls coverage [--months=N]',
         'beadcause-controls rebuild [<repo-dir>]',
@@ -148,6 +156,22 @@ async function main() {
     await bd.update(ws, bead, { notes: withControls(issue.notes, { ids: merged }) });
     console.log(`${bead} exercises ${merged.join(', ')}`);
     console.log('nothing is evidenced yet — the merge that lands this bead is what proves it.');
+    return;
+  }
+
+  if (verb === 'none') {
+    const [workspace, bead] = rest;
+    if (!workspace || !bead) die('usage: beadcause-controls none <workspace> <bead>');
+    const ws = workspaceNamed(workspace);
+    const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me, accounts: cfg.accounts });
+    const issue = await bd.show(ws, bead);
+    if (!issue) die(`${workspace}/${bead} not found`);
+    await bd.addLabel(ws, bead, NO_CLAIM_LABEL);
+    const named = readControls(issue).ids;
+    console.log(`${bead} declares it exercises no control (${NO_CLAIM_LABEL})`);
+    // Not refused: a stale "none" beside a real claim is harmless, because the claim gate
+    // reads the block first. Said, so whoever ran this knows which one counts.
+    if (named.length) console.log(`it also names ${named.join(', ')}, and those are what the claim gate reads.`);
     return;
   }
 

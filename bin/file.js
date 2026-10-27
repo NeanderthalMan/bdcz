@@ -40,6 +40,7 @@
  *     acceptance: A deploy changes the URL.
  *     rationale: Found while reading webapp/templates/base.html for bc-7qo.
  *     files: [webapp/templates/base.html]   # optional: what it expects to touch
+ *     labels: [exercises:none]  # optional: declares it bears on no control (lib/claimgate.js)
  *
  * `files` is written into the bead's description as the block lib/beadfiles.js reads, and
  * it is a forecast rather than a promise: nothing refuses a filing over it and a bead that

@@ -382,7 +382,9 @@ try {
     // would say so and no cookie would be cleared.
     const home = await request(port, '/__demo/blue', { cookie: onGreen });
     assert.equal(home.status, 303);
-    assert.equal(home.headers.location, '/');
+    // To DemoMode's list, with the candidate it came back from named so the list puts it
+    // first (bc-sj8k.2) — the return trip lands on the page that sent it, not the inbox.
+    assert.equal(home.headers.location, `/demo?from=${GOOD}`);
     assert.equal(home.headers['x-beadcause-env'], 'blue');
     assert.equal(demoCookieOf(home), 'beadcause_demo=');
     assert.match([].concat(home.headers['set-cookie']).join('\n'), /Max-Age=0/);
@@ -390,6 +392,11 @@ try {
     // The device's next request, cookie gone, is blue.
     const next = await request(port, '/api/health');
     assert.equal(next.headers['x-beadcause-env'], 'blue');
+    // With no cookie it is still the way to the list; a cookie that is not an id's shape
+    // is not echoed onto the address.
+    assert.equal((await request(port, '/__demo/blue')).headers.location, '/demo');
+    const odd = await request(port, '/__demo/blue', { cookie: 'beadcause_demo=%2F%2Fevil.example%3Fx' });
+    assert.equal(odd.headers.location, '/demo');
     // An upgrade cannot be the hole in the router's own namespace either.
     assert.equal((await upgrade(port, '/__demo/blue', { cookie: onGreen })).status, 404);
   });
@@ -434,6 +441,17 @@ try {
     assert.match(s.greenLast.why, /exited \(SIGKILL\)/);
     assert.equal(s.active.pid, blueNow, 'green dying replaced blue');
     assert.ok(routerLog.some((l) => l.includes(`green: DROPPED candidate ${GOOD} (pid ${greenPid})`)));
+  });
+
+  await check('a browser navigation to a flip gets the shell-refresh interstitial, with the cookie set, not a bare 303', async () => {
+    const r = await request(port, '/__demo/blue', { accept: 'text/html', cookie: onGreen });
+    assert.equal(r.status, 200);
+    assert.equal(demoCookieOf(r), 'beadcause_demo=');
+    assert.equal(r.headers['x-beadcause-env'], 'blue');
+    assert.match(r.body, /beadcause:sw-refresh/);
+    // And it lands where the 303 would have: blue's way home is DemoMode's list (bc-sj8k.2).
+    assert.ok(r.body.includes(`location.replace("/demo?from=${GOOD}")`), r.body);
+    assert.ok(r.body.includes(`url=/demo?from=${GOOD}"`), r.body);
   });
 
   await check('a device whose candidate has gone is served blue, not an error, and its cookie comes off', async () => {

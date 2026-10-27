@@ -411,6 +411,14 @@ await check('ungrouped ready work under a planned epic is what a re-entry is for
   assert.deepEqual(unplanned(plan, [bead('x-1.1'), bead('x-1.4'), bead('y-2.1')]).map((b) => b.id), ['x-1.4']);
 });
 
+await check('a sub-epic held by its own children is not loose work (bc-xl7n.204)', () => {
+  const plan = validatePlan(planSpec([group('one', ['x-1.8.1', 'x-1.8.2'])]), { epic: 'x-1', children: null });
+  const queue = [bead('x-1.8'), bead('x-1.8.1'), bead('x-1.8.2'), bead('x-1.9')];
+  assert.deepEqual(unplanned(plan, queue).map((b) => b.id), ['x-1.9'], 'the container is held, the real stray is not');
+  // Held by a ready child the plan has not named, too: that child is the loose one, not its parent.
+  assert.deepEqual(unplanned(plan, [bead('x-1.8'), bead('x-1.8.3')]).map((b) => b.id), ['x-1.8.3']);
+});
+
 /**
  * The adopted child. `bd update <bead> --parent=<epic>` moves the edge and renumbers
  * nothing, so a real child of `x-1` can be called `z-9` — and every id-shaped answer to

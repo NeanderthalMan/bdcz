@@ -371,7 +371,12 @@ Every tick, per repository and per base:
   touches none of the doors a person merges through.
 - **And it lifts by itself.** The next tick that finds the base green closes the P0 and the
   queue carries on. Usually nothing has to close anything: the merge of the fix closes that
-  bead as its own work bead, and the hold is simply not found on the tick after.
+  bead as its own work bead, and the hold is simply not found on the tick after. "Green"
+  means checks that ran and passed: a base with a run in flight, or with no checks yet at
+  all — the second after a push, or for as long as Actions is not starting runs — is not
+  known, and an open hold stays open through it (bc-xl7n.162). The price is that a
+  workspace whose workflow was deleted after a hold was filed keeps that hold until someone
+  closes the bead by hand.
 
 There is **no record of any of this on disk**, deliberately. A hold is exactly *"GitHub
 says this base is failing and there is an open bead about it"*, both read this tick — the
@@ -618,6 +623,21 @@ files plus the two union'd bin maps. `test/pertoolfiles.mjs` keeps both anchors 
 And `package.json`/`package-lock.json` are unchanged, still union, still the only shared
 lines a new tool writes.
 
+**And then they stopped being union too — bc-g95u9.** Union has two silent failures that
+an append-only list never triggers, and both showed up on 2026-10-23 in resolutions that
+reported clean. Main had deleted `b7e-renum` (bc-j2zwo.4), and #40's downmerge brought it
+back, because union keeps a line one side removed. #4's branch had re-sorted the bin map,
+and union stitched the two orderings into a `package.json` that was not JSON. Both files
+are now `merge=jsonmerge`. That is a structural three-way merge (`lib/jsonmerge.js`): it
+parses base, ours and theirs, merges key by key, keeps both sides' new entries the way
+union did, honours a deletion, and turns a key both sides changed differently into
+ordinary conflict markers that name the key. The driver is per-clone git config, installed
+once with `node scripts/jsonmerge.mjs --install` (`--check` says whether it is there). It
+always points at the main checkout's copy, so a retired worktree cannot leave it dangling.
+A clone without it, or GitHub's own update-branch, falls back to git's ordinary text
+merge. That gives a conflict to resolve, which is a question rather than a wrong answer.
+`test/jsonmerge.mjs` replays both of the 2026-10-23 merges through a real `git merge`.
+
 This narrows what a resolver is for rather than replacing it. The conflict that is left is
 the `lib/server.js` one, where two branches really did edit the same code — which is the
 case the resolver was built for, and the only case worth a window.
@@ -753,6 +773,67 @@ the bead, and `declined` alongside it so the door does not open again. Three of 
 registry read beside the one that opens the window, and `test/mergequeue.mjs` drives both
 halves — including two consecutive ticks on what the first one actually wrote, which is the
 only honest way to assert that the sentence is stable enough to count.
+
+### The queue reads its own cards, which for a long time it could not
+
+Handing a pull request over is a label swap: `merge-queue` comes off the merge-bead, `human`
+and the delivery label go on, and it appears in the inbox. The sweep's read of the tracker
+was `bd.listAgent`, which runs `bd list --exclude-label human` — for a good reason of its
+own, since the questions are already in hand from another read and a workspace like
+northwind is 88KB of JSON when every row carries its whole description. Put those two
+sentences together and **the moment a merge-bead became a card it left the only list the
+queue ever read**.
+
+Nothing failed. Two things went quiet, which is worse.
+
+- **Taking a card back had never once run.** A card that outlives its reason is a leak, not
+  a handover — #475 was carded for a failing check, the check went green on its own, and it
+  merged within a minute of finally being put back a day later; #433 and #438 sat
+  conflicting with *passing* checks, and a conflict is the one thing this queue is best at.
+  The function that rescues those selects rows carrying `human` and not `merge-queue`, so
+  fed a list `human` had been filtered out of it could only ever return nothing. Five tests
+  covered it and all five passed, because the fake tracker handed its rows back unfiltered:
+  the seam was tested and the wiring was not.
+- **Every card was reported as a stranded pull request.** The strand report builds its cover
+  set from the same rows, so a card contributed none — and its own reasoning says the
+  opposite in as many words, that a card is a handover and reporting it here would bury the
+  real ones. Measured on 2026-08-26: 22 live cards, each producing *"#N is open and no
+  merge-bead is about it"* once per tick, on pull requests whose merge-bead was sitting
+  right there. Both halves of that sentence are false of a card — the Merge tap will merge
+  it — which made it the highest-volume untrue statement in the log.
+
+So the sweep does a **second read**, `bd.listCards`, narrowed by assignee to the cards this
+queue itself raised. The assignee is what keeps it from being the inbox read twice: a
+question Adam filed is not assigned to the merge advocate and has no business in a queue's
+row set. A card list that cannot be read suppresses both halves rather than running them on
+a set known to be short — a reclaim skipped costs a tick, where a strand report over half a
+tracker names pull requests that are perfectly well looked after.
+
+**A reviewer's veto is carved out of the reclaim, and that carve-out had to land in the same
+change.** The reclaim asks whether the *queue's* recorded sentence still holds, and a card
+that is genuinely a decision carries no lapsing sentence. A vetoed pull request carries
+both: the reviewer's refusal, and underneath it the queue's own stale *waiting on a review*
+line in a different block of the same field. So waking the reclaim up would have taken a
+green, clean, explicitly-refused branch back onto the queue and merged it, unattended, as a
+side effect of a bug fix — the merge gate does not consult the review gate at all. The test
+is the same one the escalation uses: a `refused` verdict, or a disagreement that has used up
+`MAX_REVIEW_ROUNDS`. **The reclaim is for cards the queue gave up on, not cards a reviewer
+gave up on.** A `changes` verdict mid-loop is not carved out — that is a round in progress,
+and nothing about it says this pull request will not be approved.
+
+**And the strand report stops truncating itself in silence.** It took the pull-request
+lister's default of 40 without saying so, and `gh` sorts newest first: against 75 open pull
+requests on this repo the query returned #656..#699, so 35 of them could not be reported as
+stranded whatever state they were in — and the 35 were the *oldest*, which is exactly where
+a strand accumulates. The tick's line read as a complete count and was not one. That is the
+failure the report exists to end, reproduced one layer up. `STRAND_SCAN_MAX` is 200, the
+cost is the same single query either way, and when a repository does reach it the sweep says
+so rather than presenting the partial answer as the whole one.
+
+`lib/bd.js` owns the second read, `lib/mergeadvocate.js` the carve-out, `lib/mergequeue.js`
+the wiring and the ceiling, and `test/mergequeue.mjs`'s fake tracker now applies the same
+`--exclude-label human` the real one does — which is what makes those five reclaim tests
+fail honestly if the second read is ever taken back out.
 
 ### The reviewer — a seventh agent kind, and the diff nobody reads
 
@@ -1057,13 +1138,28 @@ login that was never submitted, and `approvalUrl` stays empty as the tell that n
 GitHub answers for it. A recorded approval, never a refused one — `approvedReview`'s own
 distinction, now with a caller.
 
-**Left for later, on purpose: anchoring a comment to the GitHub review thread it became.**
-`reviewComment` has carried a `threadId` field since `#560` for exactly this — what would
-make `resolveThread` callable at all — and this fold does not write it. Submitting a review
-with inline comments does not hand back which thread each one became without a second
-GraphQL read to match them by path and line, and a guess here would be worse than the gap:
-a wrong anchor closes the wrong thread later. Filed as its own question rather than folded
-in unverified.
+**Anchoring a comment to the GitHub review thread it became — bc-36xx.31, the gap this
+section used to leave open.** `reviewComment` had carried a `threadId` field since `#560`
+for exactly this — what makes `resolveThread` callable at all — and nothing filled it in.
+Submitting a review with inline comments does not hand back which thread each one became,
+so `syncReviewVerdict` reads `reviewThreads(dir, number)` straight back once the review has
+gone out and `threadIdsFor` (`lib/reviewsync.js`) matches each comment to its thread by
+path, line and the exact text `inlineComments` sent — the one string GitHub hands back
+unchanged, and safer to match on than position: `reviewThreads(first: 100)` makes no
+promise about order. A comment GitHub has not caught up on yet, or a `reviewThreads` an
+outage turned into a null (see `threadsTransient` below), both come back simply unanchored
+rather than guessing — a wrong anchor would close the wrong thread later, which is worse
+than the gap this used to be.
+
+**And resolving one, the other half.** The comments a prior round anchored and the worker
+answered — `answer` set — that a fresh verdict does not carry forward are exactly the ones
+the reviewer read and accepted: `syncReviewVerdict` diffs the prior round's comment ids
+against the fresh verdict's own and calls `resolveThread(dir, threadId)` on every one that
+dropped out with an answer on it, before the block below replaces `state.comments`
+wholesale and they are gone from the bead for good. A comment nobody ever answered that a
+reviewer simply stops repeating is not "settled" by this — `answer` has to be set — so a
+reviewer rewording an unanswered objection does not read as the worker having won the
+argument.
 
 ### The worker answers — one window per round, and it may not resolve anything
 
@@ -2752,11 +2848,33 @@ return an ordinary `null` or `{ ..., reason }` rather than throwing on a one-log
 repo nobody here can see — every caller already has to handle that answer for `approve()`
 and `reviewerFor`, so nothing above this file learns a new failure shape.
 
-**What this does not yet do.** Nothing writes a verdict's inline comments through
-`submitReview`, and nothing reads `reviewThreads` back onto a merge-bead's review block to
-replace beadcause's own `id` with the real thread id it anchors to. That wiring — the
-worker answering a specific GitHub thread, the reviewer resolving the ones it accepts — is
-further up this epic, not here: this is the primitive the wiring calls.
+**GitHub answering with a shrug is told apart from GitHub actually answering — bc-36xx.26,**
+the same shape `probeTransient`/`noRepoMessage` fixed for the repo probe on the same API
+(measured 2026-08-17: `gh repo view` — GraphQL — 503'd on roughly four calls in five while
+`gh api /rate_limit` — REST — answered throughout). Neither function used to tell "GitHub
+never answered" apart from "there is genuinely nothing here": `reviewThreads` returned
+`null` either way, and `resolveThread` returned `{ resolved: false, reason: <gh's stderr> }`
+for a 503 exactly as it did for a thread that plainly does not exist. Both now retry a
+transient failure through `ghGraphql`, reusing `isTransientErr`/`PROBE_RETRIES`/
+`PROBE_BACKOFF_MS` rather than a second classifier for the same failure on the same API. If
+it still fails: `threadsTransient(dir, number)` is `probeTransient`'s counterpart, keyed by
+pull request since one checkout answers for several; `resolveThread`'s answer carries
+`transient: true` instead, since it already returns an object rather than `null` on every
+failure and a second lookup would be one fact in two places.
+
+**And the flag counts an outage that never reached the thread query at all.** The likelier
+half, in fact: `reviewThreads` resolves the repo and the reviewer identity first, and both
+of those go through `seenBy` — `gh repo view`, the very call the 2026-08-17 measurement
+above caught 503ing. Flagging only its own query's failure left `threadsTransient` answering
+`false` in precisely the outage the bead was filed for, which round 1 of #655's review
+measured and is now two checks in `test/pr.mjs`. So every early return consults
+`probeTransient(dir)` and inherits its answer — the same classification, read rather than
+guessed at a second time — and the clear happens above those returns, so a read that dies
+before GraphQL still cannot leave a stale `true` standing behind it.
+
+**What this does not yet do.** Nothing further — the wiring this section used to describe
+as left for later, anchoring a comment to its thread and resolving the ones a worker's
+answer settled, is folded in above (bc-36xx.31).
 
 ### What it does to the two things that were already here
 

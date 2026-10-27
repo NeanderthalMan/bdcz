@@ -305,7 +305,7 @@ check('and the other half of the same question: which view an address names', ()
   for (const p of ['/config', '/settings', '/config.html']) {
     assert.equal(route.viewOfPath(p), 'config', `${p} is the space's settings`);
   }
-  for (const p of ['/flow', '/requirements', '/endorse', '/admin', '/console', '/skills', '/sounds']) {
+  for (const p of ['/flow', '/requirements', '/endorse', '/admin', '/console', '/skills', '/sounds', '/demo']) {
     assert.equal(route.viewOfPath(p), null, `${p} draws the row and is on no pill — that is deliberate`);
   }
 });
@@ -448,7 +448,9 @@ check('every page that loads viewbar.js or app.js loads hashroute.js before it',
   // bc-khoe.30.15 did for public/history.html before it — both pills are drawn by
   // index.html now, which was already one of the count. Eight since bc-l75v7 deleted
   // public/monitor.html and public/config.html, whose rows index.html draws the same way.
-  assert.equal(seen, 8, `expected the eight pages that draw the pill row, found ${seen}`);
+  // Nine since bc-sj8k.2 added public/demo.html, DemoMode's list, which draws the row
+  // with nothing on it current.
+  assert.equal(seen, 9, `expected the nine pages that draw the pill row, found ${seen}`);
 });
 
 check('and the service worker precaches it, because both callers call it flat', () => {

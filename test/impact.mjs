@@ -427,14 +427,14 @@ add:
 
 console.log('the policy says so');
 
-await check('AIP-2 claims the widening half as enforced; AIP-6 stays planned and names bc-eqn1.8', () => {
+await check('AIP-2 claims the widening half as enforced; AIP-6 the session half, since bc-eqn1.8.1', () => {
   const aip2 = clause('AIP-2');
   assert.equal(aip2.state, 'enforced');
   assert.ok(aip2.by.includes('lib/impact.js'));
   const aip6 = clause('AIP-6');
-  assert.equal(aip6.state, 'planned');
-  assert.equal(aip6.bead, 'bc-eqn1.8');
+  assert.equal(aip6.state, 'enforced');
   assert.ok(aip6.by.includes('lib/impact.js'));
+  assert.ok(aip6.by.includes('lib/sessiongate.js'), 'the door that refuses a session is named');
   assert.deepEqual(enforcementProblems(ROOT), []);
 });
 

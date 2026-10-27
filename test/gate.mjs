@@ -259,6 +259,45 @@ await checkAsync('a hung suite is reported TIMEOUT and does not survive to write
   assert.equal(didRun(dir, 'hangs'), false, 'a killed suite must not still be running long enough to write its marker');
 });
 
+console.log('\na failure gets one solo retry — bc-iaju1.2\n');
+
+/** Fails the first time it runs in this tree, passes every time after — a load flake, in miniature. */
+const flaky = (name) =>
+  [
+    "import fs from 'node:fs';",
+    `const seen = new URL('./${name}.seen', import.meta.url);`,
+    'const first = !fs.existsSync(seen);',
+    "fs.writeFileSync(seen, '');",
+    'process.exit(first ? 1 : 0);',
+    '',
+  ].join('\n');
+
+await checkAsync('a suite that passes on its solo retry counts as passed, and is named as flaky', async () => {
+  const dir = tree('retry-flaky', { 'test/a-pass.mjs': marker('a-pass'), 'test/f.mjs': flaky('f') });
+  const result = await gate.runGate(dir, { jobs: 2 });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.flaky, ['test/f.mjs']);
+  const f = result.results.find((r) => r.suite === 'test/f.mjs');
+  assert.equal(f.retriedFrom.status, 'FAIL', 'the first attempt is kept, not thrown away');
+  assert.match(gate.summaryLine(result), /only on a solo retry: test\/f\.mjs/);
+});
+
+await checkAsync('a suite that fails twice is red exactly as before', async () => {
+  const dir = tree('retry-real', { 'test/b-fail.mjs': marker('b-fail', { exit: 3 }) });
+  const seen = [];
+  const result = await gate.runGate(dir, { jobs: 1, onResult: (r) => seen.push(Boolean(r.retry)) });
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.flaky, []);
+  assert.deepEqual(seen, [false, true], 'onResult hears the first run and then the retry');
+});
+
+await checkAsync('retry: false leaves a first failure red', async () => {
+  const dir = tree('retry-off', { 'test/f.mjs': flaky('f') });
+  const result = await gate.runGate(dir, { jobs: 1, retry: false });
+  assert.equal(result.ok, false);
+  assert.equal(result.failed[0].suite, 'test/f.mjs');
+});
+
 await checkAsync('a timed-out suite takes the processes it started down with it (bc-xl7n.195)', async () => {
   const pidFile = path.join(tmp, 'grandchild.pid');
   const dir = tree('timeout-tree', {

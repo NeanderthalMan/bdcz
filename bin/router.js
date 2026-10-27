@@ -54,7 +54,6 @@
 import '../lib/logstamp.js';
 import fs from 'node:fs';
 import http from 'node:http';
-import net from 'node:net';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -95,6 +94,10 @@ import {
 // nothing behind it, which is precisely the moment a policy that could fail to load would
 // cost you the port.
 import { HOLD_TICKS, speaks } from '../lib/voices.js';
+// Node builtins and nothing else, so it is a leaf like the two above: the router picks a
+// backend's port while it is holding the public one, and a module that could fail to
+// load there would cost the port. bc-jvt0.9.
+import { freePort, releasePort } from '../lib/portclaims.js';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const BACKEND = path.join(ROOT, 'bin', 'beadcause.js');
@@ -145,18 +148,6 @@ const log = (msg) => console.log(`[router] ${msg}`);
 const warn = (msg) => console.error(`[router] ${msg}`);
 
 // ------------------------------------------------------------ talking to a backend
-
-/** An unused loopback port, straight from the kernel. */
-function freePort() {
-  return new Promise((resolve, reject) => {
-    const probe = net.createServer();
-    probe.on('error', reject);
-    probe.listen(0, '127.0.0.1', () => {
-      const { port } = probe.address();
-      probe.close(() => resolve(port));
-    });
-  });
-}
 
 /** Call a loopback JSON endpoint with a deadline. Rejects on anything but 200. */
 function localJson(port, pathname, { method = 'GET', timeout = 5000 } = {}) {
@@ -308,6 +299,18 @@ async function spawnBackend(deadlineMs, { entry = BACKEND, cwd = ROOT } = {}) {
     },
   });
 
+  // `freePort` claimed `port` on the way out (lib/portclaims.js), and the claim is held for
+  // exactly the interval it protects: from the probe until the kernel takes over, which is
+  // the child's first answer below — a child that can answer is bound — or until the child
+  // is gone. bc-jvt0.9: this process picked a backend's port for years and wrote no note,
+  // so a suite's `freePort` could be handed the number between the probe and the bind, and
+  // this process's probe could take one a suite had claimed. Released here and not left to
+  // `exit`, because a router lives for weeks and starts a backend per release. `error` as
+  // well as `exit`, because a child that could not be spawned emits only the first.
+  const unclaim = () => releasePort(port);
+  child.once('exit', unclaim);
+  child.once('error', unclaim);
+
   const be = {
     port,
     child,
@@ -373,6 +376,7 @@ async function spawnBackend(deadlineMs, { entry = BACKEND, cwd = ROOT } = {}) {
       be.build = state.build;
       be.role = state.role;
       be.reaping = state.reaping;
+      unclaim();
       return be;
     } catch (err) {
       if (Date.now() > deadline) {
@@ -898,12 +902,58 @@ function routeOf(req) {
  *
  * `/__demo/green?id=<candidate>` is the other direction, refused unless that candidate
  * is the one standing on green. With no id it means whatever is on green now. Both
- * answer a 303 to `/`, so a plain link or a form is enough to flip a device.
+ * answer a 303, so a plain link or a form is enough to flip a device: green to `/`, the
+ * candidate's own app, and blue to `/demo?from=<the candidate>`, DemoMode's list with the
+ * one you were just using at the top (bc-sj8k.2).
  */
+/**
+ * What a browser is answered with on a flip (bc-sj8k.9).
+ *
+ * public/sw.js serves the shell's scripts from ONE cache keyed by URL alone, and blue and
+ * green share every URL. A flip by a bare 303 therefore pairs the new side's index.html
+ * with the old side's cached scripts for a load, and the revalidation behind that answer
+ * then writes the new side's scripts over what the old side will be served on the way
+ * back. `Clear-Site-Data: "cache"` is not the cure: it empties the HTTP cache, not the
+ * Cache API, and `"storage"` would unregister the worker and take the device's
+ * localStorage with it.
+ *
+ * So this page does what public/update.js does before a reload: asks the worker to
+ * re-fetch the whole shell (`beadcause:sw-refresh`, one all-or-nothing `addAll`), and only
+ * then navigates. The cookie is already set by this very response, so that fetch is made
+ * from the side the device is now on. No worker, or no answer in 4s, just navigates;
+ * `<noscript>` refreshes. A non-HTML caller still gets the plain 303.
+ */
+function flipPage(env, to = '/') {
+  // `to` is router-built (`/` or `/demo?from=<id alphabet>`), but it is still escaped for
+  // both places it lands: an HTML attribute and a JS string.
+  const attr = String(to).replace(/[&"<>]/g, (c) => ({ '&': '&amp;', '"': '&quot;', '<': '&lt;', '>': '&gt;' })[c]);
+  const js = JSON.stringify(String(to)).replace(/</g, '\\u003c');
+  return (
+    `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">` +
+    `<title>Beadcause — switching to ${env}</title><p>Switching to ${env}…</p>` +
+    `<noscript><meta http-equiv="refresh" content="0;url=${attr}"></noscript>` +
+    `<script>(function(){var go=function(){location.replace(${js})},sw=navigator.serviceWorker;` +
+    `if(!sw||!sw.controller)return go();var t=setTimeout(go,4000);` +
+    `sw.addEventListener('message',function(e){if(e.data&&e.data.type==='beadcause:sw-refresh'){clearTimeout(t);go()}});` +
+    `sw.startMessages&&sw.startMessages();sw.controller.postMessage({type:'beadcause:sw-refresh'})})()</script>`
+  );
+}
+
 function demo(req, res, url) {
-  const home = (cookie, env) => {
+  const home = (cookie, env, location = '/') => {
+    // A browser navigation gets the interstitial, so the service worker's one shared shell
+    // cache is re-fetched from the side the device is now on before the first load.
+    if (/text\/html/.test(String(req.headers.accept || ''))) {
+      res.writeHead(200, {
+        'set-cookie': cookie,
+        'cache-control': 'no-store',
+        'content-type': 'text/html; charset=utf-8',
+        'x-beadcause-env': env,
+      });
+      return res.end(flipPage(env, location));
+    }
     res.writeHead(303, {
-      location: '/',
+      location,
       'set-cookie': cookie,
       'cache-control': 'no-store',
       'content-type': 'application/json',
@@ -911,7 +961,14 @@ function demo(req, res, url) {
     });
     res.end(JSON.stringify({ on: env }));
   };
-  if (url.pathname === '/__demo/blue') return home(demoCookie(req, null), 'blue');
+  if (url.pathname === '/__demo/blue') {
+    // Home to DemoMode's list rather than to the inbox, with the candidate the device was
+    // just on named so the list can put it first (bc-sj8k.2). Only an id's own alphabet
+    // goes on the address — the cookie is the device's to write, not ours to echo.
+    const was = demoWanted(req);
+    const from = was && /^[a-z0-9.-]+$/.test(was) ? `?from=${was}` : '';
+    return home(demoCookie(req, null), 'blue', `/demo${from}`);
+  }
   if (url.pathname === '/__demo/green') {
     const id = url.searchParams.get('id') || green?.id || '';
     if (green && green.id === id) return home(demoCookie(req, id), 'green');

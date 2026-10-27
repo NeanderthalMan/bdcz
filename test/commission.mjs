@@ -95,6 +95,11 @@ options:
   - id: neither
     label: Neither
     closes: "no"
+  - id: close-eventually
+    label: Close it, once this lands
+    response: "Close it. There is still work to do first."
+    closes: false
+    closesOnLanding: true
 \`\`\`
 `;
 
@@ -277,6 +282,53 @@ await checkAsync(async () => {
   // wrong bead out, and the sweep still works after a hand-back.
   assert.ok(ids.includes('zz-2'), `lost the other question: ${ids.join(',')}`);
 }, 'and the rest of the inbox is untouched');
+
+/* ------------------------------------- a commission that also says "close it" (bc-eqn1.5.2) */
+
+reset();
+const closesEventually = await call('/api/respond', {
+  workspace: 'demo',
+  id: 'zz-1',
+  response: 'Close it. There is still work to do first.',
+  option: 'close-eventually',
+});
+const closesEventuallyWrites = writes();
+
+check(() => assert.equal(closesEventually.status, 200), 'a commission that also says "close it" still answers');
+check(() => assert.equal(closesEventually.json.closed, false), 'and does not close now — there is still work to do');
+check(
+  () => assert.ok(!closesEventuallyWrites.some((a) => a[0] === 'close'), `bd was told to: ${JSON.stringify(closesEventuallyWrites)}`),
+  'so bd is NOT told to close it'
+);
+check(
+  () =>
+    assert.ok(
+      closesEventuallyWrites.some((a) => a[0] === 'label' && a[1] === 'remove' && a[3] === 'human'),
+      `bd was told to: ${JSON.stringify(closesEventuallyWrites)}`
+    ),
+  'the `human` label still comes off, exactly like any other commission'
+);
+check(
+  () =>
+    assert.ok(
+      closesEventuallyWrites.some((a) => a[0] === 'label' && a[1] === 'add' && a[3] === 'answered-close'),
+      `bd was told to: ${JSON.stringify(closesEventuallyWrites)}`
+    ),
+  // What `closesOnLanding: true` is for — bc-eqn1.5.2. Nothing else this commission
+  // writes says the eventual verdict was close; this is the one write that does, and
+  // the merge queue's epic branch (lib/mergequeue.js) is what reads it back once the
+  // commissioned work lands.
+  'and ANSWERED_CLOSE_LABEL goes on, which is the whole of what `closesOnLanding` buys'
+);
+
+reset();
+await call('/api/respond', { workspace: 'demo', id: 'zz-1', response: 'Build both, as written.', option: 'build-both' });
+check(
+  () => assert.ok(!writes().some((a) => a[0] === 'label' && a[1] === 'add' && a[3] === 'answered-close'), JSON.stringify(writes())),
+  // The control: an ordinary commission — no `closesOnLanding` on the option it
+  // picked — never writes the marker, whatever else it does.
+  'and an ordinary commission never writes it'
+);
 
 /* -------------------------------------------------------- an ordinary option */
 

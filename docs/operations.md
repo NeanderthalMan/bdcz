@@ -613,11 +613,34 @@ like `top`:
 beadcause-top  ·  10 live (3 busy, 7 idle), 1 not back  ·  booted 12 minutes ago  ·  register 40s ago  ·  10:51:02
 boot pass 11 minutes ago: 9 reopened, 1 skipped
 
-session                                 ws            bead         kind  state      ctx       cpu    mem   up        where                                   last write
+session                                 ws ▲          bead         kind  state      ctx       cpu    mem   up        where                                   last write
 ──────────────────────────────────────  ────────────  ───────────  ────  ─────────  ────────  ─────  ────  ────────  ──────────────────────────────────────  ──────────
 Northwind - SOC 2 first: fix records    architecture  cl-xl7n.195  adam  busy 4s    412k 41%  38.0%  912M  00:11:40  architecture ⟶ soc2-first-order-e4b     4s
 beadcause - bc-5to5r.7 beadcause-top    beadcause     bc-5to5r.7   work  idle 2m    88k 44%    0.3%  402M  00:09:12  beadcause ⟶ beadcause-top-5to5r7-m3k    2m
+
+q quit · r refresh · ↑↓ select · f focus · ←→ sort column · o reverse · every 3s
 ```
+
+**The order is yours, and it does not move on its own** (`bc-5to5r.9`). Rows open sorted
+by workspace and then name — the grouping iTerm's windows have — and stay there as windows
+go busy and idle; a table that re-sorted itself on activity was one you could not keep your
+eyes on. `←`/`→` (or `h`/`l`) move the sort to the previous or next column, whose heading
+then carries ▲, and `o` turns it over (▼). Numbers order as numbers, blanks last either way
+up; text orders case-blind; `state` puts busy first; `up` reads `2-03:04:05` as two days.
+Rows the boot pass decided about and that have not come back always sit under the live
+ones, because they have no numbers to sort by. `--sort <column>` and `--reverse` set the
+order from the command line, for `--json` too.
+
+**`↑`/`↓` (or `j`/`k`) pick a row and `f` (or Enter) takes you to it**: the session's tab
+is selected inside its window, the window raised and iTerm activated — the same door the
+phone's "find this window" uses, `scripts/focus-session.applescript`. A row reaches its tab
+through its process: `ps -o tty=` on the pid gives the controlling terminal, and iTerm
+matches it against each session's tty, so the daemon's windows and the ones you opened by
+hand are found the same way with no handle stored anywhere. The bar is a *session*, not a
+row number, so it stays on the conversation it was on when the sort changes or a row
+leaves. A row with no process (not yet back, parked, skipped) cannot be focused and the
+header line says so; the monitor keeps running after `f`, since the point of the key is to
+leave it.
 
 Each column comes from somewhere that already exists — nothing was added to the daemon
 for it. **state** is the session record's own busy/idle and since when. **ctx** is the last
@@ -633,19 +656,36 @@ numbers. The header counts the sessions and says when the Mac booted, when the r
 last polled and what the reboot pass did for *this* boot.
 
 ```bash
-beadcause-top                    # redraw every 3s; q quits, r redraws now
+beadcause-top                    # redraw every 3s; ↑↓ f ←→ o as above; r redraws now, q quits
 beadcause-top --every 10
+beadcause-top --sort cpu --reverse   # hungriest first
 beadcause-top --once             # one frame and exit
 beadcause-top --json             # the rows as one object
+beadcause-top --queue            # start on the merge queue (m swaps); with --once/--json, print it
 b7e-sessions --watch             # the same view, by the name a session already knows
 ```
+
+**The merge queue, behind `m`** (`bc-n01yg`). `m` or Tab swaps the table for the merge
+queue: one row per queued pull request — its position in the order the sweep tries them,
+its stage, how long it has been in that stage, attempts spent of three and downmerges,
+checks, mergeable, size, age and title. Every open pull request with no merge-bead is listed
+underneath as `not queued` (or `not queued (draft)`), because an empty queue beside nine open
+pull requests is the thing worth seeing. A `bases` line names whether each base a row stands
+on is green, red or held, and an `unread` line names any workspace the queue could not read,
+which is never counted as empty. Under the table, the selected row's note, refusal and
+failing checks; `f` or Enter opens it in the browser. Unlike the sessions view, this one
+asks the running daemon (`GET /api/queues` and `/api/prs` on loopback, with the config's
+token), every ten seconds rather than every three since the daemon's answer changes no
+faster. When the daemon is down it says so in one line, and `m` takes you back to sessions.
+Open pull requests older than the board's 40 newest do not appear yet (`bc-38iax`).
 
 **After a boot the daemon opens it.** Once the reboot pass has run (`lib/rebootresume.js`,
 only on a real boot, never on a hot swap), `bin/beadcause.js` opens `beadcause-top` in an
 iTerm window **of its own** — recorded under the key `beadcause-top` in `itermWindows`, not
 under any workspace, so it is never a tab among the conversations that just went back into
-their workspaces' windows (`bc-5to5r.6`). It is read-only, needs no token and does not
-talk to the daemon, so it works when the daemon is down, which is when it is wanted most.
+their workspaces' windows (`bc-5to5r.6`). It is read-only, and its sessions view needs no
+token and does not talk to the daemon, so it works when the daemon is down, which is when it
+is wanted most. Only the merge-queue view behind `m` asks the daemon.
 
 ### A cron entry that never returns — `monitor --once`
 
@@ -1074,7 +1114,8 @@ proxies them:
 
 - `/__demo/green?id=<candidate>` sets the cookie and 303s to `/`. With no id it means
   whatever is on green now. It is a 409 when that candidate is not standing.
-- `/__demo/blue` takes the cookie off and 303s to `/`. It works whatever is behind the
+- `/__demo/blue` takes the cookie off and 303s to `/demo?from=<the candidate it was on>`
+  — DemoMode's list, with that one first (bc-sj8k.2). It works whatever is behind the
   port, and that is why the router owns it rather than the app. A candidate branched
   before DemoMode existed has no such route, and a flip onto it must not strand the phone.
 
@@ -1083,6 +1124,50 @@ next pull request) is served blue, and the response clears the cookie. A request
 on green when green went away gets the swap-drain 503 (retry), not a 502, and the retry
 lands on blue. Every proxied response says which side answered in `x-beadcause-env`
 (`blue` or `green`), plus `x-beadcause-candidate` on green.
+
+### DemoMode — the list of green candidates
+
+`/demo` (or `/demomode`) is where a candidate is picked (bc-sj8k.2). One card per **open pull
+request of this app's own repo** — green runs a beadcause backend, so a pull request of any
+other repo is never offered — with what it changes (title, size, the beads it came from),
+whether its gates passed, how old it is, and whether it is the one on green. It is a row per
+pull request rather than per prepared candidate, because nothing prepares one until it is
+asked for: the tap is the asking.
+
+**A tap deploys it and puts you on it.** `POST /api/demo/green?number=` runs `prepareCandidate`
+(fetch, detached worktree, vendor copy) and then the router's own `/internal/router/green`, and
+answers `go` — `/__demo/green?id=` — which the page follows, setting the cookie. A first tap
+on a pull request takes as long as that preparation and a backend start; a second is fast,
+because a prepared head is reused and a standing candidate is answered at once. Any refusal
+comes back as the sentence that caused it and is drawn on that card.
+
+**The return trip lands here.** `/__demo/blue` 303s to `/demo?from=<id>`, and the list draws
+that candidate first, marked *just tried*. A page served from green also says so at the top,
+with its own *Back to blue* link, read off the `x-beadcause-env` header on its own request.
+
+Approving a candidate is not on this page yet — that is bc-sj8k.3.
+
+**Every card expands into its whole history** (bc-sj8k.4). *Everything behind #N*, beneath
+the card — never inside it, since the card is the tap — asks `GET /api/demo/history?number=`
+the first time it is opened and draws, without leaving the page:
+
+- **the pull request** — state, branch, head, the candidate prepared from it, and GitHub's
+  check rollup with a link to each failing check;
+- **the local gate** — the newest `b7e-gate` runs filed under the branch's worktree slug
+  (`.claude/gate-runs/<slug>-*.jsonl`), each marked *this head* or *an earlier commit*.
+  `npm run checks` writes no record of a run, and the panel says so and points at the pull
+  request's Tests line instead of showing a verdict nobody recorded;
+- **coverage** of the files the pull request changes, from `~/.config/beadcause/coverage.json`
+  — said to be measured on *this head* or on whichever commit last ran `npm run coverage`.
+  The changed files are a local diff, so a head this checkout does not have is *unknown*,
+  not *none*;
+- **each bead** it came from — status, close reason, the newest 30 comments of its thread,
+  any session running on it now (to `/session?pid=`), and its archived sessions (to
+  `/bead-session`, which is where the transcript is).
+
+Every section tells *nothing there* from *could not be read*: a tracker that would not answer
+is drawn as an unknown thread, not as a bead with no comments. Nothing on it goes to the
+network — the pull request and checks are the cached board row the card came from.
 
 ## The tailnet address, when Tailscale is not up yet
 
@@ -1625,7 +1710,7 @@ cookie says so), and `/auth/signout` ends the session.
 
 | Method | Path | Body / params | Returns |
 |---|---|---|---|
-| GET | `/api/health` | — | `{ok, workspaces[]}` · **no token** |
+| GET | `/api/health` | — | `{ok, workspaces[], commit}` · **no token** · `commit` is HEAD of the checkout when this process booted, or `null` |
 | GET | `/api/questions` | `?scope=human\|both\|agent` | `{questions[], requests[], workspaces[], spaces[], filter, summary, scope, seq}` — `scope` defaults to `human`, and an unrecognised value falls back to it rather than erroring. `summary` is `{sessions, proposals}`, the two counts the inbox's tab badges draw. `seq` is where in `/api/poll`'s log this list was true, which is what lets a client park on the poll instead of asking again — see [loaded once](navigating.md#loaded-once-and-kept--what-a-tab-tap-actually-costs) |
 | GET | `/api/question` | `?workspace=&id=` | one question **plus `comments[]`** |
 | GET | `/api/poll` | `?since=<seq>&wait=<s>` | long-poll: `{seq, resync, events[], advocates, presence, observing}` **plus the whole `/api/questions` screen** when something moved — the same `inboxPayload()` builds both, so a client can refresh itself from either and get the same inbox. `questions`, `requests` and `spaces` are `null` rather than `[]` when nothing moved: an empty array means the channel is empty, and a poll that timed out never asked. `want=presence` says the questions are not wanted, which is what makes a quiet poll cost no `bd` at all |
@@ -1636,6 +1721,9 @@ cookie says so), and `/auth/signout` ends the session.
 | POST | `/api/pr/merge` | `{key, number, method?}` | **admits it to the merge queue — it does not merge** (bc-02ldo). `admitPlan` picks the bead this pull request already is (a merge-bead the queue handed back, a delivery card asking about it, one already queued, or nothing open at all) and `admitToQueue` writes `approved`/`approvedBy` into the queue block in its `notes`, where `gateVerdict` reads it — the same two functions `beadcause-merge` calls, because two copies of that sequence is two copies that drift. Answers `{queued, action, id, bead, why, others, warnings}`: `queued` is false on `approve` (it was already on the queue and moving, and claiming a move nothing made is the one thing this must not do) and `others` names any second open bead about the same pull request, which is a work bead that cannot close. A pull request already merged is `{alreadyMerged: true}` and a 200, because "it is already in" is the outcome the tap wanted; a draft or a closed one is a 409. **It used to merge, fast-forward this Mac's base and retire the inbox card** — all three now happen on the queue path, where `afterMerge` does the first two the moment the merge lands and the card is *converted* into the queue entry rather than closed behind it |
 | POST | `/api/pr/ship` | `{key, number}` | the declared deploy where the repo has one, an iTerm session where it does not. `409` if the PR is not merged — shipping an unmerged pull request has no meaning. Refused on an observer |
 | GET | `/api/queues` | `?refresh=1` | [the two queues](pull-requests.md#the-two-queues-and-where-a-bead-is-in-either), keyed by repo: `{at, repos[], orphans[], counts, unavailable, errors[], observing}`. Each repo carries `merge[]` — one entry per bead with an unmerged branch, from the moment its PR joined the queue — and `release[]`, one per merged PR in the batch it will ship with. Every entry names its bead, its pull request and its `stage`, plus `rungs[]`: the whole ladder with each rung `done` · `now` · `pending` · **`untracked`**, which is what the three stages nothing records yet come back as and is never `done`. A repo with no declared deploy and no visible build returns merge entries and **no release entries**. A release entry is kept one release past the one that made it live (`ago`), then it is gone. Reads nothing of its own: the 25-second board `/api/prs` shares, the deploy journal, and merge-beads kept 20s behind the same `bd.graph()` gate the queue's own tick uses |
+| GET | `/api/demo` | `?from=` `?refresh=1` | [DemoMode](#demomode--the-list-of-green-candidates)'s list: `{rows[], green, greenStarting, greenLast, router, repo, unavailable, observing}`. One row per **open pull request of this app's own repo** — the only ones green can serve — with its `gate` (`pass` · `fail` · `pending` · `none`), `stage`, `beads[]`, size, ages, the `candidate` prepared from it if any (`current` is false for an older head), and `onGreen`. `from` is the candidate a device just came back from and puts it first. `router: false` means nothing is in front of this daemon, so there is no green. Off the same 25-second board `/api/prs` reads |
+| POST | `/api/demo/green` | `?number=` | the DemoMode tap: prepares pull request `number` as a candidate (lib/candidate.js) and asks the router to stand it up on green, answering `{ok, id, go}` — `go` is the router's `/__demo/green?id=`, which is what flips the device. A refusal (not open, unservable, condemned, no router) is 200 with `ok: false` and `error` as a sentence. Slow on a first tap — a fetch, a worktree, a vendor copy and a process start. 409 on an observing daemon |
+| GET | `/api/demo/history` | `?number=` | one DemoMode card expanded (bc-sj8k.4): `{number, title, url, state, draft, branch, base, head, candidate, checks, gates, coverage, beads[], workspace}`. `gates` and `coverage` are `{known: false, why}` when they cannot be read; each bead carries `thread[]`, `sessions[]` and `live[]`, or `threadError` / `sessionsError` / `liveError` instead. Reads only: a `bd show` per bead and local files, never `gh`. 404 when the pull request is not on the board |
 | POST | `/api/release/ship` | `{workspace}` | ships the whole release queue — one deploy for every merge sitting on `origin` and not live, which is what a deploy has always done anyway. `409` on an empty queue (a restart for nothing), on a repo that declares no deploy (there is no window that means "and the other three"), and on one already deploying. Refused on an observer |
 | POST | `/api/pr/comment` | `{key, number, text}` | a note on the pull request at GitHub and nothing else. Not `/api/comment`, which writes on a *bead* and puts an agent onto answering it |
 | GET | `/api/pr/detail` | `?key=&number=&refresh=1` | `{row, pr, agent, unavailable}` — what [the full view](pull-requests.md#tapping-one-opens-it-full-screen) is drawn from. `row` is the board's (the lamps and the rung, from the 25-second sweep, computed once in lib/prstage.js); `pr` is `gh` **now**, for the description the board strips, the datetimes and the mergeability the buttons are drawn from; `agent` is which session wrote it, from the archive in the repo's own refs. Every failure is an answer rather than a 500, exactly as `/api/pr` has it |
@@ -1664,7 +1752,7 @@ cookie says so), and `/auth/signout` ends the session.
 | POST | `/api/handoff` | `{workspace, id}` | `{ok, dir, mode, repo, endorsed}` — opens the **successor to a handoff**: the door the `/handoff` skill on this Mac asks instead of driving iTerm with AppleScript itself, so the window lands in the daemon's session list and under its duplicate guard. A third door because neither of the other two would do: `POST /api/bead/advocate` needs a P0 carrying an `owner:` label and so 409s every handoff there has ever been, and `POST /api/session` would take it but brief it as a *question to discuss and close as answered* — a successor that discusses its handoff instead of doing the work, which reads as success from every screen. The brief is `handoffPromptFor` (`lib/session.js`): read the body with `bd show <id> --json \| jq`, `bd update <id> --claim`, continue from `## Next action`, verify anything marked UNVERIFIED. Guards: `409` for a bead with no `handoff` label (the brief is only true of one) and for a live-or-opening session already naming it, via the same `advocateSession` rule the P0 door uses; `403` under `OBSERVING` or with `openSessions` off; `400` on an unparseable id. It **endorses**, like `POST /api/session` and for the same reason — a handoff was filed by an agent moments ago and the person who ran `/handoff` is present and asking. Every refusal is one `bin/open-handoff` falls back to iTerm on, so a handoff always opens something |
 | POST | `/api/status` | `{workspace, id, phase, detail, actor}` | agent progress |
 | GET | `/api/agent-log` | `?workspace=&id=` | `{lines[], running, phase}` — the dispatched agent's log, as the CLI would have shown it |
-| GET | `/api/asset` | `?p=<abs path>` | image/doc bytes, restricted to `assetRoots` |
+| GET | `/api/asset` | `?p=<abs path>` | image/doc/audio bytes (honours `Range`, so a clip can seek), restricted to `assetRoots` |
 | GET | `/doc` | `?p=<abs path>` | the HTML reader page |
 | GET | `/api/confluence` | `?p=<abs path>&workspace=` | what [publishing](integrations.md#publishing-a-document-to-confluence) this document would do, before it happens: `{configured, publishable, site, spaceKey, title, action, existing, lastPublished}`. `{configured: false}` for an install with no `confluence` block, and it reads no credential to say so — the reader tab draws no button at that answer. Costs two GETs to Atlassian when it is on, because `action` is the thing the screen has to be able to say |
 | POST | `/api/confluence` | `{p, workspace, spaceKey, title, bead?}` | publish it. `spaceKey` and `title` are the confirmation — the target as the screen drew it — and a `409` is what you get if either has moved since, rather than a second page under the new name. Updates the page it made last time and overwrites its body; Confluence keeps the version history. Records the URL in `state.json` and, with `bead`, as a comment on that bead. Refused on an observer |
@@ -1680,6 +1768,7 @@ cookie says so), and `/auth/signout` ends the session.
 | POST | `/api/bead/addressee` | `{workspace, id, to}` | re-addresses a question — sets `for:<handle>`, the label that decides [whose phone rings](#who-a-question-is-for--me-and-the-for-label), and answers `{addressees[], changed, cleared}`. `to` is one handle; **empty, or `everyone`, means everyone**, which is a decision rather than the absence of one. Every *other* `for:` label comes off, because handing it to Carol means Carol and not also whoever it was addressed to before. Re-sending the handle it already carries is `changed: false` and no `bd` write at all. `cleared: true` says it also pulled the row out of this phone's notification shade, which it does on exactly one condition — the question is now addressed somewhere that is not this Mac — via a `dismissed` event, and with the honest limit [narrowing the filter](asking.md#and-it-does-not-tidy-up-the-noise-it-already-made) ran into: ntfy cannot recall a delivered message, so only the Android shell's own tray is reachable. A route of its own for `/api/bead/owner`'s reasons, and because the ✎ may not touch `for:` at all (`isProtectedLabel`) |
 | GET | `/api/roots` | `?workspace=` | `{roots[]}` — every **open root** in that workspace (an epic at any priority, or a P0), `{id, title, priority, epic, owners[], mine}`, yours first. What the sheet offers a held bead to be adopted under. Every root and not only yours, because the dispatch gate measures against all of them; off the cached graph, and this one waits for a cold cache rather than answering "there is nothing to adopt under" |
 | POST | `/api/bead/adopt` | `{workspace, id, parent}` | moves a bead under `parent` — the fix for the one hold that never clears itself, offered on the sheet of any bead with **nothing decided above it**. Answers `{parent, workable}`, where `workable` is the gate's own answer after the write rather than a promise about it. A parent with nothing decided above *it* is a 409 naming that, since the adoption would not make the bead workable; an empty `parent` detaches instead, which is how an adoption into the wrong epic is undone. The cached graph is refreshed on the way out, so the next advocate tick acts on the new shape |
+| POST | `/api/bead/reparent` | `{workspace, id, parent, children, standIn}` | **the sheet's ⋮ → Move** — the same reparent as `/api/bead/adopt`, offered on *any* bead rather than only on one with nothing decided above it, plus the one question adopt never had to ask. `children` is `with` (the subtree travels) or `leave` (each direct child is reparented to the departing bead's **current** parent, before it moves); an absent `children` means `with`, and anything else is a `400` rather than a guess at somebody's subtree. **When there is no grandparent to leave them with, an epic is minted** and they go under it — dropping them at top level would take every one of them out of the advocate queue and refuse them at the launcher, which is the hold `/api/bead/adopt` exists to clear arriving through the control built to clear it. `standIn` is its title, prefilled from the departing bead in the card and editable before it is written; it is born endorsed, unlabelled and owned, and its description says what it stands in for. Refuses a destination **under the bead being moved** (`409`, a loop nothing gets out of — checked *before* the root test, which would pass for a descendant) and one with **nothing decided above it** (`409`, adopt's own sentence). An empty `parent` detaches, which is a choice rather than a failure, and a **closed** bead may be moved: that says where a record is filed rather than rewriting it. Answers `{id, parent, mode, moved[], left, standIn, workable}`. See lib/beadmove.js |
 | GET | `/api/history` | `?workspace=` **or** `?space=`, and `&status=&priority=&provenance=&id=&limit=&offset=&refresh=1` | `{rows[], total, limit, offset, more, workspaces[], errors[], workspace, space, query}` — [the ledger](#the-ledger-behind-the-history-tab): every bead a space has ever had, closed and deferred included, newest-**updated** first, paged. The four filters are optional and compose; each row carries `hasSession`, whether a session was archived for it, and a `closeReason` cut to 240 characters on a word boundary — two lines of the row hold 226 at the widest, and the whole sentence is on the sheet the row links to. A bad `status` or `priority` is a 400 naming the word rather than an empty list, an unknown `workspace` a 400 and an unknown `space` a 404 — but a space with no beads is `{rows: [], total: 0, more: false}` and a 200. Cached ten seconds per workspace; `refresh=1` forces the sweep |
 | GET | `/api/unendorsed` | `?refresh=1` | `{beads[], counts, truncated, errors[]}` — the endorsement queue: every held bead in every workspace, newest first, each carrying the whole card (description, acceptance, the agent's provenance note) and `from`, the bead it was discovered under. No `workspace` parameter — the space picker narrows it on the client. Cached for a few seconds; a verdict drops that cache |
 | POST | `/api/bead/start` | `{workspace, id}` | **puts a P0 on the board** — writes `status: in_progress`, which is the one thing the board reads (bc-s8mc). The picker ＋ opens on My Epics is the client, and `p0board.startable` is what it draws. Refusals are all 409 with a sentence, because a write bd rejects has to be visible rather than a card that silently never appears: not a P0, not carrying your `owner:` label, closed, already started, `blocked`, `unendorsed`, superseded, or a crash bead this app filed at P0 itself. Checked here as well as in the picker's own filter — the list on the phone is up to a poll old, and the bead somebody closed in between is exactly the tap that would otherwise go through. Not guarded by `OBSERVING`: like the verdict routes, this is you deciding rather than the daemon acting. The graph cache for that workspace is refreshed on the way out and a `p0board` event is emitted, which is what makes the card arrive on the next poll on every device rather than a minute later |

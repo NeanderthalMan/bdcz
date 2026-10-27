@@ -84,7 +84,6 @@
 
   const token = localStorage.getItem('beadcause.token') || '';
   const out = document.getElementById('session');
-  const pulse = document.getElementById('pulse');
   const titleEl = document.getElementById('session-title');
   const pid = Number(new URLSearchParams(location.search).get('pid'));
 
@@ -585,7 +584,6 @@
    */
   async function poll() {
     if (state.gone) return;
-    pulse.classList.add('busy');
     try {
       const res = await fetch(`/api/session-log?pid=${encodeURIComponent(pid)}`, {
         headers: { 'x-beadcause-token': token },
@@ -657,8 +655,6 @@
       } else {
         out.innerHTML = `<div class="empty"><strong>Can't reach the server</strong>${esc(err.message)}</div>`;
       }
-    } finally {
-      pulse.classList.remove('busy');
     }
   }
 

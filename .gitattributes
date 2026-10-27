@@ -34,8 +34,19 @@
 #
 # See "Landing work — a branch, a pull request, and a merge queue" in docs/landing.md.
 
-package.json       merge=union
-package-lock.json  merge=union
+# bc-g95u9: the last two are no longer union either. They merge by structure, through the
+# `jsonmerge` driver (lib/jsonmerge.js, installed per clone by `node scripts/jsonmerge.mjs
+# --install`). Union failed both of them on 2026-10-23, in merges that reported clean:
+# #40's downmerge brought back `b7e-renum`, a bin entry main had deleted, and #4's
+# interleaved two orderings of the bin map into a package.json that was not JSON. The
+# driver parses all three sides and merges key by key. It keeps both sides' new bin
+# entries the way union did, honours a deletion, and turns a key both sides changed
+# differently into ordinary conflict markers. A clone without the driver installed
+# (CI, GitHub's update-branch) falls back to git's normal text merge, which is a
+# conflict rather than a wrong answer.
+
+package.json       merge=jsonmerge
+package-lock.json  merge=jsonmerge
 
 # lib/grants.js and lib/toolbelt.js came off this list in bc-wbrhi, and the reason is
 # worth more than the two lines.
@@ -58,9 +69,11 @@ package-lock.json  merge=union
 # because a conflict is a question and union is an answer given without asking. These two
 # are now the second kind.
 
-# package.json and package-lock.json stay, and they are still the first kind: every new
-# bin/ entry is a line in the sorted map and a mirrored line in the lock, b7e or not, and
-# that is an append at a shared anchor exactly as it was. bc-wbrhi generates neither.
+# package.json and package-lock.json are still mostly the first kind: every new bin/
+# entry is a line in the sorted map and a mirrored line in the lock, b7e or not, and that
+# is an append at a shared anchor exactly as it was. bc-wbrhi generates neither. But they
+# are deleted from too (bc-j2zwo.4 removed b7e-renum), which is why they now get the
+# structural driver above rather than union.
 
 # The documentation is deliberately NOT here, and it is what conflicts most often.
 #

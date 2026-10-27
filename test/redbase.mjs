@@ -136,6 +136,21 @@ check('a rollup that names failing checks is red however it labelled its state',
   assert.equal(baseVerdict({ baseline: { state: 'weird', failed: ['lint'] }, open: null }).act, 'file');
 });
 
+check('NO CHECKS YET IS NOT GREEN — a fresh main commit never clears the hold (bc-xl7n.162)', () => {
+  // The zero-checks version of pending: the second or so between a push and GitHub
+  // registering its run, or for as long as Actions is not starting runs at all. `rollup`
+  // answers state 'none' for an empty statusCheckRollup, and that used to fall through to
+  // `clear` — the hold closed as "main is green again" on a base nobody had looked at.
+  const NONE = { state: 'none', failing: 0, pending: 0, total: 0, failed: [] };
+  const v = baseVerdict({ baseline: NONE, open: holdRow() });
+  assert.equal(v.act, 'none');
+  assert.equal(v.unknown, true);
+  assert.equal(v.red, false);
+  // The pair that pins it from the other side: the same commit a moment later, with its
+  // run registered and passing, does clear.
+  assert.equal(baseVerdict({ baseline: GREEN, open: holdRow() }).act, 'clear');
+});
+
 check('an empty repo with no checks at all is not a red base', () => {
   assert.equal(baseVerdict({ baseline: { state: 'none', failed: [], total: 0 }, open: null }).act, 'none');
 });
@@ -409,6 +424,17 @@ await acheck('and a GitHub that could not be asked holds what it was already hol
   // what is broken during an outage.
   assert.deepEqual(out.hold.failed, ['lint']);
   assert.deepEqual(w.did.closed, []);
+});
+
+await acheck('a base with no checks yet leaves an open hold open and writes nothing (bc-xl7n.162)', async () => {
+  const last = { bead: 'zz-hold', key: 'beadcause', base: 'main', failed: ['lint'] };
+  const NONE = { state: 'none', failing: 0, pending: 0, total: 0, failed: [] };
+  const w = world({ baseline: NONE, rows: [holdRow()] });
+  const out = await sweepBase({ ...HERE_KEY, last }, w.deps);
+  assert.equal(out.hold.bead, 'zz-hold', 'the hold is still on');
+  assert.notEqual(out.act, 'clear');
+  assert.deepEqual(w.did.closed, [], 'and nothing was closed as green');
+  assert.deepEqual(out.hold.failed, ['lint']);
 });
 
 await acheck('a bd that would not take the bead files nothing and opens nothing', async () => {

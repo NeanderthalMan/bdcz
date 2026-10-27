@@ -400,7 +400,12 @@ await check('app.js hands it the scope, and the panel no longer gets it', () => 
   const app = read('public/app.js');
   assert.match(app, /filterPills\?\.mount\?\.\(filtersEl, \{ groups: \[scopeGroup\] \}\)/, 'the scope is not on the row');
   assert.doesNotMatch(app, /groups: \[scopeGroup, beadGroup\]/, 'the scope is still a group inside the panel');
-  assert.match(app, /f\?\.mount\(filtersEl, \{\n\s*groups: \[beadGroup\],/, 'the panel is not down to the bead box');
+  // The panel's own groups are the *page's* — the bead box, and since bc-iaju1.5 the
+  // Questions order switch beside it. What this pins is that the scope is not among
+  // them: it is the flat row in front of the pills, and a scope inside the panel is the
+  // control bc-khoe.24 took out.
+  assert.match(app, /groups: \[beadGroup, sortGroup\],/, 'the panel is not down to the page’s own groups');
+  assert.doesNotMatch(app, /groups: \[[^\]]*scopeGroup[^\]]*beadGroup/, 'the scope is back inside the panel');
 });
 
 await check('and a scope tap still repaints both controls', () => {

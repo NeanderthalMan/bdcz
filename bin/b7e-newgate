@@ -1,0 +1,163 @@
+#!/usr/bin/env node
+/**
+ * `b7e-newgate` — the house shape for a new gate in a workspace repo, computed from the
+ * gates already there.
+ *
+ *     b7e-newgate -w delmar --shape
+ *     b7e-newgate --dir <checkout> --shape
+ *     b7e-newgate -w delmar --for scripts/check_new_thing.py > scripts/check_new_thing.py
+ *     b7e-newgate -w delmar --for scripts/check_new_thing.py --selftest
+ *
+ * bc-dgx7.107: three sessions (`dv-5eu.11`, `dv-52r.6`, `dv-52r.7`) each added a
+ * `scripts/check_*.py` to delmar the same day, none reading the same neighbours, and
+ * none landing on the same shape — one printed `"checked %s for %d …"` / `"FAIL — %d
+ * problem(s):"` where eighteen-plus of the corpus's other gates converge on
+ * `checks = 0` / `failures = []` / a `check(cond, msg)` closure and a `ran N checks` …
+ * `PASS` / `FAILED — N problem(s)` ending. See `lib/newgate.js` for how the shape is
+ * computed (a plain-majority vote, the same idea as `bin/b7e-harness`'s two-phase one,
+ * simplified for a single-kind Python corpus); this file is argv parsing and printing.
+ *
+ * The skeleton goes to **stdout**, everything else to **stderr**, so `> scripts/x.py` is
+ * the whole workflow — the same split `bin/b7e-harness` uses and for the same reason.
+ *
+ * Exit codes: `0` printed something. `2` bad usage. `4` no `scripts/check_*.py` found, or
+ * too few gates for a majority (fewer than three).
+ *
+ * @grant read
+ */
+import fs from 'node:fs';
+import path from 'node:path';
+import { loadConfig } from '../lib/config.js';
+import { resolveSessionDir } from '../lib/session.js';
+import { newgate, specialise } from '../lib/newgate.js';
+
+const argv = process.argv.slice(2);
+const has = (f) => argv.includes(f);
+const value = (...names) => {
+  for (const f of names) {
+    const inline = argv.find((a) => a.startsWith(`${f}=`));
+    if (inline) return inline.slice(f.length + 1);
+    const at = argv.indexOf(f);
+    if (at > -1) return argv[at + 1];
+  }
+  return undefined;
+};
+
+const USAGE = `usage: b7e-newgate -w <workspace> | --dir <root> --shape
+       b7e-newgate -w <workspace> | --dir <root> --for scripts/check_<name>.py [--selftest]
+
+Print the house shape for a new gate in a workspace repo, voted from its own
+scripts/check_*.py rather than templated or copied from a neighbour.
+
+  -w, --workspace <name>   a beadcause workspace whose checkout holds the gates
+  --dir <root>             a checkout directly, instead of a workspace name
+  --shape                  report the derived shape and the nearest gates to read, and stop
+  --for <path>             scripts/check_<name>.py — the gate to generate a skeleton for
+  --selftest               with --for, also emit a scaffold for the _selftest.py twin
+  --json                   the machine-readable form instead of the printed report
+`;
+
+if (has('--help') || has('-h')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+
+function fail(msg, code = 2) {
+  console.error(`b7e-newgate: ${msg}`);
+  process.exit(code);
+}
+
+const wsName = value('-w', '--workspace');
+const dirArg = value('--dir');
+const forPath = value('--for');
+const SELFTEST = has('--selftest');
+const JSON_MODE = has('--json');
+const SHAPE_ONLY = has('--shape');
+
+if (!wsName && !dirArg) fail(`one of -w/--workspace or --dir is required\n${USAGE}`);
+if (wsName && dirArg) fail('-w/--workspace and --dir are mutually exclusive');
+if (!SHAPE_ONLY && !forPath) fail(`one of --shape or --for is required\n${USAGE}`);
+if (SHAPE_ONLY && forPath) fail('--shape and --for are two different questions; pass one');
+if (SELFTEST && !forPath) fail('--selftest only makes sense with --for');
+
+let root;
+if (dirArg) {
+  root = path.resolve(dirArg);
+} else {
+  const cfg = loadConfig();
+  const ws = cfg.workspaces.find((w) => w.name === wsName);
+  if (!ws) fail(`no workspace named "${wsName}"\nconfigured workspaces: ${cfg.workspaces.map((w) => w.name).join(', ') || 'none'}`);
+  try {
+    root = resolveSessionDir(cfg, ws);
+  } catch (err) {
+    fail(err.message);
+  }
+}
+
+if (!fs.existsSync(path.join(root, 'scripts'))) fail(`${root} has no scripts/ to read gates from`, 4);
+
+let answer;
+try {
+  answer = newgate(root, { forPath, selftest: SELFTEST });
+} catch (err) {
+  fail(err.message, 4);
+}
+
+const { shape, seeds, gates, selftests } = answer;
+
+if (SHAPE_ONLY) {
+  if (JSON_MODE) {
+    console.log(JSON.stringify({ root, gateCount: gates.length, selftestCount: selftests.length, shape, seeds }, null, 2));
+  } else {
+    console.log(`${gates.length} gate(s) under ${path.relative(process.cwd(), path.join(root, 'scripts')) || 'scripts'} (${selftests.length} with a _selftest.py twin)\n`);
+    if (shape.basis !== 'corpus') {
+      console.log(`too few gates (${shape.sampleSize}) for a majority shape — need at least ${shape.minimum}`);
+    } else {
+      const pct = (f) => `${Math.round(f * 100)}%`;
+      console.log(`shebang        ${shape.shebang.present ? shape.shebang.text : '(no majority)'}  ${pct(shape.shebang.fraction)}`);
+      console.log(`docstring run  ${shape.runLine.present ? specialise(shape.runLine.text, '<name>') : '(no majority)'}  ${pct(shape.runLine.fraction)}`);
+      console.log(`ROOT           ${shape.root.present ? shape.root.text : '(no majority)'}  ${pct(shape.root.fraction)}`);
+      console.log(`checks/failures  ${shape.checksLine.present ? 'checks = 0 / failures = []' : '(no majority)'}  ${pct(shape.checksLine.fraction)}`);
+      console.log(`check() closure  ${shape.checkFn.present ? 'yes' : '(no majority)'}  ${pct(shape.checkFn.fraction)}`);
+      console.log(`def main() wrapper  ${shape.hasMainWrapper.present ? 'yes' : 'no — most gates are a flat script'}  ${pct(shape.hasMainWrapper.fraction)}`);
+      console.log(`ending           ${shape.ending.length ? shape.ending.length + ' statement(s), ran N checks / PASS / FAILED -- N problem(s)' : '(no majority)'}`);
+      if (seeds.length) console.log(`\nnearest to read: ${seeds.map((s) => `scripts/${s.file}`).join(', ')}`);
+    }
+  }
+  process.exitCode = 0;
+} else {
+  const { skeleton, selftestSkeleton, checklist } = answer;
+
+  if (JSON_MODE) {
+    console.log(
+      JSON.stringify(
+        {
+          gate: skeleton.forPath,
+          basis: shape.basis,
+          sampleSize: shape.sampleSize,
+          seeds: seeds.map((s) => `scripts/${s.file}`),
+          text: skeleton.text,
+          selftestText: selftestSkeleton?.text,
+          checklist: checklist.map((c) => c.text),
+        },
+        null,
+        2
+      )
+    );
+  } else {
+    process.stdout.write(skeleton.text);
+    if (selftestSkeleton) {
+      process.stdout.write(`\n# ---- ${path.basename(forPath).replace(/\.py$/, '')}_selftest.py ----\n\n`);
+      process.stdout.write(selftestSkeleton.text);
+    }
+
+    const note = [];
+    note.push(`${skeleton.forPath} — majority of ${shape.sampleSize} gates` + (skeleton.usedRunLine ? '' : ' (no majority run-line in the docstring; wrote a plain summary)'));
+    if (seeds.length) note.push(`  nearest to read: ${seeds.map((s) => `scripts/${s.file}`).join(', ')}`);
+    note.push('');
+    note.push('registration checklist:');
+    for (const item of checklist) note.push(`  - [ ] ${item.text}`);
+    console.error(note.join('\n'));
+  }
+  process.exitCode = 0;
+}

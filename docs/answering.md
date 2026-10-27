@@ -143,6 +143,48 @@ the bead's gate as the trigger, a gateless bead falls back to the comment count 
 answer's own comment already counted, and a `bd` that cannot be read leaves the card
 visible rather than hiding it on a promise nothing kept.
 
+### Close it, once this lands — a fourth thing a commissioning option can mean
+
+**bc-eqn1.5.2.** Adam answered "Close it" on an epic — bc-eqn1.5 — whose commission also
+listed work to do: re-parent a child, hand a residual acceptance elsewhere. So the option
+had to carry `closes: false` like any other commission, and the fact that the *verdict*
+was close had nowhere to land. The three writes a commission makes — a comment, the
+`human` label off, reopened and unclaimed — say nothing about it. Once the commissioned
+pull request merged, the merge queue's own rule for an epic ("an epic closes when its
+theme is done, not when a branch sharing its name merges") left it open on purpose, and
+the finished-epic sweep asked the identical question a third time the moment its children
+cleared.
+
+An option may say this too:
+
+```yaml
+- id: close
+  label: Close it, move the rest elsewhere
+  response: "Close the epic. Re-parent the child, hand the rest to the review, then close it."
+  closes: false
+  closesOnLanding: true
+```
+
+`closesOnLanding: true` is not a fifth kind of answer — the bead ends up exactly where an
+ordinary commission leaves it, open and out of the inbox, unclaimed. What it adds is
+`ANSWERED_CLOSE_LABEL` (`answered-close`, `lib/answeredclose.js`), the one thing nothing
+else here writes down: that the eventual verdict, once the commissioned work is actually
+in, was close. The merge queue's epic branch reads it back the moment that pull request
+lands — if the epic has no open children (or an approval hold, or an unapplied `Adopts:`
+line — the same gate any other close is asked, `Bd.gateFor`) it closes the epic, quoting
+what was actually answered, instead of writing the stays-open comment. The finished-epic
+sweep treats a marked epic as already answered and does not draw a second card over the
+same verdict — the fallback for a merge that happened some other way, never a licence to
+ask a third time.
+
+`node test/mergequeue.mjs` pins the merge-queue half: a marked epic with no open children
+closes on the commission's own pull request landing, quoting the answer; the same marker
+on an epic the gate refuses (an open child, say) still falls back to the ordinary
+stays-open carve-out — the marker tells the queue to *act* on a verdict already given, not
+to skip asking whether it is actually safe to. `node test/commission.mjs` pins the write:
+an option carrying `closesOnLanding: true` gets the label beside the ordinary commission
+writes, and an ordinary commission never writes it.
+
 ### Setting a card aside is not answering it
 
 **Dismissing closes nothing.** It used to — comment the reason, then `bd close
@@ -195,6 +237,44 @@ under the word *Dismissed* reads as gone for good.
 The recheck costs one `bd show` per dismissed bead per sweep, and only for beads
 still in the inbox — a handful, usually none. A bead that has left the sweep was
 answered or closed elsewhere, so its record goes with it rather than accumulating.
+
+#### More than one at a time
+
+One tap per card is fine for the card in front of you and is not a way through a
+backlog. Measured on 2026-09-19 the inbox held **58 open questions with a median age
+of 26 days**, and nothing on the screen could act on two of them at once.
+
+So a card on the **Questions** view carries a tick, hard left of its top bar, and
+ticking anything puts a bar over the list: *N cards selected*, **Set aside N**, and
+**Clear** (bc-iaju1.5). It is the endorsement queue's bar and the endorsement queue's
+tick, in the same classes — two lists you tick rows in should not be two controls that
+look nearly alike.
+
+The bar **arms**, where /endorse's does not, and the difference is the act rather than
+the count: endorsing is idempotent and the worst a stray tap does is queue work you
+meant to queue eventually, where setting a card aside takes it off the screen until
+something else moves. The armed hint says what it will not do — nothing is closed,
+nothing is answered, and anything typed into a card is left where it is.
+
+Underneath it is **one request per bead, to the same `/api/dismiss` a single set-aside
+uses**. There is no bulk route, deliberately: a dismissal writes beadcause's own
+record, puts a typed note on the thread, drops every other device's notification and
+settles the Slack message, and a second plural implementation of all that would be five
+things to keep in step instead of one. `bd` is a single Dolt writer anyway. No reason
+is sent — one sentence about eleven beads is a sentence about none of them, which is
+the same argument the group revoke on /endorse makes — and a card that needs a word
+gets it by being opened.
+
+It reports as it goes and never says a flat *done*: *Setting aside 3 of 11…* while it
+runs, then the count and the first thing that did not work. A bead whose write was
+refused comes back where it was, wearing the same red note a single refused set-aside
+leaves, and **stays ticked** — so pressing the button again is the right move rather
+than a guess about which nine of the eleven went through.
+
+Only rows that offer a single set-aside can be ticked. A bead **held for endorsement**
+cannot: the decision there is an endorsement and it is made on /endorse, which is also
+what the count row at the top of the *Held* half links to. Neither can a JIRA ticket,
+which has no bead of its own to set aside.
 
 `node scripts/dismiss-check.mjs` holds the interaction to its promises in headless
 Chrome at phone size: that one tap writes nothing, that the arm expires and any

@@ -239,6 +239,56 @@ check('and with no service installed there is no declaration at all', () => {
   assert.equal(ownDeployDeclaration({ root, home: home('bare', null) }), null);
 });
 
+/* ------------------------------------------------------------------ the check */
+
+console.log('\nthe check it ships with (bc-rfnr.9.13)');
+
+// The one place this file asks about the real checkout: `deployFor` decides "is this
+// beadcause's own entry" by asking which unit opens in the tree lib/deploy.js lives in.
+const REPO = path.join(HERE, '..');
+const own = (deploys) => ({
+  port: 4318,
+  pr: { base: 'main' },
+  workspaces: [{ name: 'beadcause', dir: path.join(tmp, 'beads') }],
+  sessionDirs: { beadcause: REPO },
+  deploys,
+});
+const RESTART = ['launchctl', 'kickstart', '-k', `gui/{uid}/${LABEL}`];
+
+check('a restarting entry that names no checks gets the one that asks the daemon which commit it runs', () => {
+  const plan = deployFor(own({ beadcause: { command: RESTART, restarts: true } }), 'beadcause');
+  assert.equal(plan.checks.length, 1);
+  assert.equal(plan.checks[0].label, 'daemon is serving this commit');
+  assert.deepEqual(plan.checks[0].command, [process.execPath, path.join(path.resolve(REPO), 'scripts', 'serving.mjs'), '{image}']);
+  assert.ok(fs.existsSync(plan.checks[0].command[1]), 'and the script it names exists');
+  assert.ok(plan.checks[0].timeoutMs > 60000, 'with a timeout longer than the script waits');
+});
+
+check('`{image}` survives to the driver that knows the commit', () => {
+  const plan = deployFor(own({ beadcause: { command: RESTART, restarts: true } }), 'beadcause');
+  assert.ok(plan.checks[0].command.includes('{image}'));
+});
+
+check('`"checks": []` is a declaration, and turns it off', () => {
+  assert.deepEqual(deployFor(own({ beadcause: { command: RESTART, restarts: true, checks: [] } }), 'beadcause').checks, []);
+});
+
+check('checks somebody wrote are the whole list — nothing is added beside them', () => {
+  const mine = [{ label: 'mine', command: ['probe'] }];
+  const plan = deployFor(own({ beadcause: { command: RESTART, restarts: true, checks: mine } }), 'beadcause');
+  assert.deepEqual(plan.checks.map((c) => c.label), ['mine']);
+});
+
+check('a deploy that does not restart beadcause never gets a check about beadcause', () => {
+  assert.deepEqual(deployFor(own({ beadcause: { command: ['fly', 'deploy'] } }), 'beadcause').checks, []);
+});
+
+check('and neither does a restarting entry for a checkout that is not this one', () => {
+  const elsewhere = checkout('somewhere-else');
+  const cfg = { ...own({ beadcause: { command: RESTART, restarts: true } }), sessionDirs: { beadcause: elsewhere } };
+  assert.deepEqual(deployFor(cfg, 'beadcause').checks, []);
+});
+
 /* ------------------------------------------------------------------------ end */
 
 console.log(`\n${ran - failures}/${ran} passed`);

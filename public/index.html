@@ -453,8 +453,20 @@
       <div class="empty">Asking every workspace…</div>
     </main>
 
-    <section id="prs" class="work pagescroll" hidden>
-      <div class="empty">Asking every repo…</div>
+    <!-- Two subtabs since bc-gjlix: the open pull requests (the board prs.js draws), and the merge
+         queue in the order it will try them (mergeboard.js, which owns the switch).
+         `data-section` is the list a subtab shows. -->
+    <section id="prs" class="prs-pane" hidden>
+      <nav class="chip-row scopes prs-tabs" id="prs-tabs" aria-label="Pull requests">
+        <button class="chip" data-sub="open" data-section="prs-open" aria-pressed="true">Open PRs</button>
+        <button class="chip" data-sub="queue" data-section="prs-queue" aria-pressed="false">Merge queue<span class="prs-tab-count" id="prs-queue-count" hidden></span></button>
+      </nav>
+      <div id="prs-open" class="work pagescroll">
+        <div class="empty">Asking every repo…</div>
+      </div>
+      <div id="prs-queue" class="work pagescroll" hidden>
+        <div class="empty">Asking the merge queue…</div>
+      </div>
     </section>
 
     <section id="mirror" class="work pagescroll" hidden>
@@ -686,6 +698,12 @@
        leading slash for the reason every other comment in this file is: the wiring check
        in test/inboxkinds.mjs finds script tags with indexOf. -->
   <script src="/editmode.js"></script>
+  <!-- One proposal card, drawn the same wherever a proposal is met (bc-yjekg.5). Three
+       scripts on this page mount it — app.js below, and monitor.js and mirror.js, which
+       panelazy injects after the first paint — so it stays eager and before app.js, which
+       mounts it at the top of its IIFE. It registers on the namespace and asks for no
+       other file; its default markdown renderer uses the vendored pair above. -->
+  <script src="/proposal.js"></script>
   <script src="/app.js"></script>
   <!-- Graph and doc links open over this tab instead of navigating away from it.
        Last, and needing nothing from app.js: it works on the anchors, not the app. -->

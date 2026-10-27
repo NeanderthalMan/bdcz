@@ -616,6 +616,10 @@ await check('every swallowed failure in the poll cycle reports', () => {
       // worktree bookkeeping itself failing, which is a candidate that will now outlive
       // its pull request — the one thing the sweep exists to prevent.
       'the candidate sweep',
+      // lib/checkoutfresh.js — bc-xl7n.177. `freshenAllCheckouts` never throws and lands
+      // each checkout it would not touch in a `{ skipped, reason }` outcome, so what
+      // reaches this catch is the sweep's own bookkeeping.
+      'the checkout freshen sweep',
       // The beat's own guard. Everything inside the cycle already catches; what reaches
       // this one is the cycle's bookkeeping failing, which is a bug by construction —
       // and an unhandled rejection out of a `setInterval` callback would take the
@@ -635,6 +639,9 @@ await check('every swallowed failure in the poll cycle reports', () => {
       // catch is the watcher's own bookkeeping — and getting it wrong is quiet twice
       // over, because the symptom is a milestone that never chimes.
       'the epic-done sweep',
+      // lib/curator.js — bc-u1ltu.5. `curate()` never rejects, so what reaches this catch is
+      // `sweep`'s own dispatch loop failing.
+      'the memory curator sweep',
       // lib/mergequeue.js. Its own guard rather than the advocate tick's, though it runs
       // beside it: a queue that cannot reach GitHub and an advocate that cannot open
       // windows fail for different reasons, and one crash card naming both would send

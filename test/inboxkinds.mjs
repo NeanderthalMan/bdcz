@@ -601,10 +601,27 @@ await check('no combination of the payload’s own fields falls through the tabl
 
 console.log('\nwhat the filter shows');
 
-await check('nothing selected shows everything — that is the default and the fallback', () => {
+await check('nothing selected shows everything the two standing defaults allow', () => {
   const { filter } = load();
   assert.deepEqual(list(filter.selected()), []);
-  for (const row of Object.values(ROWS)) assert.ok(filter.matches(row));
+  for (const [name, row] of Object.entries(ROWS)) {
+    // **Two fallbacks bite with nothing selected**, which is why this is not simply
+    // "everything". PR status shows the unmerged rungs, and every pull request fixture
+    // here is on `review`, so that one lets them all through. The Questions split
+    // (bc-iaju1.5) shows the *asked* half, and it does not: a bead held for endorsement
+    // is off an unnarrowed Home now, exactly as a merged pull request is, because it is
+    // decided on /endorse rather than answered here. The row confesses both — the `said`
+    // checks further down are the other half of this one.
+    if (name === 'endorsement') {
+      assert.ok(!filter.matches(row), 'a held bead is back in the default list');
+      continue;
+    }
+    assert.ok(filter.matches(row), `${name} is not in the default list`);
+  }
+  // And it is one chip away rather than gone, which is the difference between a default
+  // and a thing the app has stopped being able to show you.
+  filter.setSub('question', ['held']);
+  assert.ok(filter.matches(ROWS.endorsement), 'the held chip does not bring them back');
 });
 
 await check('one kind selected shows that kind and nothing else', () => {
@@ -623,11 +640,33 @@ await check('one kind selected shows that kind and nothing else', () => {
 await check('the Questions pill carries all four of the things waiting on you', () => {
   const { filter } = load();
   filter.set(['question']);
-  for (const name of ['question', 'proposal', 'jira', 'endorsement']) {
+  for (const name of ['question', 'proposal', 'jira']) {
     assert.ok(filter.matches(ROWS[name]), `${name} is not under Questions`);
   }
+  // The fourth is still this pill's — `kindOf` is what the fold means, and nothing about
+  // bc-iaju1.5 changes it — but it is behind the pill's own chip now rather than mixed
+  // in with the three above. That split is the bead: 58 questions and 90 held beads at
+  // one address meant the queue you can answer was never on screen by itself.
+  assert.equal(filter.kindOf(ROWS.endorsement), 'question', 'a held bead left the Questions pill');
+  assert.ok(!filter.matches(ROWS.endorsement), 'the held half is in the asked list');
   assert.ok(!filter.matches(ROWS.pr));
   assert.ok(!filter.matches(ROWS.unclaimed));
+});
+
+await check('and its two halves are one chip each, never both and never neither', () => {
+  const { filter } = load();
+  filter.set(['question']);
+  filter.setSub('question', ['held']);
+  assert.ok(filter.matches(ROWS.endorsement));
+  assert.ok(!filter.matches(ROWS.question), 'an asked question is in the held list');
+  assert.ok(!filter.matches(ROWS.jira), 'a ticket nobody is holding is in the held list');
+  // Single-choice, and enforced here rather than by the chrome: filtermenu.js's `multi`
+  // decides whether the panel closes on the tap and nothing more, so a group that
+  // toggled would reach `Asked, Held` — which is the state the split exists to get out
+  // of — and `Held` tapped twice would reach the empty set, which reads as the default
+  // and is therefore `Asked` under a lit `Held` chip.
+  const asked = model.KINDS.find((k) => k.id === 'question');
+  assert.equal(asked.sub.single, true, 'the Questions split is a ladder again');
 });
 
 await check('two kinds selected show both', () => {
@@ -670,7 +709,12 @@ await check('a phone that stored a retired kind comes back to an unnarrowed Home
   const { filter } = load({ store });
   assert.deepEqual(list(filter.selected()), []);
   assert.equal(filter.current(), 'home');
-  assert.ok(filter.matches(ROWS.endorsement), 'a retired selection hid the list it named');
+  // The row the retired id used to name is one chip in on the Questions pill now
+  // (bc-iaju1.5), so what "wide rather than empty" is asserted with is a row the standing
+  // defaults allow: the point of the check is that a junk selection did not hide the
+  // list, and a held bead being off an unnarrowed Home is the default doing its job.
+  assert.ok(filter.matches(ROWS.question), 'a retired selection hid the list it named');
+  assert.equal(filter.kindOf(ROWS.endorsement), 'question', 'and the row it named went nowhere');
 });
 
 await check('unreadable storage reads as "no filter", never as "hide everything"', () => {
@@ -1026,7 +1070,9 @@ await check('a pill per group the row still owns, and no kinds among them', () =
   // the check is about is that the page's group leads and the control's own two follow
   // it. Every pill exists at mount, whichever view is lit; which of them is *offered* is
   // that view's business and is checked further down.
-  assert.deepEqual(groups, ['bead', 'status', 'beadstatus'], `the row holds ${groups.join(', ')}`);
+  // `asked` is the Questions pill's own split (bc-iaju1.5) and leads the control's other
+  // two because the table's order is the row's: question, then pr, then bead.
+  assert.deepEqual(groups, ['bead', 'asked', 'status', 'beadstatus'], `the row holds ${groups.join(', ')}`);
   // No count on a page group's chips here: the real box has none either, and a wrong
   // number beside the sub-filters' real ones is worse than none.
   assert.equal(chips('bead')[0].children.length, 1);
@@ -1380,6 +1426,93 @@ await check('the pill stays a bare legend while it is not narrowing anything', (
   assert.equal(says('beadstatus'), 'Bead status: Blocked');
 });
 
+/* ------------------------------------------------ the asked/held sub-filter (bc-iaju1.5) */
+
+console.log('\nthe third sub-filter: the two jobs the Questions pill carries');
+
+/* Questions with a held bead among them, which is the shape that made the bead: the
+   asked half is what you answer here and the held half is decided on /endorse, and on
+   2026-09-19 there were 58 of the first and 90 of the second at one address. */
+const Q_COUNTS = { question: 4 };
+const Q_SUB = { asked: { asked: 4, held: 90 } };
+
+await check('its pill appears only once Questions is selected, and holds the two halves', () => {
+  const { filter, offered, chips } = mounted({ counts: Q_COUNTS });
+  assert.equal(offered('asked'), false, 'the split is offered under every view');
+  filter.set(['question']);
+  assert.equal(offered('asked'), true);
+  assert.deepEqual(chips('asked').map((c) => c.dataset.chip), ['asked', 'held']);
+});
+
+await check('each chip says how many are on its side, which is the number the bead is about', () => {
+  const { filter, chips } = mounted({ counts: Q_COUNTS });
+  filter.survey({ kinds: ANY_KINDS, counts: Q_COUNTS, sub: Q_SUB });
+  filter.set(['question']);
+  assert.deepEqual(
+    chips('asked').map((c) => c.children.at(-1).text),
+    ['4', '90'],
+    'the chips carry no numbers, so the way out of the backlog is invisible'
+  );
+});
+
+await check('the pill names the narrowing nobody set, the way PR status does', () => {
+  const { filter, says, pill } = mounted({ counts: Q_COUNTS });
+  filter.set(['question']);
+  assert.equal(says('asked'), 'Questions: asked');
+  assert.ok(pill('asked').classes().includes('on'), 'a filter that is filtering does not look like one');
+  filter.setSub('question', ['held']);
+  assert.equal(says('asked'), 'Questions: Held');
+});
+
+await check('and confesses itself as a note on a view whose pill it has left', () => {
+  // The same rule the `unmerged` default lives by: a narrowing that is still biting with
+  // its control off the row is the one thing this control must never do quietly. It bites
+  // on Home — `matches` applies `inSub` whatever is selected — so Home has to say so.
+  const { says, offered, note } = mounted({ counts: Q_COUNTS });
+  assert.equal(offered('asked'), false, 'the pill is on a view that does not own it');
+  assert.equal(says('asked'), 'Questions: asked', 'the held beads are off Home and nothing says why');
+  assert.equal(note('asked').hidden, false);
+});
+
+await check('on a screen with no questions at all, it says nothing about them', () => {
+  // Gated on `inView` and on there being something of the kind, exactly as the PR group
+  // is: a note about the held half over a list with no question in it names a filter that
+  // is not filtering anything you can see.
+  const { says } = mounted({ counts: { pr: 2 } });
+  assert.equal(says('asked'), '');
+});
+
+await check('picking a half replaces the other rather than adding to it', () => {
+  // Single-choice, and it is this file that enforces it — filtermenu.js's `multi` only
+  // decides whether the panel closes. `Asked, Held` is the state the split exists to get
+  // out of, and it is one stray toggle away without this.
+  const { filter, chip, says } = mounted({ counts: Q_COUNTS });
+  filter.set(['question']);
+  chip('asked', 'held').fire('click');
+  assert.deepEqual(list(filter.selectedSub('question')), ['held']);
+  chip('asked', 'asked').fire('click');
+  assert.deepEqual(list(filter.selectedSub('question')), ['asked'], 'the two halves are both lit');
+  assert.equal(says('asked'), 'Questions: Asked');
+});
+
+await check('the half you are on survives a reload, like every other sub-filter', () => {
+  const store = new Map();
+  const first = load({ store });
+  first.filter.set(['question']);
+  first.filter.setSub('question', ['held']);
+  const again = load({ store });
+  assert.deepEqual(list(again.filter.selectedSub('question')), ['held']);
+  assert.ok(again.filter.matches(ROWS.endorsement), 'the stored half did not come back');
+});
+
+await check('the empty state can name the half as well as the kind', () => {
+  const { filter } = mounted({ counts: Q_COUNTS });
+  filter.set(['question']);
+  assert.equal(filter.label(), 'questions (asked)');
+  filter.setSub('question', ['held']);
+  assert.equal(filter.label(), 'questions (held)');
+});
+
 /* -------------------------------------- the row is a function of the lit view pill */
 
 console.log('\nwhich filter pills are drawn is whatever the lit view pill can use');
@@ -1388,7 +1521,11 @@ await check('every view pill says which filters it can use', () => {
   // The table is the declaration, so a kind added without one is a view under which the
   // row would quietly draw nothing at all — which is indistinguishable, on screen, from
   // a view that genuinely has no second axis.
-  const known = new Set(['bead']);
+  // The page's own groups, which this file never sees: `bead` is app.js's search box and
+  // `qsort` is its Questions order switch (bc-iaju1.5). Both are `adopt`ed page groups,
+  // and inboxfilter.js warns out loud about a page group no pill names — this is the
+  // same check from the other end, that no *pill* names a group nothing draws.
+  const known = new Set(['bead', 'qsort']);
   for (const k of list(model.KINDS)) if (k.sub) known.add(k.sub.id);
   for (const k of list(model.KINDS)) {
     assert.ok(Array.isArray(k.filters), `${k.id} does not say what the row may offer under it`);
@@ -1760,7 +1897,10 @@ await check('and public/app.js hands the cards over unconditionally — bc-fwp2c
   );
   // And the survey hands it on rather than counting a second time.
   const sk = APP.slice(APP.indexOf('function surveyKinds(rows'));
-  assert.ok(sk.slice(0, sk.indexOf('\n  }')).includes('sub: { status }, board }'), 'the board never reaches the filter');
+  assert.ok(
+    sk.slice(0, sk.indexOf('\n  }')).includes('sub: { status, asked }, board }'),
+    'the board never reaches the filter'
+  );
 });
 
 await check('a kind narrowed away is counted at zero, not left at its old number', () => {

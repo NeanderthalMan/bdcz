@@ -307,6 +307,31 @@ check('a review with nothing outstanding says so rather than inviting a push for
   assert.match(reviewAnswerPrompt('beadcause', ISSUE, SPEC, done), /Nothing is outstanding/);
 });
 
+check('A VETO BRIEF CARRIES THE REFUSAL AND THE COMMENTS, AND PROMISES NO NEXT ROUND', () => {
+  // bc-36xx.35. The window opened beside a veto card: the loop is over, so the round-cap
+  // paragraph and "already queued" are both false, and the refusal is the brief.
+  const vetoed = { ...STATE, verdict: 'refused', refused: 'ROOT defaults to the checkout the script lives in' };
+  const text = reviewAnswerPrompt('beadcause', ISSUE, SPEC, vetoed, {
+    owner: 'Adam',
+    maxRounds: 2,
+    veto: 'The reviewer will not approve this pull request: ROOT defaults to the checkout the script lives in',
+  });
+  assert.match(text, /card in front of Adam/);
+  assert.match(text, /will not approve this pull request: ROOT defaults/);
+  for (const c of commentsForWorker(vetoed)) assert.ok(text.includes(c.body), `comment ${c.id} is missing from the brief`);
+  assert.match(text, /gh pr comment 42/);
+  assert.ok(!/There are 2 rounds/.test(text), 'a veto brief promised another round');
+  assert.ok(!/already open and already queued/.test(text), 'a veto brief said the pull request was still queued');
+  assert.match(text, /already open and already a card for Adam/);
+});
+
+check('a veto with no comment on it says the sentence is the whole objection, not that nothing is owed', () => {
+  const bare = { round: 1, verdict: 'refused', refused: 'wrong module entirely', comments: [] };
+  const text = reviewAnswerPrompt('beadcause', ISSUE, SPEC, bare, { veto: 'The reviewer will not approve this pull request: wrong module entirely' });
+  assert.ok(!/Nothing is outstanding/.test(text), 'a veto told its worker to stop with nothing to do');
+  assert.match(text, /the objection is the sentence above/);
+});
+
 check('an answer the reviewer kept open is shown as standing, not as a fresh ask', () => {
   // The second-round shape: the reviewer was not persuaded, so it left the comment open with
   // last round's answer on it. `commentsForWorker` skips it (it has an answer), and a brief

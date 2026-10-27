@@ -1,0 +1,164 @@
+#!/usr/bin/env node
+/**
+ * `b7e-sweep` — what a new advocate sweep still owes, before the gate is worth starting.
+ *
+ *     b7e-sweep                        every function tick() reaches that is missing anything
+ *     b7e-sweep sweepLapsed            just that one — by its own name, or by the name a
+ *                                      function in lib/advocate.js calls it
+ *     b7e-sweep lapse --module lib/lapse.js
+ *                                      the sweep's module too: everything it exports, and
+ *                                      whether lib/advocate.js imports it and calls it
+ *     b7e-sweep --all                  also print what is deliberate rather than owed
+ *     b7e-sweep --json                 the same answer as one object
+ *     b7e-sweep --dir <checkout>       another tree (default: the one you are standing in)
+ *
+ * bc-dgx7.167: four sessions added a sweep to the advocate's tick (bc-dhayi, bc-iaju1.12,
+ * bc-iaju1.8, bc-iaju1.4) and each rebuilt the registration list from scratch and got a
+ * different subset. bc-iaju1.4 waited ~90 minutes for a gate slot to be told that
+ * `test/wsshape.mjs` refuses `sweepLapsed` because it is in neither list. `b7e-owes` names
+ * four registries and none of these. lib/sweepowes.js says what is checked and what is not.
+ *
+ * One line per unpaid registration: the file, the line to add it beside, what is missing,
+ * and either the suite that goes red without it or `[silent]` — the interval clock that
+ * resets on every restart fails nothing, ever.
+ *
+ * Reads `lib/advocate.js`, `test/wsshape.mjs` and the specification. Writes nothing, runs
+ * nothing, needs no daemon or token; about a fifth of a second.
+ *
+ * Exit codes: `0` nothing owed, `1` something is, `2` bad usage, `4` a file it reads is not
+ * there or the named sweep matches nothing in the advocate.
+ *
+ * @grant read
+ */
+import fs from 'node:fs';
+import path from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { readDocs } from '../lib/docset.js';
+import { ADVOCATE, WSSHAPE, analyse, renderFinding } from '../lib/sweepowes.js';
+
+const argv = process.argv.slice(2);
+
+const USAGE = `usage: b7e-sweep [<sweepFn>] [--module lib/<file>.js] [--all] [--json] [--dir <checkout>]
+
+Says what a sweep added to lib/advocate.js's tick still owes: the callee missing from
+WANT_OBJECT/WANT_NAME in test/wsshape.mjs, an interval clock that record() restores and
+persist() never writes (or the reverse), and an advocates.<key> setting read with no row in
+the specification. With no <sweepFn>, every function tick() reaches. Nothing is written and
+no suite is run.
+
+  <sweepFn>           a function in lib/advocate.js, or the name one calls it by
+  --module <file>     the lib/ module the sweep lives in — checks it is imported and called
+  --all               also print what is deliberate rather than owed
+  --json              one object instead of the printed lines
+  --dir <checkout>    the tree to read (default: the git root of the current directory)
+
+Exits 0 when nothing is owed, 1 when something is, 2 on bad usage, 4 when a file it reads
+is missing or <sweepFn> matches nothing.`;
+
+if (argv.includes('--help') || argv.includes('-h')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+
+let sweep = null;
+let moduleRel = null;
+let dir = null;
+let all = false;
+let jsonMode = false;
+for (let i = 0; i < argv.length; i += 1) {
+  const a = argv[i];
+  if (a === '--all') all = true;
+  else if (a === '--json') jsonMode = true;
+  else if (a === '--module') moduleRel = argv[++i] ?? '';
+  else if (a.startsWith('--module=')) moduleRel = a.slice(9);
+  else if (a === '--dir') dir = argv[++i] ?? '';
+  else if (a.startsWith('--dir=')) dir = a.slice(6);
+  else if (a.startsWith('-')) {
+    console.error(`b7e-sweep: unexpected option ${a}`);
+    console.error(USAGE);
+    process.exit(2);
+  } else if (sweep === null) sweep = a;
+  else {
+    console.error(`b7e-sweep: one <sweepFn> at a time — got "${sweep}" and "${a}"`);
+    process.exit(2);
+  }
+}
+if (moduleRel === '' || dir === '') {
+  console.error(`b7e-sweep: ${moduleRel === '' ? '--module' : '--dir'} wants a value`);
+  process.exit(2);
+}
+if (sweep !== null && !/^[A-Za-z_$][\w$.?]*$/.test(sweep)) {
+  console.error(`b7e-sweep: "${sweep}" is not a function name`);
+  process.exit(2);
+}
+
+/**
+ * The checkout this was run from, not the one this file lives in: the copy of a `b7e-*`
+ * command that executes is always the main checkout's, so a root taken from `import.meta`
+ * would read main's `lib/advocate.js` from every worktree — and the point is to read the
+ * one being edited.
+ */
+function rootOf() {
+  if (dir) return path.resolve(dir);
+  try {
+    return execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd: process.cwd(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  } catch {
+    return path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+  }
+}
+
+const root = rootOf();
+const read = (rel) => {
+  try {
+    return fs.readFileSync(path.join(root, rel), 'utf8');
+  } catch {
+    return null;
+  }
+};
+
+const advocateSrc = read(ADVOCATE);
+const wsshapeSrc = read(WSSHAPE);
+const missing = [advocateSrc === null && ADVOCATE, wsshapeSrc === null && WSSHAPE].filter(Boolean);
+if (missing.length) {
+  console.error(`b7e-sweep: cannot read ${missing.join(' and ')} under ${root}`);
+  process.exit(4);
+}
+
+let module = null;
+if (moduleRel) {
+  const resolved = path.resolve(root, moduleRel);
+  if (!resolved.startsWith(`${root}${path.sep}`)) {
+    console.error(`b7e-sweep: --module ${moduleRel} is outside ${root}`);
+    process.exit(2);
+  }
+  const text = read(moduleRel);
+  if (text === null) {
+    console.error(`b7e-sweep: no such module ${moduleRel} under ${root}`);
+    process.exit(4);
+  }
+  module = { rel: path.relative(root, resolved).split(path.sep).join('/'), text };
+}
+
+const result = analyse({ advocateSrc, wsshapeSrc, docs: readDocs(root), sweep, module });
+
+if (result.unknown) {
+  console.error(`b7e-sweep: nothing in ${ADVOCATE} is named or calls "${sweep}"`);
+  console.error(`  reached from tick(): ${result.reached.join(', ')}`);
+  process.exit(4);
+}
+
+if (jsonMode) {
+  console.log(JSON.stringify({ root, sweep, module: module?.rel || null, reached: result.reached, owed: result.findings, deliberate: result.notes }, null, 2));
+  process.exit(result.findings.length ? 1 : 0);
+}
+
+for (const f of result.findings) console.log(renderFinding(f));
+if (all) for (const n of result.notes) console.log(`${n.file}:${n.line}  (deliberate) ${n.message}`);
+const scope = sweep || module ? `for ${[...(result.targets || [])].join(', ')}` : `across the ${result.reached.length} functions tick() reaches`;
+console.log(
+  result.findings.length
+    ? `\n${result.findings.length} owed ${scope}`
+    : `nothing owed ${scope} — the workspace-shape lists, the interval clocks and the settings' rows all agree`
+);
+process.exit(result.findings.length ? 1 : 0);

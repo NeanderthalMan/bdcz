@@ -54,7 +54,6 @@
 
   const token = localStorage.getItem('beadcause.token') || '';
   const out = document.getElementById('beadsession');
-  const pulse = document.getElementById('pulse');
   const titleEl = document.getElementById('arc-title');
 
   const params = new URLSearchParams(location.search);
@@ -435,7 +434,6 @@
    * the live page pays deliberately and this one has no reason to.
    */
   async function load() {
-    pulse.classList.add('busy');
     try {
       const detail = await api(
         `/api/bead-session?workspace=${encodeURIComponent(ws)}&id=${encodeURIComponent(bead)}${
@@ -511,8 +509,6 @@
     } catch (err) {
       if (!state.detail) state.stopped = { title: "Can't read that bead's sessions", detail: err.message };
       render();
-    } finally {
-      pulse.classList.remove('busy');
     }
   }
 

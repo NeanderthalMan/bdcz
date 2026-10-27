@@ -155,13 +155,27 @@ check("the fallback's words are the daemon's: bin/open-handoff says the same loa
   // Which path opened the successor must not change what the successor does. Since
   // bc-nense the fallback is in this repo, so the two briefs can be held to each other.
   const src = read('bin', 'open-handoff');
-  const prompt = src.slice(src.indexOf('PROMPT="'), src.indexOf('relying on it."') + 'relying on it."'.length);
+  const prompt = src.slice(src.indexOf('PROMPT="'), src.indexOf('<it>."') + '<it>."'.length);
   assert.ok(prompt.length > 20, 'the PROMPT block moved — find it again rather than pass vacuously');
   assert.match(prompt, /bd show \$\{ID\} --json \| jq -r '\.\[0\]\.description'/, 'the byte-exact read');
   assert.match(prompt, /bd update \$\{ID\} --claim/, 'the claim');
   assert.match(prompt, /Next action/, 'the section to continue from');
   assert.match(prompt, /UNVERIFIED/, 'verify before relying');
   assert.ok(!/bd close/.test(prompt), 'and never the discuss-and-close brief');
+  assert.match(prompt, /bd comments add \$\{ID\}/, 'the status goes on the bead');
+  assert.match(prompt, /--labels=human,author-decision/, 'and each question is its own human bead');
+});
+
+check('before it stops, the successor writes to the tracker rather than the window', () => {
+  // A parked window is closed and Adam resumes by session id — so anything the successor
+  // only *said* is gone from view. Measured on ehden/eh-oac, 2026-10-22: two new questions
+  // in its last message, no bead for either, window closed half an hour later.
+  const brief = handoffPromptFor('beadcause', 'bc-hb7j');
+  assert.match(brief, /bd comments add bc-hb7j/, 'where it stands goes on the handoff bead');
+  assert.match(brief, /--labels=human,author-decision/, 'each question is a bead in the phone queue');
+  assert.match(brief, /\*\*own\*\*\s+bead, one per question/, 'one per question, never a bundle');
+  assert.match(brief, /RECOMMEND/, 'with a recommendation to choose against');
+  assert.match(brief, /bd dep add bc-hb7j/, 'wired to block the handoff');
 });
 
 check('bare `bd show` is warned off by name, not just avoided', () => {

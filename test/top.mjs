@@ -27,22 +27,31 @@ import { removeTreeSync } from './helpers/tmp.mjs';
 import {
   COLUMNS,
   DEFAULT_CONTEXT_LIMIT,
+  DEFAULT_SORT,
   LARGE_CONTEXT_LIMIT,
+  SORTS,
   TOP_WINDOW,
   collectTop,
   contextFromTail,
   contextLimitFor,
+  etimeSeconds,
   fmtMem,
   fmtTokens,
+  focusRow,
+  nextSort,
   parsePs,
   processStats,
   readContext,
   renderTop,
   runTop,
   shortAge,
+  sortRows,
   stateWords,
   topRows,
+  ttyOf,
+  ttyPath,
 } from '../lib/top.js';
+import { EventEmitter } from 'node:events';
 import { homeKey } from '../lib/iterm.js';
 import { dw } from '../lib/width.js';
 
@@ -152,7 +161,7 @@ const liveRec = (n, extra = {}) => ({
   ...extra,
 });
 
-test('topRows: live rows carry busy/idle, process and context numbers; busy first, then idle, then what is not back', () => {
+test('topRows: live rows carry busy/idle, process and context numbers, in the order they came — the frame orders them', () => {
   const rows = [
     { sessionId: id(1), name: 'repo1 - task 1', dir: '/r/repo1', status: 'live', workspace: 'beadcause', bead: null },
     { sessionId: id(2), name: 'repo2 - task 2', dir: '/r/repo2', status: 'live', workspace: 'loremia', bead: 'lm-p4cq' },
@@ -168,10 +177,10 @@ test('topRows: live rows carry busy/idle, process and context numbers; busy firs
   const out = topRows({ rows, live, stats, context, opened, now: NOW });
   assert.deepEqual(
     out.map((r) => r.sessionId),
-    [id(2), id(1), id(3)],
-    'busy, idle, not back'
+    [id(1), id(2), id(3)],
+    'the order it was given: nothing here re-sorts on activity'
   );
-  const [busy, idle, gone] = out;
+  const [idle, busy, gone] = out;
   assert.equal(busy.kind, 'work');
   assert.equal(busy.activity, 'busy');
   assert.equal(busy.activityAge, '5s');
@@ -189,6 +198,114 @@ test('topRows: live rows carry busy/idle, process and context numbers; busy firs
   assert.equal(stateWords(busy), 'busy 5s');
   assert.equal(stateWords(idle), 'idle 2m');
   assert.match(stateWords(gone), /^skipped — its directory is gone/);
+});
+
+/* ------------------------------------------------------------------ order */
+
+const orderRows = () =>
+  topRows({
+    rows: [
+      { sessionId: id(1), name: 'Northwind - b', dir: '/r/architecture', status: 'live', workspace: 'architecture', bead: null, transcriptAt: iso(NOW - 10_000) },
+      { sessionId: id(2), name: 'beadcause - a', dir: '/r/beadcause', status: 'live', workspace: 'beadcause', bead: 'bc-1', transcriptAt: iso(NOW - 90_000) },
+      { sessionId: id(3), name: 'Northwind - a', dir: '/r/architecture/.claude/worktrees/x', status: 'live', workspace: 'architecture', bead: null, transcriptAt: null },
+      { sessionId: id(4), name: 'delmar - gone', dir: '/r/delmar', status: 'skipped', why: 'its directory is gone', workspace: 'delmar', bead: 'dv-9' },
+    ],
+    live: [liveRec(1, { status: 'busy', at: iso(NOW - 5000) }), liveRec(2), liveRec(3, { status: 'busy', at: iso(NOW - 60_000) })],
+    stats: new Map([
+      [1001, { cpu: 1.5, rssKb: 300 * 1024, etime: '01:00:00' }],
+      [1002, { cpu: 40.0, rssKb: 100 * 1024, etime: '2-00:00:00' }],
+      [1003, { cpu: 0.0, rssKb: 900 * 1024, etime: '00:30' }],
+    ]),
+    context: (row) => (row.sessionId === id(2) ? { tokens: 500_000, model: 'x' } : row.sessionId === id(1) ? { tokens: 50_000, model: 'x' } : null),
+    now: NOW,
+  });
+
+test('sortRows: the default is workspace then name; live rows first; the same answer on every frame', () => {
+  const ids = (rows) => rows.map((r) => r.sessionId);
+  assert.deepEqual(ids(sortRows(orderRows())), [id(3), id(1), id(2), id(4)], 'architecture a, architecture b, beadcause a; the not-back row last');
+  assert.deepEqual(DEFAULT_SORT, { by: 'ws', reverse: false });
+  assert.deepEqual(ids(sortRows(orderRows(), DEFAULT_SORT)), ids(sortRows([...orderRows()].reverse())), 'input order does not leak through');
+  // Going busy does not move a row: the same rows a frame later, one of them now busy.
+  const later = orderRows().map((r) => (r.sessionId === id(2) ? { ...r, activity: 'busy', activityAt: iso(NOW) } : r));
+  assert.deepEqual(ids(sortRows(later)), ids(sortRows(orderRows())));
+});
+
+test('sortRows: by a number, blanks last either way up; by text, case-blind; by state, busy first; by up, days beat hours', () => {
+  const ids = (rows) => rows.map((r) => r.sessionId);
+  assert.deepEqual(ids(sortRows(orderRows(), { by: 'cpu' })), [id(3), id(1), id(2), id(4)]);
+  assert.deepEqual(ids(sortRows(orderRows(), { by: 'cpu', reverse: true })), [id(2), id(1), id(3), id(4)], 'the not-back row has no cpu and stays last');
+  assert.deepEqual(ids(sortRows(orderRows(), { by: 'ctx' })), [id(1), id(2), id(3), id(4)], 'no transcript, no context: after the numbers');
+  assert.deepEqual(ids(sortRows(orderRows(), { by: 'ctx', reverse: true })), [id(2), id(1), id(3), id(4)]);
+  assert.deepEqual(ids(sortRows(orderRows(), { by: 'mem', reverse: true })), [id(3), id(1), id(2), id(4)]);
+  assert.deepEqual(ids(sortRows(orderRows(), { by: 'up', reverse: true })), [id(2), id(1), id(3), id(4)], 'two days, an hour, thirty seconds');
+  assert.deepEqual(ids(sortRows(orderRows(), { by: 'last' })), [id(2), id(1), id(3), id(4)], 'oldest write first; none last');
+  assert.deepEqual(ids(sortRows(orderRows(), { by: 'session' })), [id(2), id(3), id(1), id(4)], 'beadcause - a, Northwind - a, Northwind - b: case does not count');
+  assert.deepEqual(ids(sortRows(orderRows(), { by: 'state' })), [id(1), id(3), id(2), id(4)], 'busy (most recently) first, then idle');
+  assert.deepEqual(ids(sortRows(orderRows(), { by: 'bead' })), [id(3), id(1), id(2), id(4)], 'no bead sorts as the empty string, before bc-1');
+  assert.deepEqual(ids(sortRows(orderRows(), { by: 'nonsense' })), ids(sortRows(orderRows())), 'an unknown column is the default');
+  assert.equal(Object.keys(SORTS).length, COLUMNS.length, 'every column orders');
+  for (const c of COLUMNS) assert.ok(SORTS[c.id], `${c.id} has a sort`);
+});
+
+test('etimeSeconds reads every shape ps prints', () => {
+  assert.equal(etimeSeconds('05:12'), 312);
+  assert.equal(etimeSeconds('01:02:03'), 3723);
+  assert.equal(etimeSeconds('2-03:04:05'), 2 * 86400 + 3 * 3600 + 4 * 60 + 5);
+  assert.equal(etimeSeconds(''), null);
+  assert.equal(etimeSeconds('soon'), null);
+});
+
+test('nextSort steps through the columns in table order and wraps', () => {
+  assert.equal(nextSort('ws', 1), 'bead');
+  assert.equal(nextSort('ws', -1), 'session');
+  assert.equal(nextSort('session', -1), 'last');
+  assert.equal(nextSort('last', 1), 'session');
+  assert.equal(nextSort('nonsense', 1), 'ws', 'an unknown column steps from the first');
+});
+
+/* ------------------------------------------------------------------ focus */
+
+test('ttyPath and ttyOf: a tty from ps, /dev/ in front; ?? is no terminal; a bad pid asks nothing', async () => {
+  assert.equal(ttyPath('ttys012\n'), '/dev/ttys012');
+  assert.equal(ttyPath('  ttys003 '), '/dev/ttys003');
+  assert.equal(ttyPath('??'), null);
+  assert.equal(ttyPath(''), null);
+  assert.equal(ttyPath('ttys012; rm -rf /'), null, 'nothing but a tty name reaches osascript');
+  const asked = [];
+  assert.equal(await ttyOf(4242, { ps: async (pid) => (asked.push(pid), 'ttys007\n') }), '/dev/ttys007');
+  assert.deepEqual(asked, [4242]);
+  assert.equal(await ttyOf('x', { ps: async () => assert.fail('must not be called') }), null);
+  assert.equal(
+    await ttyOf(1, {
+      ps: async () => {
+        throw new Error('no ps');
+      },
+    }),
+    null
+  );
+  assert.equal(await ttyOf(process.pid), ttyPath(spawnSync('ps', ['-o', 'tty=', '-p', String(process.pid)], { encoding: 'utf8' }).stdout), 'the real ps, on this process');
+});
+
+test('focusRow: a live row reaches its tab by tty; a row with no process, no terminal or no iTerm window says so', async () => {
+  const calls = [];
+  const live = { sessionId: id(1), name: 'Northwind - SOC 2', status: 'live', pid: 4242 };
+  const doors = { ps: async () => 'ttys012\n', focus: async (tty) => (calls.push(tty), [0, 0, 800, 600]) };
+  assert.equal(await focusRow(live, doors), 'focused Northwind - SOC 2');
+  assert.deepEqual(calls, ['/dev/ttys012']);
+  assert.equal(await focusRow(live, { ...doors, focus: async () => null }), 'Northwind - SOC 2: no iTerm window has /dev/ttys012');
+  assert.equal(await focusRow(live, { ...doors, ps: async () => '??' }), 'Northwind - SOC 2: its process has no terminal');
+  assert.equal(
+    await focusRow(live, {
+      ...doors,
+      focus: async () => {
+        throw new Error('iTerm said no\nmore');
+      },
+    }),
+    'Northwind - SOC 2: iTerm said no'
+  );
+  const gone = { sessionId: id(3), name: 'delmar - refs', status: 'skipped', why: 'its directory is gone' };
+  assert.match(await focusRow(gone, doors), /^delmar - refs: no process to focus — skipped — its directory is gone/);
+  assert.equal(await focusRow(null, doors), 'nothing selected');
 });
 
 test('the short words', () => {
@@ -232,8 +349,12 @@ test('renderTop: a header that counts, a boot line for this boot only, the table
   assert.equal(lines[2], '');
   assert.deepEqual(
     lines[3].trim().split(/\s{2,}/),
-    COLUMNS.map((c) => c.head)
+    COLUMNS.map((c) => (c.id === 'ws' ? 'ws ▲' : c.head)),
+    'the sorted column wears the arrow'
   );
+  const bySession = renderTop({ rows: frameRows(), report, register, boot, now: NOW, width: 220, sort: { by: 'session', reverse: true } });
+  assert.match(bySession[3], /^session ▼/);
+  assert.ok(!bySession[3].includes('ws ▲'));
   const row1 = lines[5];
   assert.match(row1, /Northwind - a very long session name/);
   assert.match(row1, /architecture +cl-xl7n\.195 +adam +busy 2s +123k 62% +45\.2% +900M +03:12:00 +architecture ⟶ soc2-e4b +30s/);
@@ -263,7 +384,13 @@ test('renderTop: a narrow terminal cuts the directory first, then the session na
   assert.equal(short.length, 8);
   assert.match(short[5], /Northwind/);
   assert.match(short.at(-2), /^… and 2 more$/);
-  assert.match(short.at(-1), /^q quit · r refresh · every 3s$/);
+  assert.match(short.at(-1), /^q quit · r refresh · ↑↓ select · f focus · ←→ sort column · o reverse · every 3s$/);
+  const picked = renderTop({ rows: frameRows(), boot: NOW - 600_000, now: NOW, width: 160, interactive: true, selected: id(2), notice: 'focused EHDEN - pods' });
+  const bar = picked.slice(4).find((l) => l.includes('EHDEN - pods')); // past the header, which carries the notice
+  assert.ok(bar.startsWith('\x1b[7m') && bar.endsWith('\x1b[0m'), 'the selected row is in inverse video');
+  assert.ok(!picked.find((l) => l.includes('Northwind')).includes('\x1b[7m'), 'and only that row');
+  assert.ok(dw(bar.replace(/\x1b\[[0-9;]*m/g, '')) <= 160, 'the bar does not widen the line');
+  assert.match(picked[0], /·  focused EHDEN - pods$/, 'the notice rides the header line');
   const empty = renderTop({ rows: [], boot: NOW - 600_000, now: NOW, width: 80 });
   assert.match(empty.at(-1), /^no sessions/);
 });
@@ -296,6 +423,105 @@ test('runTop --once draws one frame to the stream it is given and resolves; a fa
   });
   assert.match(bad.split('\n')[0], /ps exploded$/);
   assert.match(bad, /no sessions/);
+});
+
+/**
+ * A terminal in the hand: `input` is a raw-mode tty that emits keys, `out` a tty that
+ * records frames. `collect` hands back the same rows every tick, so what moves is only
+ * what a key moved.
+ */
+function terminal() {
+  const input = new EventEmitter();
+  Object.assign(input, { isTTY: true, raw: null, setRawMode: (v) => (input.raw = v), resume() {}, pause() {}, setEncoding() {} });
+  const frames = [];
+  const out = new EventEmitter();
+  Object.assign(out, { isTTY: false, columns: 200, rows: 40, write: (s) => frames.push(s) });
+  const tick = () => new Promise((r) => setImmediate(r));
+  const press = async (key) => {
+    input.emit('data', key);
+    await tick();
+    await tick();
+  };
+  const latest = () => frames.at(-1) || '';
+  const barOn = () => {
+    const m = /\x1b\[7m([^\x1b]*)\x1b\[0m/.exec(latest());
+    return m ? m[1].trim().split(/\s{2,}/)[0] : null;
+  };
+  return { input, out, frames, press, latest, barOn, tick };
+}
+
+test('runTop: arrows move the bar, f focuses the row under it, ←→ and o change the order, q quits — through injected doors', async () => {
+  const t = terminal();
+  const focused = [];
+  const rows = orderRows();
+  const ended = runTop({
+    collect: async () => ({ rows, boot: NOW - 600_000 }),
+    every: 60_000,
+    out: t.out,
+    input: t.input,
+    alt: false,
+    now: () => NOW,
+    focus: async (row) => (focused.push(row?.sessionId || null), row ? `focused ${row.name}` : 'nothing selected'),
+  });
+  await t.tick();
+  await t.tick();
+  assert.equal(t.input.raw, true, 'raw mode, for single keys');
+  assert.equal(t.barOn(), 'Northwind - a', 'the first row in the default order');
+  await t.press('\x1b[B');
+  assert.equal(t.barOn(), 'Northwind - b');
+  await t.press('j');
+  assert.equal(t.barOn(), 'beadcause - a');
+  await t.press('\x1b[B');
+  await t.press('\x1b[B');
+  assert.equal(t.barOn(), 'delmar - gone', 'clamped at the last row');
+  await t.press('k');
+  await t.press('\x1b[A');
+  assert.equal(t.barOn(), 'Northwind - b');
+
+  await t.press('f');
+  assert.deepEqual(focused, [id(1)], 'f hands the row under the bar to the focus door');
+  assert.match(t.latest().split('\n')[0], /·  focused Northwind - b$/);
+  await t.press('\r');
+  assert.deepEqual(focused, [id(1), id(1)], 'Enter is f');
+
+  // The order changes under the bar; the bar stays on its conversation.
+  await t.press('\x1b[C');
+  assert.match(t.latest().split('\n')[3], /bead ▲/, 'one column right of ws');
+  assert.equal(t.barOn(), 'Northwind - b', 'still on the same session');
+  await t.press('o');
+  assert.match(t.latest().split('\n')[3], /bead ▼/);
+  await t.press('h');
+  assert.match(t.latest().split('\n')[3], /ws ▲/, 'back, and the other way up is forgotten');
+  for (const _ of 'bead kind state ctx cpu'.split(' ')) await t.press('l');
+  assert.match(t.latest().split('\n')[3], /cpu ▲/);
+  const order = t
+    .latest()
+    .split('\n')
+    .slice(5, 9)
+    .map((l) => l.replace(/\x1b\[[0-9;]*m/g, '').trim().split(/\s{2,}/)[0]);
+  assert.deepEqual(order, ['Northwind - a', 'Northwind - b', 'beadcause - a', 'delmar - gone'], 'cpu ascending, the not-back row last');
+
+  await t.press('q');
+  assert.equal(await ended, 0);
+  assert.equal(t.input.raw, false, 'raw mode given back');
+});
+
+test('runTop: the bar follows a session that moves and lands on the first row when its session leaves', async () => {
+  const t = terminal();
+  let rows = orderRows();
+  const ended = runTop({ collect: async () => ({ rows, boot: NOW - 600_000 }), every: 60_000, out: t.out, input: t.input, alt: false, now: () => NOW, focus: async () => 'x' });
+  await t.tick();
+  await t.tick();
+  await t.press('j');
+  assert.equal(t.barOn(), 'Northwind - b');
+  rows = rows.map((r) => (r.sessionId === id(1) ? { ...r, name: 'Northwind - z' } : r));
+  await t.press('r');
+  assert.equal(t.barOn(), 'Northwind - z', 'renamed and re-sorted, still the same session');
+  rows = rows.filter((r) => r.sessionId !== id(1));
+  await t.press('r');
+  assert.equal(t.barOn(), 'Northwind - a', 'its session left: the bar lands on the first row');
+  await t.press('\u0003');
+  assert.equal(await ended, 0);
 });
 
 /* ------------------------------------------------------------------ the command */
@@ -354,6 +580,13 @@ test('bin/beadcause-top --once and --json on an isolated config directory: this 
     assert.match(bad.stderr, /unknown argument --nope/);
     const everyBad = run('--every', 'soon');
     assert.equal(everyBad.status, 2);
+    const sortBad = run('--sort', 'colour');
+    assert.equal(sortBad.status, 2);
+    assert.match(sortBad.stderr, /--sort wants one of session, ws/);
+    const sorted = JSON.parse(run('--json', '--sort', 'cpu', '--reverse').stdout);
+    assert.deepEqual(sorted.sort, { by: 'cpu', reverse: true });
+    const marked = run('--once', '--sort', 'mem').stdout;
+    assert.match(marked.split('\n')[3], /mem ▲/);
     const help = run('--help');
     assert.equal(help.status, 0);
     assert.match(help.stdout, /^usage: beadcause-top/);

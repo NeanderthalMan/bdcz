@@ -1,0 +1,159 @@
+#!/usr/bin/env node
+/**
+ * `b7e-repo` — what another workspace's checkout actually looks like, before writing a
+ * command aimed at it.
+ *
+ *   b7e-repo -w sorrel                the checkout it resolves to, grouped and profiled
+ *   b7e-repo -w sorrel --json         the same, as one JSON object
+ *   b7e-repo --dir <root>             a tree given by path, for a repo with no workspace
+ *   b7e-repo -w sorrel --run          only the "how do I execute against it" half
+ *
+ * bc-dgx7.113 is the session audit's finding: `bc-dgx7.16` (b7e-where, targeting sorrel),
+ * `bc-dgx7.15` (b7e-model, same target, same hour, no shared context) and `bc-dgx7.97`
+ * (b7e-take, targeting delmar) each built a command that operates on a *different* repo
+ * in the constellation, and each rediscovered that repo's shape from scratch, by hand,
+ * differently — an `ls` three levels deep, a `.venv/bin/python3` found by listing
+ * `.venv/bin`, a wrong roster (`.claude/agents/`, six files) tried before the right one
+ * (`ai-context/agents/`, nineteen) was found by grepping for a known name. This is the
+ * command that would have replaced all three.
+ *
+ * **The workspace → checkout resolution is `resolveSessionDir`, not a second hand-rolled
+ * path match.** A workspace's `cfg.workspaces[i].dir` is the `.beads` *tracker*
+ * directory, never the git checkout — `path.dirname(ws.dir)` happens to be the checkout
+ * for the common one-repo-per-workspace case, but a workspace configured with
+ * `sessionDirs` or `projectRoot` can answer differently, and `resolveSessionDir`
+ * (`lib/session.js`) already carries that logic, tested, at ~25 other call sites. A
+ * workspace this install cannot map to any checkout throws from there with a sentence
+ * naming the workspace; this only adds where the lookup itself was aimed.
+ *
+ * **Root is never taken on faith.** Whether it came from `-w` or `--dir`, a root that
+ * does not exist on this Mac is refused before anything is grouped — an empty tree here
+ * would read as "this repo has nothing in it," which is a different, false, answer.
+ *
+ * @grant read
+ */
+import fs from 'node:fs';
+import path from 'node:path';
+import { loadConfig, workspaceRoots } from '../lib/config.js';
+import { resolveSessionDir } from '../lib/session.js';
+import { gitHead, layoutFor, runnableFacts, SURFACE_LABELS, SURFACE_ORDER } from '../lib/repolayout.js';
+
+const USAGE = `usage: b7e-repo -w <workspace> [--json] [--run]
+       b7e-repo --dir <root> [--json] [--run]
+
+What another workspace's checkout actually looks like: the resolved path and its git
+HEAD, the tree grouped into source/docs/tests/served markup with file counts and top
+directories in each, and the runnable facts a command needs to spawn against it (right
+now: the interpreter it resolves to, if any).
+
+  -w, --workspace <name>   resolve the checkout for a configured workspace
+  --dir <root>             a tree given by path instead — for a repo with no workspace,
+                            and how this is tested
+  --json                   one JSON object instead of the printed report
+  --run                    only the runnable facts, not the tree grouping`;
+
+const argv = process.argv.slice(2);
+if (argv.includes('--help') || argv.includes('-h')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+
+const value = (...names) => {
+  for (const n of names) {
+    const at = argv.indexOf(n);
+    if (at > -1) return argv[at + 1];
+  }
+  return undefined;
+};
+const has = (...names) => names.some((n) => argv.includes(n));
+
+const WORKSPACE = value('-w', '--workspace');
+const DIR = value('--dir');
+const JSON_MODE = has('--json');
+const RUN_ONLY = has('--run');
+
+if (WORKSPACE && DIR) {
+  console.error('b7e-repo: -w/--workspace and --dir are mutually exclusive');
+  console.error(USAGE);
+  process.exit(2);
+}
+if (!WORKSPACE && !DIR) {
+  console.error('b7e-repo: one of -w/--workspace or --dir is required');
+  console.error(USAGE);
+  process.exit(2);
+}
+
+let root;
+let label;
+
+if (DIR) {
+  root = path.resolve(DIR);
+  label = root;
+} else {
+  const cfg = loadConfig();
+  const ws = cfg.workspaces.find((w) => w.name === WORKSPACE);
+  if (!ws) {
+    console.error(`b7e-repo: no workspace named "${WORKSPACE}"`);
+    console.error(`configured workspaces: ${cfg.workspaces.map((w) => w.name).join(', ') || 'none'}`);
+    console.error(`looked under: ${workspaceRoots(cfg).join(', ')}`);
+    process.exit(2);
+  }
+  try {
+    root = resolveSessionDir(cfg, ws);
+  } catch (err) {
+    console.error(`b7e-repo: ${err.message}`);
+    console.error(`(the ${WORKSPACE} workspace's tracker is at ${ws.dir})`);
+    process.exit(1);
+  }
+  label = `${WORKSPACE} (${root})`;
+}
+
+if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) {
+  console.error(`b7e-repo: no such directory: ${root}`);
+  if (WORKSPACE) console.error(`(resolved for workspace "${WORKSPACE}")`);
+  process.exit(1);
+}
+
+const head = gitHead(root);
+const facts = runnableFacts(root);
+
+if (RUN_ONLY) {
+  if (JSON_MODE) {
+    console.log(JSON.stringify({ workspace: WORKSPACE || null, root, head, ...facts }));
+  } else {
+    console.log(`${label}${head ? ` @ ${head}` : ''}`);
+    console.log(`interpreter: ${facts.interpreter || '(none found — no .venv/bin/python(3))'}`);
+  }
+  process.exit(0);
+}
+
+const layout = layoutFor(root);
+
+if (JSON_MODE) {
+  console.log(JSON.stringify({ workspace: WORKSPACE || null, root, head, layout, ...facts }));
+  process.exit(0);
+}
+
+const dim = (s) => `\x1b[2m${s}\x1b[0m`;
+const bold = (s) => `\x1b[1m${s}\x1b[0m`;
+
+console.log(`${bold(label)}${head ? ` @ ${head}` : dim(' (no git HEAD)')}`);
+console.log(dim(`${layout.filesTotal} files`));
+console.log('');
+
+for (const key of SURFACE_ORDER) {
+  const { count, topDirs } = layout.bySurface[key];
+  console.log(bold(`${SURFACE_LABELS[key]} (${count} file${count === 1 ? '' : 's'})`));
+  if (!count) {
+    console.log(dim('  (none)'));
+  } else if (!topDirs.length) {
+    console.log(dim('  (all at the repo root — no subdirectory)'));
+  } else {
+    for (const { dir, count: n } of topDirs) console.log(`  ${dir} (${n})`);
+  }
+  console.log('');
+}
+
+console.log(bold('runnable'));
+console.log(`  interpreter: ${facts.interpreter || dim('(none found — no .venv/bin/python(3))')}`);
+process.exit(0);

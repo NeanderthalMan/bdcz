@@ -45,7 +45,6 @@
   })();
 
   const out = document.getElementById('requirements');
-  const pulse = document.getElementById('pulse');
   const refreshBtn = document.getElementById('req-refresh');
 
   const esc = (s) =>
@@ -168,7 +167,6 @@
   async function load() {
     if (state.loading) return;
     state.loading = true;
-    pulse?.classList.add('busy');
     try {
       state.data = await api('/api/requirements');
     } catch (err) {
@@ -176,7 +174,6 @@
       return;
     } finally {
       state.loading = false;
-      pulse?.classList.remove('busy');
     }
     render();
   }

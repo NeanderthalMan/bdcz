@@ -45,6 +45,9 @@ import { fileURLToPath } from 'node:url';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(HERE, '..');
 const MONITOR = fs.readFileSync(path.join(ROOT, 'public', 'monitor.js'), 'utf8');
+// monitor.js mounts the shared proposal card at IIFE time (bc-yjekg.5), so this runs in
+// the context first — the order public/monitor.html loads them in.
+const PROPOSAL = fs.readFileSync(path.join(ROOT, 'public', 'proposal.js'), 'utf8');
 
 // The space card is drawn on this page too, from `/api/space`, and it throws on a payload
 // it did not build — so the fixture is the real `spaceDetail`, exactly as test/spacecard.mjs
@@ -139,6 +142,7 @@ async function draw(data, open = []) {
       return { ok: true, status: 200, json: async () => body };
     },
   });
+  vm.runInContext(PROPOSAL, ctx, { filename: 'proposal.js' });
   vm.runInContext(MONITOR, ctx, { filename: 'monitor.js' });
   for (let i = 0; i < 80; i += 1) await new Promise((r) => setImmediate(r));
   return nodes.mon.innerHTML;

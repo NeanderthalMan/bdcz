@@ -1,0 +1,187 @@
+#!/usr/bin/env node
+/**
+ * `b7e-asset` — where a media file's bytes actually are: real, an unsmudged git-LFS
+ * pointer, a sidecar-only reference to a media vault, or missing entirely.
+ *
+ *   b7e-asset reference/maps/c1_02_anavarre.png
+ *   b7e-asset webseries/library/characters/muchi
+ *   b7e-asset graphic-novel/output/*.png --json
+ *   b7e-asset webseries/library/characters -w delmar
+ *   b7e-asset reference/maps/gemini/final/atlantis.png --remote
+ *   b7e-asset graphic-novel/output --fetch /tmp/review
+ *
+ * bc-dgx7.140 — see `lib/asset.js` for the fuller history (four delmar sessions each
+ * hand-built this, one of them silently) and exactly what each of the four states means.
+ * This file is the argv parsing and the printing around `lib/asset.js`'s `buildReport`,
+ * `remoteInfo` and `fetchAsset` — the same split every other `b7e-*` command uses.
+ *
+ * Exit codes: `0` every resolved asset is accounted for (`bytes`, `lfs-pointer` or
+ * `sidecar-only`). `1` at least one is `missing` — including a sidecar that exists but
+ * names no `remote`, which is `missing` rather than a fifth state (see `lib/asset.js`).
+ * `2` refused — bad usage, no target resolved to anything, an unknown `-w` workspace, or
+ * `--remote`/`--fetch` asked for and the tool that needs (`rclone`, `git-lfs`) is not
+ * runnable here.
+ *
+ * b7e-asset (bc-dgx7.140) is deliberately NOT on DEFAULT_TOOL_LIST. A bare
+ * `b7e-asset <path>` only reads, but `--fetch` mutates — it writes into `<dir>` and, for
+ * an LFS pointer, smudges a file inside the checkout itself — and `lib/tooldecl.js`'s
+ * derivation is per-file, not per-argv: a `read` tag would put the whole tool, mutating
+ * flag included, on the auto-run allowlist. b7e-apply, b7e-take, b7e-swbump and
+ * b7e-filed's `--repair` made the same call for the same reason before this one.
+ *
+ * @grant excluded
+ */
+import fs from 'node:fs';
+import path from 'node:path';
+import { loadConfig } from '../lib/config.js';
+import { buildReport, remoteInfo, fetchAsset, toolsAvailable } from '../lib/asset.js';
+
+const USAGE = `usage: b7e-asset <path|glob|dir>... [-w <workspace>|--dir <root>] [--fetch <dir>]
+                 [--remote] [--json]
+
+  <path|glob|dir>    a media file, its sidecar (<name>.<ext>.md), a directory (walked
+                     recursively — see lib/asset.js for why), or a glob — repeatable
+  -w, --workspace <name>   resolve <root> as that configured workspace's checkout dir
+  --dir <root>             resolve targets against this checkout instead of the cwd's
+                     (mutually exclusive with -w)
+  --remote            also ask the vault (rclone) whether it has each sidecar-only
+                     asset, and its size there — off by default, so the common case
+                     stays local and instant
+  --fetch <dir>       pull every sidecar-only or lfs-pointer asset's real bytes into
+                     <dir>, mirroring each asset's own path relative to <root> — an
+                     lfs-pointer fetch smudges the file in <root> itself along the way
+                     (the standard way to un-stub one path), a sidecar-only fetch does
+                     not touch <root> at all
+  --json              the rows as JSON instead of the printed report
+
+One row per resolved asset: path, state (bytes | lfs-pointer | sidecar-only | missing),
+size, pixel dimensions (bytes state, an image, sips available), git status, sidecar
+path, and the remote it names. Prints nothing about assets that were never asked about.`;
+
+const argv = process.argv.slice(2);
+if (argv.includes('--help') || argv.includes('-h')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+
+function fail(msg, code = 2) {
+  console.error(`b7e-asset: ${msg}`);
+  process.exit(code);
+}
+
+function value(flag, i) {
+  const v = argv[i + 1];
+  if (v === undefined) fail(`${flag} needs a value`);
+  return v;
+}
+
+let wsName = null;
+let dirGiven = null;
+let fetchDirArg = null;
+let remoteFlag = false;
+let json = false;
+const targets = [];
+
+for (let i = 0; i < argv.length; i += 1) {
+  const a = argv[i];
+  switch (a) {
+    case '-w':
+    case '--workspace':
+      wsName = value(a, i);
+      i += 1;
+      break;
+    case '--dir':
+      dirGiven = value(a, i);
+      i += 1;
+      break;
+    case '--fetch':
+      fetchDirArg = value(a, i);
+      i += 1;
+      break;
+    case '--remote':
+      remoteFlag = true;
+      break;
+    case '--json':
+      json = true;
+      break;
+    default:
+      if (a.startsWith('--')) fail(`unknown flag ${a}`);
+      targets.push(a);
+  }
+}
+
+if (targets.length === 0) fail(`needs at least one <path|glob|dir>\n${USAGE}`);
+if (wsName && dirGiven) fail('-w/--workspace and --dir are mutually exclusive');
+
+let root = process.cwd();
+if (wsName) {
+  const cfg = loadConfig();
+  const ws = cfg.workspaces.find((w) => w.name === wsName);
+  if (!ws) fail(`no workspace named "${wsName}"\nconfigured workspaces: ${cfg.workspaces.map((w) => w.name).join(', ') || 'none'}`);
+  root = ws.dir;
+} else if (dirGiven) {
+  root = path.resolve(dirGiven);
+}
+if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) fail(`${root} is not a directory`);
+
+if (remoteFlag || fetchDirArg) {
+  const availability = toolsAvailable();
+  if (remoteFlag && !availability.rclone) fail('--remote needs `rclone`, which is not runnable on this machine');
+  if (fetchDirArg && !availability.rclone) fail('--fetch needs `rclone` (for sidecar-only assets), which is not runnable on this machine');
+}
+
+let fetchDirAbs = null;
+if (fetchDirArg) {
+  fetchDirAbs = path.resolve(fetchDirArg);
+  fs.mkdirSync(fetchDirAbs, { recursive: true });
+}
+
+const { rows, problems } = buildReport(targets, { root });
+
+if (remoteFlag) {
+  for (const row of rows) {
+    if (row.state === 'sidecar-only' && row.remote) {
+      row.remoteInfo = remoteInfo(row.remote);
+    } else {
+      row.remoteInfo = null;
+    }
+  }
+}
+
+const fetched = [];
+if (fetchDirAbs) {
+  for (const row of rows) {
+    fetched.push(fetchAsset(row, { root, fetchDir: fetchDirAbs }));
+  }
+}
+
+if (json) {
+  console.log(JSON.stringify({ root, rows, problems, fetched: fetchDirAbs ? fetched : undefined }, null, 2));
+} else {
+  console.log(`b7e-asset — ${root}\n`);
+  for (const row of rows) {
+    const size = row.size === null ? '-' : row.size;
+    const dims = row.width && row.height ? `${row.width}x${row.height}` : '-';
+    const git = row.gitStatus ?? '-';
+    const sidecar = row.sidecarPath ?? '-';
+    const remote = row.remote ?? '-';
+    let line = `${row.state.padEnd(12)} ${String(size).padEnd(10)} ${dims.padEnd(10)} ${git.padEnd(10)} ${row.path}`;
+    if (row.sidecarPath || row.remote) line += `  (sidecar: ${sidecar}, remote: ${remote})`;
+    if (remoteFlag && row.remoteInfo) {
+      line += row.remoteInfo.present ? `  [vault: ${row.remoteInfo.size} bytes]` : '  [vault: not found]';
+    }
+    console.log(line);
+  }
+  if (problems.length) {
+    console.log(`\nproblems resolving targets: ${problems.join('; ')}`);
+  }
+  if (fetchDirAbs) {
+    console.log(`\nfetched into ${fetchDirAbs}:`);
+    for (const f of fetched) {
+      console.log(`  ${f.path}: ${f.fetched ? `-> ${f.fetchedTo}` : `skipped (${f.reason})`}`);
+    }
+  }
+  console.log(`\n${rows.length} asset(s), ${rows.filter((r) => r.state === 'missing').length} missing`);
+}
+
+process.exit(rows.some((r) => r.state === 'missing') ? 1 : 0);

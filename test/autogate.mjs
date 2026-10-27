@@ -20,13 +20,21 @@
  * the launcher would be untestable in practice.
  */
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 import {
+  BASE_GATE_SIDECAR,
   BASE_GATE_STALE_MS,
+  GITHUB_NONE_GRACE_MS,
+  GITHUB_PENDING_GRACE_MS,
   TRIED_MAX,
+  adoptBaseGates,
   baseGateAct,
   gateBase,
   gatesBaseLocally,
+  githubStillAnswering,
   stopBaseGate,
   wantsBaseRun,
 } from '../lib/autogate.js';
@@ -368,6 +376,143 @@ await check('a run starved by load timeouts gets exactly one more gate', async (
   const third = await gateBase({ sha: SHA, kind: 'starved', enabled: true, tried: done2.tried }, e.deps);
   assert.equal(third.act, 'tried', 'a second starved run files the P0');
   assert.equal(e.started.length, 1 + 0, 'one launch so far');
+});
+
+/* --------------------------------------------- a restart in the middle (bc-0lwet) */
+
+/** Scratch trees with sidecars written as `startBaseGate` writes them. */
+function treesWith(notes) {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'autogate-adopt-'));
+  const trees = notes.map((note, i) => {
+    const scratchRoot = path.join(base, `tree-${i}`);
+    fs.mkdirSync(scratchRoot);
+    if (note) fs.writeFileSync(path.join(scratchRoot, BASE_GATE_SIDECAR), JSON.stringify(note));
+    return { root: '/repo', dir: path.join(scratchRoot, 'work'), scratchRoot };
+  });
+  return { trees, done: () => fs.rmSync(base, { recursive: true, force: true }) };
+}
+
+await check('a restarted daemon takes over the base gate the last one left running', async () => {
+  /**
+   * The bead. Every merge redeploys the daemon, and the merge also moved the base, so
+   * the run in flight is for the OLD sha: findBaseRun never finds it again, nothing
+   * cancels it, and a second full gate starts beside it. Adopted, it is an ordinary
+   * inFlight run the base moved out from under, and the first tick cancels it.
+   */
+  const { trees, done } = treesWith([
+    { runId: 'main-old', pid: 7001, sha: SHA, base: 'main', key: 'beadcause', at: 1_000_000 },
+  ]);
+  try {
+    const found = adoptBaseGates(
+      { root: '/repo', key: 'beadcause', base: 'main' },
+      { trees, lockOf: () => ({ pid: 7001 }) }
+    );
+    assert.deepEqual(found.map((r) => r.runId), ['main-old']);
+    assert.equal(found[0].dir, trees[0].dir, 'with the tree it needs to be torn down');
+
+    const e = effects();
+    const out = await gateBase(
+      { key: 'beadcause', base: 'main', sha: MOVED, kind: 'absent', enabled: true, inFlight: found[0], tried: [SHA] },
+      e.deps
+    );
+    assert.deepEqual(e.stopped.map((s) => s.runId), ['main-old']);
+    assert.deepEqual(e.started, [MOVED], 'one full gate afterwards, not two');
+    assert.equal(out.inFlight.sha, MOVED);
+
+    // And where the base did NOT move, the adopted run is waited on, not replaced.
+    const stay = await gateBase(
+      { sha: SHA, kind: 'running', enabled: true, inFlight: found[0], tried: [SHA] },
+      effects().deps
+    );
+    assert.equal(stay.act, 'wait');
+  } finally {
+    done();
+  }
+});
+
+await check('only a live gate that this daemon started is adopted', () => {
+  // The lock is the same proof stopBaseGate asks for before it signals: a sidecar whose
+  // pid no longer holds the tree's lock is a gate that ended (or a recycled pid), and a
+  // tree with no sidecar is a session's own `b7e-at`, which is not the daemon's to stop.
+  const { trees, done } = treesWith([
+    { runId: 'ended', pid: 7001, sha: SHA, base: 'main', key: 'beadcause', at: 1 },
+    null,
+    { runId: 'other-ws', pid: 7003, sha: SHA, base: 'main', key: 'loremia', at: 3 },
+    { runId: 'live', pid: 7004, sha: SHA, base: 'main', key: 'beadcause', at: 4 },
+  ]);
+  try {
+    const locks = { 0: { pid: 9999 }, 1: { pid: 7002 }, 2: { pid: 7003 }, 3: { pid: 7004 } };
+    const found = adoptBaseGates(
+      { root: '/repo', key: 'beadcause', base: 'main' },
+      { trees, lockOf: (dir) => locks[dir.match(/tree-(\d)/)[1]] }
+    );
+    assert.deepEqual(found.map((r) => r.runId), ['live']);
+    const elsewhere = adoptBaseGates({ root: '/another', key: 'beadcause', base: 'main' }, { trees, lockOf: () => ({ pid: 7004 }) });
+    assert.deepEqual(elsewhere, [], 'another checkout\'s trees are its own');
+  } finally {
+    done();
+  }
+});
+
+await check('two left behind come back newest first', () => {
+  const { trees, done } = treesWith([
+    { runId: 'older', pid: 1, sha: SHA, base: 'main', key: 'beadcause', at: 10 },
+    { runId: 'newer', pid: 2, sha: MOVED, base: 'main', key: 'beadcause', at: 20 },
+  ]);
+  try {
+    const found = adoptBaseGates(
+      { root: '/repo', key: 'beadcause', base: 'main' },
+      { trees, lockOf: (dir) => ({ pid: dir.includes('tree-0') ? 1 : 2 }) }
+    );
+    assert.deepEqual(found.map((r) => r.runId), ['newer', 'older']);
+  } finally {
+    done();
+  }
+});
+
+/* ------------------------------------- GitHub answers first, locally is the fallback */
+
+await check('a base GitHub is still checking gets no second full sweep beside it', async () => {
+  // Both rosters on one Mac made each other take one to two hours (bc-0lwet). Waiting
+  // must not spend the sha, or the fallback could never fire once GitHub gives up.
+  const remote = { state: 'pending', pending: 1, cancelled: 0 };
+  const waitFor = githubStillAnswering(remote, { firstSeen: 1_000, now: 2_000 });
+  assert.match(waitFor, /still running/);
+  const e = effects();
+  const out = await gateBase({ sha: SHA, kind: 'absent', enabled: true, tried: [], waitFor }, e.deps);
+  assert.equal(out.act, 'deferred');
+  assert.deepEqual(e.started, []);
+  assert.deepEqual(out.tried, [], 'the sha is not spent');
+  assert.equal(out.measuring, true, 'and no P0 is filed while GitHub is measuring it');
+
+  const later = await gateBase({ sha: SHA, kind: 'absent', enabled: true, tried: out.tried, waitFor: '' }, e.deps);
+  assert.equal(later.act, 'start', 'once GitHub stops answering, the local gate starts');
+});
+
+await check('waiting on GitHub still cancels a gate the base moved out from under', async () => {
+  const e = effects();
+  const out = await gateBase(
+    { sha: MOVED, kind: 'absent', enabled: true, inFlight: flight(), tried: [SHA], waitFor: 'GitHub is checking' },
+    e.deps
+  );
+  assert.deepEqual(e.stopped.map((s) => s.runId), [flight().runId]);
+  assert.equal(out.act, 'deferred');
+  assert.equal(out.inFlight, null);
+});
+
+await check('GitHub stops counting as an answer when it cannot give one', () => {
+  const hour = GITHUB_PENDING_GRACE_MS;
+  // Cancelled: nothing will finish it (bc-axipn).
+  assert.equal(githubStillAnswering({ state: 'pending', pending: 1, cancelled: 1 }, { firstSeen: 0, now: 1 }), '');
+  // Red, or a billing refusal: the local gate is exactly what those are for.
+  assert.equal(githubStillAnswering({ state: 'failing' }, { firstSeen: 0, now: 1 }), '');
+  // Pending past the job's own limit plus queueing: a runner asleep or gone.
+  assert.equal(githubStillAnswering({ state: 'pending', pending: 1, cancelled: 0 }, { firstSeen: 0, now: hour }), '');
+  // No checks at all: a moment's grace for the workflow to register, not an hour.
+  assert.match(githubStillAnswering({ state: 'none' }, { firstSeen: 0, now: 1 }), /not started/);
+  assert.equal(githubStillAnswering({ state: 'none' }, { firstSeen: 0, now: GITHUB_NONE_GRACE_MS }), '');
+  // A `gh` call that did not answer is not GitHub measuring anything.
+  assert.equal(githubStillAnswering(null), '');
 });
 
 console.log(failures ? `\n${failures} failed` : '\nall passed');

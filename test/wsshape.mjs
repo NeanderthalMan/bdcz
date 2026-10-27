@@ -180,9 +180,16 @@ const WANT_OBJECT = [
   'reconcileLanded',
   'sweepSuperseded',
   'sweepFarBlocks',
+  'sweepHandSessions',
+  // Reads the whole workspace through `bd.listLive(ws)` and closes through `bd.close(ws,
+  // …)`, so it is the object for the same reason the two above it are.
+  'sweepLapsed',
   'sweepInMain',
   'sweepNotInMain',
   'followNotInMain',
+  // lib/orphanwork.js hands `ws` to `bd.listHuman`, `bd.create` and `bd.close`, all of
+  // which want the workspace object.
+  'sweepOrphanWork',
   'amendment.openSelfAsk',
   'amendment.fileRequest',
   // Reads the queue through `bd.ready(ws)`, and every public `Bd` method takes the
@@ -191,6 +198,8 @@ const WANT_OBJECT = [
   // The same file's second question (bc-jvt0.5), and the same reason: `bd.listLabel(ws)`,
   // `bd.children(ws)`, `bd.comment(ws)`.
   'sweepWholeEpics',
+  // lib/verifieddone.js (bc-xl7n.193): `bd.listLabel(ws)`, `bd.comments(ws)`, `bd.close(ws)`.
+  'sweepVerifiedDone',
   // lib/sessionaudit.js:697 normalises with `workspace?.name || String(workspace || '')`,
   // so it wants the object and merely survives a name. Passed as a property rather than
   // positionally, which is why it reads oddly here.

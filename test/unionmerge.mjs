@@ -224,32 +224,43 @@ console.log('\nthe union-merged registries carry no entry twice\n');
  * refuses deletions**. Where one side removes a block and the other edits it, keeping
  * both sides means keeping the block. bc-wbrhi's downmerge restored 34 entries it had
  * deleted, reported the merge clean, and said nothing.
+ *
+ * And none now — bc-g95u9 took the last two off. The same refusal hit package.json on
+ * 2026-10-23: #40's downmerge restored `b7e-renum`, which main had deleted, and #4's
+ * interleaved two orderings of the bin map into a file that was not JSON. Both are
+ * `merge=jsonmerge` instead, the structural three-way merge in lib/jsonmerge.js, which
+ * keeps both sides' appends the way union did and honours a deletion the way union could
+ * not. The duplicate checks below stay: they are cheap, and a hand resolution can still
+ * write a key twice.
  */
-const EXPECTED = ['package.json', 'package-lock.json'];
+const EXPECTED = [];
+const STRUCTURAL = ['package.json', 'package-lock.json'];
 const attributesPath = path.join(ROOT, '.gitattributes');
 
 if (!fs.existsSync(attributesPath)) {
-  bad('.gitattributes exists', 'without it every branch conflicts on lib/grants.js:333 again — see the header');
+  bad('.gitattributes exists', 'without it the two bin maps conflict on every branch that adds a tool');
 } else {
   const attributes = fs.readFileSync(attributesPath, 'utf8');
   const declared = unionPaths(attributes);
 
-  const missing = EXPECTED.filter((p) => !declared.includes(p));
   const extra = declared.filter((p) => !EXPECTED.includes(p));
-
-  if (!missing.length && !extra.length) {
-    ok(`the four registries are union-merged, and only those four (${EXPECTED.join(', ')})`);
-  } else if (missing.length) {
-    bad(
-      `${missing.length} registry no longer union-merged: ${missing.join(', ')}`,
-      'every branch in flight starts conflicting on it again — 10 of 14 did on lib/grants.js'
-    );
+  if (!extra.length) {
+    ok('nothing is union-merged — union undoes a deletion and calls the merge clean');
   } else {
     bad(
-      `${extra.length} file union-merged that this suite does not guard: ${extra.join(', ')}`,
-      'union resolves an edit-vs-edit silently, so add the duplicate check for it here first'
+      `${extra.length} file union-merged again: ${extra.join(', ')}`,
+      'union resolves an edit-vs-delete by keeping the line; a JSON file wants merge=jsonmerge (lib/jsonmerge.js)'
     );
   }
+
+  const structural = unionPaths(attributes.replace(/merge=jsonmerge/g, 'merge=union'));
+  const unstructured = STRUCTURAL.filter((p) => !structural.includes(p));
+  if (!unstructured.length) ok(`both bin maps merge by structure (${STRUCTURAL.join(', ')})`);
+  else
+    bad(
+      `${unstructured.length} bin map not merge=jsonmerge: ${unstructured.join(', ')}`,
+      'every branch adding a tool conflicts on it again, or worse, gets union back'
+    );
 
   const prose = declared.filter((p) => /\.(md|markdown|txt|html)$/i.test(p));
   if (!prose.length) ok('and no document is union-merged — a duplicated paragraph reads as writing');
