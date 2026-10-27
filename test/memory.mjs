@@ -887,10 +887,16 @@ check(
   !('about-kept' in why) && !('cites-an-example' in why),
   JSON.stringify(why)
 );
+const flags = Object.fromEntries(stale.map((s) => [s.key, `${s.evidence}/${s.unused}`]));
+check(
+  'each stale note says which kind it is, evidence or unused, because bc-ltgld archives them differently',
+  flags['about-gone-file'] === 'true/false' && flags['scoped-to-nothing'] === 'true/false',
+  JSON.stringify(flags)
+);
 const later = await memory.staleNotes(alpha.dir, 'staler', { now: Date.now() + 40 * 86400000 });
 check(
   'and forty days on with no read or verify, every note is stale for that reason',
-  later.length === 5 && later.every((s) => s.reasons.some((r) => r.startsWith('no read, verify or rewrite in 30 days'))),
+  later.length === 5 && later.every((s) => s.unused && s.reasons.some((r) => r.startsWith('no read, verify or rewrite in 30 days'))),
   JSON.stringify(later)
 );
 
@@ -948,6 +954,27 @@ check(
   'commitToRefs moves every ref or none: one stale expectation refuses both',
   refused && alpha.git('rev-parse', LIVE) === liveBefore && alpha.git('rev-parse', ARCH) === archBefore
 );
+
+/* --------------------------------------------- memory health (bc-u1ltu.6) */
+
+console.log('\nmemory health');
+
+const hs = await memory.notesHealth(alpha.dir, 'staler');
+check(
+  'health counts live notes, reads by name, and what was archived in the window',
+  hs.live === 5 && hs.archived === 1 && hs.superseded === 0 && hs.layout === 'blobs' && hs.promoted === null,
+  JSON.stringify(hs)
+);
+check(
+  'hit rate and read share come from the read log, as fractions, against the pragma targets',
+  hs.hitRate > 0 && hs.hitRate <= 1 && hs.readShare > 0 && hs.readShare <= 1 && hs.targets.hitRate === 0.9 && hs.targets.readShare === 0.7,
+  JSON.stringify(hs)
+);
+check('a session start loads the index, which is smaller than the store', hs.indexBytes > 0 && hs.indexBytes < hs.storeBytes + 2000, JSON.stringify(hs));
+const hg = await memory.notesHealth(alpha.dir, 'guarded');
+check('a supersede in the window is counted', hg.superseded === 1, JSON.stringify(hg));
+const none = await memory.notesHealth(alpha.dir, 'never-wrote');
+check('an agent with no store reports nulls, not a zero that reads as a result', none.live === 0 && none.hitRate === null && none.readShare === null, JSON.stringify(none));
 
 /* ------------------------------------- and no way to name the repo yourself */
 //

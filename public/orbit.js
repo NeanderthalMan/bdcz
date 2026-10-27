@@ -24,12 +24,13 @@
   its own load, including the five that never asked for one. Ten copies of `api()` across
   ten page scripts is exactly the argument for not doing this per view.
 
-  **The old class still works.** `.dot.busy` is not deleted and its ten callers are not
-  touched: the stylesheet now draws the orbit for `.busy` as well as for the `.loading`
-  this file sets. Two of those callers mean something a request count cannot see —
-  console.js and foundations.js light the dot while an *agent* is thinking, which is not a
-  fetch at all — and rewriting them to route through here would have cost that fact to buy
-  nothing. The two classes are two different reasons for one picture, which is why this
+  **The old class still works, and only two callers still use it.** `.dot.busy` is not
+  deleted: the stylesheet still draws the orbit for `.busy` as well as for the `.loading`
+  this file sets. Every other caller was toggling it for nothing but a fetch this
+  file already covers, and bc-ka5y.18 removed them. The two that remain — console.js and
+  foundations.js — light the dot while an *agent* is thinking, which is not a fetch at
+  all, and rewriting them to route through here would have cost that fact to buy nothing.
+  The two classes are two different reasons for one picture, which is why this
   file sets its own rather than sharing theirs: `busy` is the page's assertion, `loading`
   is the fetch watch's, and neither may switch the other off.
 

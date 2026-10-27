@@ -60,10 +60,10 @@
   and `asked` go through `widen`, which public/app.js answers by moving the scope to
   `Both` — in the switch beside the row, where you can see it happen.
 
-  ## The two sub-filters
+  ## The three sub-filters
 
   A kind may carry a `sub`: a second group of chips, on a filter pill of its own that is
-  offered *only when that kind's view pill is selected*, and narrows within it. There are two, and the pair of
+  offered *only when that kind's view pill is selected*, and narrows within it. There are three, and the set of
   them is why the mechanism is worth having rather than being a special case for one
   screen.
 
@@ -88,6 +88,31 @@
   because a control reporting a filter that is not filtering is noise around the one
   that is. `inSub`, `subSaid` and the `narrowing()` in `subGroups` are where those two
   behaviours part.
+
+  **Asked or held** is the third (bc-iaju1.5), and it is PR status' shape applied to the
+  pill that needed it most. Questions is `!session && !PR && (agent ? held : true)` —
+  which is a question somebody asked you *and* a bead nobody may work until you say so,
+  two jobs at one address. Measured on 2026-09-19 that was 58 questions with a median
+  age of 26 days sharing a screen with 90 held beads with a median age of 36, and 89 of
+  the 90 dating from August: the queue that needed answering was never on screen without
+  the queue that needed a different page entirely. So the kind splits in two, the way
+  `pr` splits by rung, and it splits with a `fallback` rather than without one, because
+  the two halves are not two states of one thing — a held bead is decided on /endorse,
+  where the group-select and Endorse all already live, and the inbox is where a question
+  gets answered.
+
+  Which makes it the second group whose default bites on a pill you have not tapped, and
+  that is the point rather than a side effect: `matches` applies `inSub` whatever is
+  selected, so the 90 come off Home too, and `subSaid` confesses it as a note there in
+  the same breath it confesses `unmerged`. A default that only applied under its own
+  pill would be worse than none, because `counts` is taken *through* `inSub` — the badge
+  would promise 148 over a screen that opens 58, which is the one thing this file's
+  numbers may never do.
+
+  It is also the one group that is **single-choice** (`single` on the descriptor). The
+  other two are ladders where two rungs at once is a real question; this one has two
+  chips and picking both is the state the split exists to get out of, so `pick` replaces
+  rather than toggles and the panel closes on the tap (`multi: false`).
 
   ## What this does *not* touch
 
@@ -307,10 +332,44 @@
       // agent-side row belongs here only while it is *held*, because a held bead is a
       // decision waiting on you and every other agent row is a report about work.
       test: (q) => !q.session && !isPr(q) && (q.agent ? Boolean(q.held) : true),
-      // Every row here is a bead, so the search is the whole of what narrows this list.
-      // Neither sub-filter can: a question is not a pull request and it is not one of
+      // Every row here is a bead, so the search narrows this list — and since bc-iaju1.5
+      // so do two more. `asked` is the kind's own sub-filter below; `qsort` is
+      // public/app.js's order switch, named here because a page group no pill names is a
+      // filter the page believes it has drawn and has not (see `adopt`). The other two
+      // sub-filters still cannot: a question is not a pull request and it is not one of
       // the live beads nobody is asking you about.
-      filters: ['bead'],
+      filters: ['bead', 'asked', 'qsort'],
+      /**
+       * Asked or held — the two jobs this pill carries, told apart. bc-iaju1.5.
+       *
+       * `of` reads the same field `heldPillHtml` draws and `All Beads` excludes by
+       * (`!q.held`), so there is one reading of what held means on this page and this is
+       * it. A row with no `held` is `asked`, which is every human-side question and every
+       * JIRA ticket — correct rather than convenient: nothing may claim a held bead
+       * (lib/endorse.js), and everything else on this pill is waiting on a sentence
+       * from you.
+       *
+       * `fallback` is `asked` for the reason PR status' is `review`: with nothing chosen
+       * the list is the half you can act on here. The other half is not hidden so much
+       * as addressed elsewhere — `/endorse` has group-select and Endorse all, and the
+       * inbox deliberately does not rebuild either (the count row at the top of Held in
+       * public/app.js is the way through).
+       */
+      sub: {
+        id: 'asked',
+        legend: 'Questions',
+        // Not a ladder: two chips, one of them on. See the header.
+        multi: false,
+        single: true,
+        /** What the pill says with nothing chosen, and what that means to `inSub`. */
+        all: 'asked',
+        fallback: ['asked'],
+        options: () => [
+          { id: 'asked', label: 'Asked', note: 'Questions waiting on a sentence from you.' },
+          { id: 'held', label: 'Held', note: 'Beads nobody may work until you endorse them.' },
+        ],
+        of: (q) => (q?.held ? 'held' : 'asked'),
+      },
     },
     {
       id: 'pr',
@@ -821,7 +880,14 @@
             count: state.subCounts?.[k.sub.id]?.[o.id] || 0,
             on: chosenSub(k.id).has(o.id),
           })),
-        pick: (id) => toggleSub(k.id, id),
+        // Toggle, unless the group says it is single-choice — bc-iaju1.5. A ladder with
+        // five rungs wants two of them at once and a two-chip split does not: `Asked`
+        // and `Held` both lit is the screen the split exists to get out of, and a chip
+        // you can turn *off* into a state nothing on the row names is worse than one you
+        // cannot. Replacing rather than toggling also means the chosen chip is never the
+        // empty set, so the pill reads the word you tapped instead of falling back to
+        // `all` and reading the same word for a different reason.
+        pick: (id) => (k.sub.single ? setSub(k.id, [id]) : toggleSub(k.id, id)),
         // Is this one showing you less than everything? Chosen rungs, or a default that
         // narrows on its own — which is the whole difference between the two sub-filters
         // and is why the pill has to ask rather than count what is pressed. PR status

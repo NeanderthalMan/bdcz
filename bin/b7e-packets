@@ -1,0 +1,124 @@
+#!/usr/bin/env node
+/**
+ * `b7e-packets` — every artefact other beads left under .claude/packets/ for a panel:
+ * its shape, its alpha, and where its bytes actually are.
+ *
+ *     b7e-packets -w delmar P22
+ *     b7e-packets -w delmar P22 --beads dv-52r.54,dv-py91r
+ *     b7e-packets -w delmar P22 --fetch /tmp/p22
+ *     b7e-packets -w delmar P22 --json --no-alpha
+ *
+ * bc-xl7n.178: three delmar sessions (dv-52r.63, .64, .65) each rebuilt the list of
+ * usable plates by hand — `ls` over hand-named dirs, a PIL probe the worktree guard
+ * refused, `cat bg.png.md` to learn the background was a vault sidecar, an `rclone` and a
+ * sha256 typed from memory. `lib/packets.js` does the real work; this is argv and printing.
+ *
+ * Without --fetch it only reads. --fetch pulls each matching vault sidecar's bytes with
+ * `rclone copyto` into <dir>/<path under .claude/packets> and checks the sha256 the
+ * sidecar recorded, which is why this is declared `excluded` and not `read`: a grant is
+ * per file, and one flag that writes and reaches the network makes the whole command so.
+ *
+ * Exit codes: `0` a report was printed (an empty one included), `1` a --fetch failed or
+ * its sha256 did not match, `2` a bad invocation.
+ *
+ * b7e-packets is deliberately NOT on DEFAULT_TOOL_LIST. --fetch writes bytes under a
+ * caller-named directory via rclone from the network, so the whole command cannot ride the
+ * read-only allowlist.
+ *
+ * @grant excluded
+ */
+import { loadConfig } from '../lib/config.js';
+import { defaultRepoRoot, fetchSidecars, formatRow, scanPackets } from '../lib/packets.js';
+
+const USAGE = `usage: b7e-packets -w <workspace> <key> [--beads a,b] [--fetch <dir>] [--dir <checkout>] [--no-alpha] [--json]
+
+  -w, --workspace <n>   which repo's .claude/packets to read (required)
+  <key>                 a panel/shot token such as P22, matched in file names (required)
+  --beads <ids>         only these packet dirs (the first path segment: a bead id)
+  --fetch <dir>         pull matching vault sidecars' bytes into <dir> and check their sha256
+  --dir <path>          the checkout to read instead of ~/projects/<n>
+  --no-alpha            skip decoding pixels for alpha coverage (faster on big plates)
+  --json                the machine-readable form instead of the printed report
+  -h, --help            this text`;
+
+function fail(msg, code) {
+  console.error(`b7e-packets: ${msg}`);
+  process.exit(code);
+}
+
+const argv = process.argv.slice(2);
+if (argv.includes('-h') || argv.includes('--help')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+
+let wsName = null;
+let key = null;
+let beads = [];
+let fetchDir = null;
+let dirArg = null;
+let alpha = true;
+let jsonMode = false;
+
+for (let i = 0; i < argv.length; i += 1) {
+  const a = argv[i];
+  if (a === '-w' || a === '--workspace') {
+    wsName = argv[(i += 1)];
+  } else if (a === '--beads') {
+    beads = (argv[(i += 1)] || '').split(',').map((s) => s.trim()).filter(Boolean);
+  } else if (a === '--fetch') {
+    fetchDir = argv[(i += 1)];
+    if (!fetchDir) fail(`--fetch needs a directory\n${USAGE}`, 2);
+  } else if (a === '--dir') {
+    dirArg = argv[(i += 1)];
+  } else if (a === '--no-alpha') {
+    alpha = false;
+  } else if (a === '--json') {
+    jsonMode = true;
+  } else if (a.startsWith('-')) {
+    fail(`unrecognized argument "${a}"\n${USAGE}`, 2);
+  } else if (key == null) {
+    key = a;
+  } else {
+    fail(`more than one key ("${key}", "${a}")\n${USAGE}`, 2);
+  }
+}
+
+if (!wsName) fail(`-w/--workspace is required\n${USAGE}`, 2);
+if (!key) fail(`a key (such as P22) is required\n${USAGE}`, 2);
+
+if (!dirArg) {
+  const cfg = loadConfig();
+  if (!cfg.workspaces.find((w) => w.name === wsName)) {
+    console.error(`b7e-packets: no such workspace "${wsName}"`);
+    console.error(`workspaces: ${cfg.workspaces.map((w) => w.name).join(', ')}`);
+    process.exit(2);
+  }
+}
+
+const repoRoot = dirArg || defaultRepoRoot(wsName);
+const result = scanPackets(repoRoot, key, { beads, alpha });
+const fetched = fetchDir ? fetchSidecars(result.rows, fetchDir, { alpha }) : null;
+const failed = fetched ? fetched.filter((f) => f.status === 'failed') : [];
+
+if (jsonMode) {
+  console.log(JSON.stringify({ workspace: wsName, repoRoot, ...result, fetched }, null, 2));
+  process.exit(failed.length ? 1 : 0);
+}
+
+console.log(`Packets matching "${key}" under ${result.root}${beads.length ? ` (beads: ${beads.join(', ')})` : ''}:`);
+if (!result.rows.length) {
+  console.log('  (none found)');
+} else {
+  if (result.canvas) console.log(`  dominant canvas: ${result.canvas}`);
+  for (const r of result.rows) console.log(formatRow(r));
+}
+if (fetched) {
+  console.log('');
+  console.log(`Fetch into ${fetchDir}:`);
+  if (!fetched.length) console.log('  (no sidecars matched)');
+  for (const f of fetched) {
+    console.log(`  ${f.path}  ${f.status}${f.error ? `  ${f.error}` : `  sha256 ${f.sha256} ok  ${f.dest}`}`);
+  }
+}
+process.exit(failed.length ? 1 : 0);

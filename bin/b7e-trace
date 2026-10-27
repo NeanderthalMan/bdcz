@@ -1,0 +1,132 @@
+#!/usr/bin/env node
+/**
+ * `b7e-trace` — where is this bead's work actually: on trunk, on a branch, in a pull
+ * request, or nowhere. bead → refs, the direction `b7e-newest` (path → ref) is not.
+ *
+ *     b7e-trace bc-dgx7.96                 one bead
+ *     b7e-trace bc-a bc-b bc-c             several
+ *     b7e-trace --label agent-filed        every bead carrying a label (closed ones too)
+ *     b7e-trace --stdin < ids.txt          ids from stdin, whitespace separated
+ *     b7e-trace bc-a --trunk develop       trunk other than origin/main
+ *     b7e-trace bc-a --no-pr               skip GitHub (in-review reads as on-branch)
+ *     b7e-trace bc-a --json                one object instead of the printed report
+ *     b7e-trace bc-a --dir <root>          read <root>, not this repo
+ *
+ * bc-dgx7.96: four sessions (dv-3rn.2, dv-nsy, dv-gr6.36, dv-gr6.45) each built this out of
+ * git plumbing. See lib/trace.js for what counts as evidence and what each verdict means;
+ * this file is the argv parsing and the printing.
+ *
+ * Exit codes: `0` every bead asked about is `landed`; `1` at least one is not; `2` bad
+ * usage, or the trunk does not resolve.
+ *
+ * b7e-trace is deliberately NOT on DEFAULT_TOOL_LIST, for the `b7e-landed` reason: it asks GitHub (`gh pr list`),
+ * which lib/grants.js does not count as free like a filesystem read, and its occasion — a
+ * worker deciding whether a bead's work exists — has a branch and a worktree that the
+ * dispatch agent that list governs does not.
+ *
+ * @grant excluded
+ */
+import path from 'node:path';
+import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { REPO_ROOT } from '../lib/landedcheck.js';
+import { traceBeads } from '../lib/trace.js';
+
+const argv = process.argv.slice(2);
+const has = (f) => argv.includes(f);
+const value = (f) => {
+  const at = argv.indexOf(f);
+  return at === -1 ? undefined : argv[at + 1];
+};
+const VALUE_FLAGS = new Set(['--label', '--trunk', '--dir']);
+
+if (has('--help') || has('-h')) {
+  console.log(
+    [
+      'b7e-trace <bead-id>...             where is each bead\'s work: landed / in-review / on-branch / uncited',
+      'b7e-trace --label <label>          every bead carrying the label',
+      'b7e-trace --stdin                  ids from stdin',
+      'b7e-trace ... --trunk <ref>        trunk other than main (origin/<ref> first)',
+      'b7e-trace ... --no-pr              do not ask GitHub',
+      'b7e-trace ... --json               machine-readable',
+      'b7e-trace ... --dir <root>         read <root>, not this repo',
+    ].join('\n'),
+  );
+  process.exit(0);
+}
+
+const dim = (s) => `\x1b[2m${s}\x1b[0m`;
+const bold = (s) => `\x1b[1m${s}\x1b[0m`;
+const red = (s) => `\x1b[31m${s}\x1b[0m`;
+const green = (s) => `\x1b[32m${s}\x1b[0m`;
+const amber = (s) => `\x1b[33m${s}\x1b[0m`;
+
+const ROOT = path.resolve(value('--dir') || REPO_ROOT);
+const ids = argv.filter((a, i) => !a.startsWith('-') && !VALUE_FLAGS.has(argv[i - 1]));
+
+const label = value('--label');
+if (label) {
+  try {
+    const rows = JSON.parse(execFileSync('bd', ['list', '--all', '--limit', '0', '--label', label, '--json'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }));
+    for (const r of rows) ids.push(r.id);
+  } catch (err) {
+    console.error(red(`b7e-trace: could not list beads labelled ${label}: ${err.message.split('\n')[0]}`));
+    process.exit(2);
+  }
+}
+if (has('--stdin')) ids.push(...fs.readFileSync(0, 'utf8').split(/\s+/).filter(Boolean));
+
+if (!ids.length) {
+  console.error(red('b7e-trace: no bead ids — give some, or --label <label>, or --stdin'));
+  process.exit(2);
+}
+
+const result = await traceBeads(ROOT, ids, { trunk: value('--trunk') || 'main', pulls: !has('--no-pr') });
+if (!result.ok) {
+  console.error(red(`b7e-trace: ${result.reason}`));
+  process.exit(2);
+}
+
+const rows = Object.values(result.beads);
+const allLanded = rows.every((b) => b.verdict === 'landed');
+
+if (has('--json')) {
+  console.log(JSON.stringify(result));
+  process.exit(allLanded ? 0 : 1);
+}
+
+const short = (sha) => String(sha).slice(0, 8);
+const COLOR = { landed: green, 'in-review': amber, 'on-branch': amber, uncited: red };
+const detail = (b) => {
+  const lines = [];
+  if (b.verdict === 'landed') {
+    if (b.via === 'commit') for (const c of b.trunkCommits.slice(0, 3)) lines.push(`${short(c.sha)} ${c.subject}`);
+    else lines.push(`named in tracked file${b.trunkFiles.length > 1 ? 's' : ''} only, no commit: ${b.trunkFiles.slice(0, 3).join(', ')}`);
+  } else {
+    for (const p of b.prs) lines.push(`PR #${p.number} ${p.url}${p.branch ? ` (${p.branch})` : ''}`);
+    for (const br of b.branches.slice(0, 5)) {
+      const c = b.branchCommits.filter((x) => x.ref === br).length;
+      const f = new Set(b.branchFiles.filter((x) => x.ref === br).map((x) => x.path)).size;
+      lines.push(`branch ${br} — ${c} commit${c === 1 ? '' : 's'} naming it${f ? `, ${f} file${f === 1 ? '' : 's'} naming it` : ''}`);
+    }
+  }
+  return lines;
+};
+
+if (rows.length === 1) {
+  const b = rows[0];
+  console.log(bold(b.id) + dim(` — against ${result.trunk}`));
+  console.log(COLOR[b.verdict](b.verdict + (b.via ? ` (via ${b.via})` : '')));
+  for (const l of detail(b)) console.log(`  ${l}`);
+  if (!result.prsChecked && b.verdict === 'on-branch') console.log(dim('  GitHub not asked — an open PR would read in-review'));
+} else {
+  const width = Math.max(...rows.map((b) => b.id.length));
+  for (const b of rows) {
+    const first = detail(b)[0] || '';
+    console.log(`${b.id.padEnd(width)}  ${COLOR[b.verdict](b.verdict.padEnd(9))}  ${dim(first)}`);
+  }
+  const tally = {};
+  for (const b of rows) tally[b.verdict] = (tally[b.verdict] || 0) + 1;
+  console.log(dim(`\n${rows.length} beads against ${result.trunk}: ${Object.entries(tally).map(([k, v]) => `${v} ${k}`).join(', ')}`));
+}
+process.exit(allLanded ? 0 : 1);

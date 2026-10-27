@@ -1,0 +1,255 @@
+#!/usr/bin/env node
+/**
+ * `b7e-jsondiff` — what a regenerated JSON file changed, record by record, against a
+ * ref, and keep only the records you meant to change.
+ *
+ *     b7e-jsondiff reference/maps/web/sequences.json
+ *     b7e-jsondiff data_alban.json --ref HEAD~3 --only 'story:1..3'
+ *     b7e-jsondiff data_alban.json --keep 'Llanenwr' 'Cwmrith' --write
+ *     b7e-jsondiff sequences.json --json
+ *
+ * bc-dgx7.143 (re-homed from delmar's dv-k4n.37): four delmar sessions each
+ * regenerated an atlas JSON file, then wrote their own one-off comparison against the
+ * committed copy — a different record key and a different splice script each time,
+ * one of them refused twice by the worktree guard for piping `git show` into a
+ * hand-rolled diff ("too complex to verify"). This reads the ref side through
+ * `lib/gitref.js`'s `readRefFile`, so there is no git pipe to refuse, and it finds
+ * "what a record is" itself: an array of objects, or an object with one property that
+ * is one (delmar's `sequences.json` is `{sequences: [...]}`; `data_alban.json` and
+ * `data_americas.json` are `{key, title, ..., features: [...]}` — the same shape with
+ * different metadata beside the array). See `lib/jsondiff.js` for the auto-detection,
+ * the field-level diff, and what it deliberately does not recurse into.
+ *
+ * Reports one line per record — `+ key` added, `- key` removed, `~ key  field:
+ * old -> new` changed — then a count summary, and separately any file-level metadata
+ * field that changed (the fields beside the records array, if there are any).
+ *
+ * **`--only <selector>...` is the drift signal, not a filter.** Every record is still
+ * reported; `--only` decides the exit code — 0 when every change (record or metadata)
+ * falls inside what it names, 1 when something changed outside it. With no `--only`,
+ * that is simply "did anything change at all".
+ *
+ * **`--keep <selector>... --write` rewrites the working file from the ref's own
+ * structure**, substituting the working copy's version of just the named records,
+ * record for record — metadata always comes from the ref, because `--keep` names
+ * records and metadata is not one — then serialises to match the ref's own
+ * formatting (pretty with its indent unit, or compact with Python's default `", "`
+ * spacing, whichever the ref file actually used).
+ *
+ * A selector is a literal record key, or `<prefix>:<range>` (`story:1..3` is `story1`,
+ * `story2`, `story3`) expanding only against keys that exist — a number the range
+ * names but the collection does not have is silently no match, the same as a literal
+ * selector for an absent key.
+ *
+ * Exit codes: `0` nothing changed outside `--only` (or, with `--keep --write`, the
+ * rewrite succeeded). `1` something changed outside `--only`. `2` bad usage. `3` the
+ * path could not be read at one side or the other, or is not valid JSON.
+ *
+ * b7e-jsondiff (bc-dgx7.143) is deliberately NOT on DEFAULT_TOOL_LIST, even though a bare
+ * invocation only reads: --keep <selector>... --write rewrites <path> in place, and the
+ * same reasoning that keeps b7e-apply/b7e-take/b7e-swbump/b7e-fresh off the list applies
+ * unchanged — the @grant tag is per FILE, not per argv, so a `read` tag here would put the
+ * mutating flag on the auto-run allowlist along with the harmless invocation. dispatch,
+ * the one agent that list governs, answers one phone comment and has no regenerated atlas
+ * file in front of it to reconcile against a ref; that occasion is a worker session, which
+ * already carries the unrestricted CLI default and needs no grant to run --write. See
+ * lib/jsondiff.js.
+ *
+ * @grant excluded
+ */
+import fs from 'node:fs';
+import path from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { readRefFile } from '../lib/gitref.js';
+import { diffCollections, spliceKeep, expandSelectors, shortRepr } from '../lib/jsondiff.js';
+
+const USAGE = `usage: b7e-jsondiff <path> [--ref <ref>] [--key <field>[,<field>]]
+                    [--only <selector>...] [--keep <selector>... --write]
+                    [--dir <root>] [--json]
+
+What a regenerated JSON file changed, record by record, against a ref.
+
+  <path>             repo-relative (or cwd-relative) path to the JSON file
+  --ref <ref>         compare against this ref instead of HEAD — anything
+                      git rev-parse --verify accepts
+  --key <field>[,...] try these fields, in order, as the record identity instead of
+                      the auto-detected id/name/key
+  --only <selector>...  changes to these records don't affect the exit code — every
+                      change is still reported; a selector is a literal record key or
+                      <prefix>:<range> (story:1..3 = story1, story2, story3)
+  --keep <selector>... which records --write takes from the working copy; every
+                      other record comes from --ref, unchanged
+  --write             rewrite <path> from --keep and --ref (requires --keep)
+  --dir <root>        resolve <path> and the git ref against <root>'s repo, not cwd's
+  --json              one object on stdout instead of the printed report`;
+
+const argv = process.argv.slice(2);
+if (argv.includes('--help') || argv.includes('-h')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+
+const die = (msg, code = 2) => {
+  console.error(`b7e-jsondiff: ${msg}`);
+  process.exit(code);
+};
+
+let ref = 'HEAD';
+let keyFlag = null;
+let dir = null;
+const onlySelectors = [];
+const keepSelectors = [];
+let write = false;
+let jsonMode = false;
+const positionals = [];
+
+for (let i = 0; i < argv.length; i += 1) {
+  const a = argv[i];
+  if (a === '--ref') {
+    ref = argv[i + 1];
+    i += 1;
+  } else if (a === '--key') {
+    keyFlag = argv[i + 1];
+    i += 1;
+  } else if (a === '--dir') {
+    dir = argv[i + 1];
+    i += 1;
+  } else if (a === '--only') {
+    onlySelectors.push(argv[i + 1]);
+    i += 1;
+  } else if (a === '--keep') {
+    keepSelectors.push(argv[i + 1]);
+    i += 1;
+  } else if (a === '--write') {
+    write = true;
+  } else if (a === '--json') {
+    jsonMode = true;
+  } else if (a.startsWith('-') && a !== '-') {
+    die(`unrecognised flag: ${a}`);
+  } else {
+    positionals.push(a);
+  }
+}
+
+if (positionals.length !== 1) die('needs exactly one <path>');
+if (write && !keepSelectors.length) die('--write needs at least one --keep');
+if (keepSelectors.length && !write) die('--keep does nothing without --write');
+
+const [givenPath] = positionals;
+// Realpath'd, not just resolved: `git rev-parse --show-toplevel` always answers with
+// symlinks resolved, and on macOS /tmp itself is one — comparing a resolved-but-not-
+// realpath'd `workingFile` against that root made every path under /tmp read as
+// "outside" the repo it plainly is inside.
+const realOrSelf = (p) => {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return p;
+  }
+};
+const base = realOrSelf(dir ? path.resolve(dir) : process.cwd());
+
+let repoRoot;
+try {
+  repoRoot = execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd: base, encoding: 'utf8', stdio: 'pipe' }).trim();
+} catch {
+  die(`${base} is not inside a git repository`);
+}
+
+const workingFile = realOrSelf(path.resolve(base, givenPath));
+const relPath = path.relative(repoRoot, workingFile);
+if (relPath.startsWith('..')) die(`${givenPath} is outside ${repoRoot}`);
+
+const refText = await readRefFile(repoRoot, ref, relPath);
+if (refText === null) die(`"${ref}" has no ${relPath}`, 3);
+
+let workingText;
+try {
+  workingText = fs.readFileSync(workingFile, 'utf8');
+} catch (err) {
+  die(`cannot read ${workingFile}: ${err.message}`, 3);
+}
+
+let oldRoot;
+let newRoot;
+try {
+  oldRoot = JSON.parse(refText);
+} catch (err) {
+  die(`${relPath} at ${ref} is not valid JSON: ${err.message}`, 3);
+}
+try {
+  newRoot = JSON.parse(workingText);
+} catch (err) {
+  die(`${workingFile} is not valid JSON: ${err.message}`, 3);
+}
+
+const keyCandidates = keyFlag ? keyFlag.split(',').map((s) => s.trim()).filter(Boolean) : undefined;
+const diff = diffCollections(oldRoot, newRoot, { keyField: keyCandidates ? keyCandidates[0] : undefined });
+
+if (write) {
+  const existingKeys = new Set([...diff.oldEntries.keys(), ...diff.newEntries.keys()]);
+  const keepKeys = expandSelectors(keepSelectors, existingKeys);
+  let rewritten;
+  try {
+    rewritten = spliceKeep(refText, workingText, keepKeys, diff.keyField);
+  } catch (err) {
+    die(err.message, 2);
+  }
+  fs.writeFileSync(workingFile, rewritten);
+  console.log(`b7e-jsondiff: wrote ${relPath} — kept ${keepKeys.size} record${keepKeys.size === 1 ? '' : 's'} from the working copy, everything else from ${ref}`);
+  process.exit(0);
+}
+
+const allExisting = new Set([...diff.oldEntries.keys(), ...diff.newEntries.keys()]);
+const allowed = onlySelectors.length ? expandSelectors(onlySelectors, allExisting) : null;
+const outsideOnly = (key) => allowed !== null && !allowed.has(key);
+
+let driftOutsideOnly = false;
+for (const key of diff.added) if (outsideOnly(key)) driftOutsideOnly = true;
+for (const key of diff.removed) if (outsideOnly(key)) driftOutsideOnly = true;
+for (const { key } of diff.changed) if (outsideOnly(key)) driftOutsideOnly = true;
+if (diff.metadataChanged.length && allowed !== null) driftOutsideOnly = true;
+if (allowed === null && (diff.added.length || diff.removed.length || diff.changed.length || diff.metadataChanged.length)) {
+  driftOutsideOnly = true;
+}
+
+if (jsonMode) {
+  console.log(
+    JSON.stringify(
+      {
+        path: relPath,
+        ref,
+        arrayKey: diff.arrayKey,
+        keyField: diff.keyField,
+        added: diff.added,
+        removed: diff.removed,
+        changed: diff.changed.map(({ key, fields }) => ({
+          key,
+          fields: fields.map((f) => ({ field: f.field, old: f.before, new: f.after })),
+        })),
+        metadataChanged: diff.metadataChanged.map((f) => ({ field: f.field, old: f.before, new: f.after })),
+      },
+      null,
+      2
+    )
+  );
+} else {
+  for (const key of diff.added) console.log(`+ ${key}`);
+  for (const key of diff.removed) console.log(`- ${key}`);
+  for (const { key, fields } of diff.changed) {
+    const detail = fields.map((f) => `${f.field}: ${shortRepr(f.before)} -> ${shortRepr(f.after)}`).join(', ');
+    console.log(`~ ${key}  ${detail}`);
+  }
+  if (diff.metadataChanged.length) {
+    const detail = diff.metadataChanged.map((f) => `${f.field}: ${shortRepr(f.before)} -> ${shortRepr(f.after)}`).join(', ');
+    console.log(`metadata  ${detail}`);
+  }
+  const total = diff.added.length + diff.removed.length + diff.changed.length;
+  console.log(
+    `\n${diff.added.length} added, ${diff.removed.length} removed, ${diff.changed.length} changed` +
+      (allowed !== null ? `, drift outside --only: ${driftOutsideOnly ? 'yes' : 'no'}` : '') +
+      (total === 0 && !diff.metadataChanged.length ? ' (nothing changed)' : '')
+  );
+}
+
+process.exit(driftOutsideOnly ? 1 : 0);

@@ -1500,13 +1500,12 @@ that catches a new writer, and a claim naming a file that no longer writes anyth
 by the same check.
 
 **AIP-6 — No AI system in this register operates without a current impact assessment.**
-*Planned*, by `bc-eqn1.8`, in `lib/impact.js` and `lib/dispatch.js`. Opening a session on an
-agent kind whose impact assessment is missing or expired will be refused, with the refusal kept
-as evidence. The record this reads exists since `bc-eqn1.6` — an assessment per AI system,
-with a template, an approver and an expiry — and so does the half a repo check can enforce: a
-new agent kind that ships without a current assessment fails the build. What is owed is the
-session-open half. Until it lands, the existing agent kinds run on draft assessments, and nobody
-should read that as equivalent.
+*Enforced*, by `lib/impact.js` and `lib/sessiongate.js`. A new agent kind that ships without a
+current assessment fails the build, and — with the management system on — a session on a bead
+whose agent kind has no current assessment is refused, with the refusal kept on the bead as
+evidence. A draft is not current, and every assessment is a draft today, so with the
+management system on **no session opens at all** until the approver signs. That is the clause
+operating, not a fault in it.
 
 **AIP-7 — No change reaches a default branch without naming what it was for.**
 *Planned*, by `bc-eqn1.8`, in `lib/mergequeue.js` and `lib/delivery.js`. A merge carrying no
@@ -1732,10 +1731,12 @@ a branch, reviewed before it merges.
 **Every assessment is a draft today**, seeded by the session that built the register and
 awaiting the impact assessment approver. A draft is never current. The cost of that is stated
 rather than hidden: with the management system on, every widening amendment is refused until an
-assessment covering it is approved. Treating a draft as approved would be the fabricated record
-this programme exists to prevent.
+assessment covering it is approved, **and every session on a bead is refused**, because the
+launch gate below refuses any agent kind whose assessment is not current. Turning the
+management system on today stops the advocates opening anything. Treating a draft as approved
+would be the fabricated record this programme exists to prevent.
 
-### The two refusals that read it
+### The three refusals that read it
 
 **A widening amendment.** An amendment that widens what an agent may do is refused unless a
 current assessment covers the form it would leave the agent in. Widening is measured on three
@@ -1756,6 +1757,22 @@ a repo check: an AI system with no assessment fails the build, and a system adde
 landed fails unless its assessment is approved and current. The eight systems that existed
 before it are named, and the test pins that list so it can shrink and never grow.
 
+**A session on a bead** (`lib/sessiongate.js`, `bc-eqn1.8.1`). Before a window opens on a
+bead, the agent kind it would run as — a worker for work, planning, chat, handoff and
+review-answer windows, and the Epic, merge and review advocates as themselves — must have a current
+assessment. The check sits in `launch` in `lib/session.js`, which every window on a bead
+passes: the advocate's dispatch and the windows the phone opens by hand go through the same
+door. A missing, draft, invalid or expired assessment is refused. A window with no bead is not
+gated, because there is no bead to keep the refusal on.
+
+A standing refusal is written **once per bead per assessment state**, not once per tick. The
+refusal names the state in what it refused, and the door reads the bead's comments first and
+does not write the same refusal twice. The advocate does not ask the door again either: it
+remembers the refusal and leaves the bead out of its queue until the assessment changes or the
+management system goes off. Its card says `N refused by the impact assessment gate`. The
+refusal costs the bead no attempt, so approving the assessment is enough to get the work
+picked up again.
+
 ### The refusal is the evidence
 
 A refused amendment writes nothing to what the agent is and two things about the refusal: a
@@ -1764,12 +1781,15 @@ A refused amendment writes nothing to what the agent is and two things about the
 comment on that bead in the shape `lib/capa.js` defines, with the `gate-refused` label. The
 question stays open, because an approval that changed nothing must not close over one.
 
+A refused session writes the same kind of comment and label on the bead it refused, under the
+gate name `session-impact`, so a refusal read back says which door it came from.
+
 All of it is inert while the management system is off: no module is loaded and nothing is read,
 and an amendment behaves exactly as it did before this gate existed.
 
 ### What it does not do
 
 A release that widens an agent's baseline is a reviewed commit, not an amendment, and this gate
-does not see it. Refusing a *session* on an agent kind whose assessment is missing or expired is
-the other half of AIP-6 and belongs to `bc-eqn1.8`, which reads this register. And whether the
-approver understood what they approved is AIP-10, which no check can test.
+does not see it. A window with no bead (a conflict resolver, for example) is not gated by the
+session gate. And whether the approver understood what they approved is AIP-10, which no check
+can test.

@@ -170,7 +170,11 @@ PROMPT="Read handoff ${ID}. Run: bd show ${ID} --json | jq -r '.[0].description'
 Then run: bd update ${ID} --claim
 Then continue from that handoff's \"Next action\". Do not re-derive context that
 the handoff already states; if something it claims is UNVERIFIED, verify it before
-relying on it."
+relying on it.
+Before you stop, put it on the tracker, not only in this window (Adam does not read
+terminals, and the window is closed once it goes quiet): bd comments add ${ID} with where
+things stand, and file every question for Adam as its own bead — bd create --type=decision
+--priority=1 --assignee=adam --labels=human,author-decision — then bd dep add ${ID} <it>."
 
 open_iterm() {
   command -v claude >/dev/null || { echo "open-handoff: claude not on PATH" >&2; exit 3; }

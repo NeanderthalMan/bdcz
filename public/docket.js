@@ -58,7 +58,6 @@
 
   const token = localStorage.getItem('beadcause.token') || '';
   const out = document.getElementById('docket');
-  const pulse = document.getElementById('pulse');
   const titleEl = document.getElementById('arc-title');
 
   const params = new URLSearchParams(location.search);
@@ -513,7 +512,6 @@
    * `refresh=1`'s door with no code here at all.
    */
   async function load() {
-    pulse.classList.add('busy');
     try {
       if (bead) {
         state.docket = await api(`/api/docket?ws=${encodeURIComponent(ws)}&id=${encodeURIComponent(bead)}`);
@@ -527,7 +525,6 @@
         detail: err.message,
       };
     } finally {
-      pulse.classList.remove('busy');
       render();
     }
   }

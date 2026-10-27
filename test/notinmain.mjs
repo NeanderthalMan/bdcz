@@ -228,7 +228,15 @@ git('checkout', '-q', '-b', 'worktree-coldest-read-wins-1kwl22', c2);
 commit('ten', '10', 'a dot-collision two ids would each claim');
 git('checkout', '-q', 'main');
 
-git('update-ref', 'refs/remotes/origin/main', s2);
+// A replay: the same delivery re-made on a later main, so its patch-id differs but its
+// subject, bead-id prefix included, is identical — bc-arj0.27.
+git('checkout', '-q', '-b', 'worktree-replayed-iii', c2);
+const iii = commit('eleven', '11', 'iii-1.2: the same delivery');
+git('checkout', '-q', 'main');
+commit('eleven', '11 adapted', 'iii-1.2: the same delivery');
+const s3 = git('rev-parse', 'HEAD');
+
+git('update-ref', 'refs/remotes/origin/main', s3);
 
 const {
   sweepNotInMain,
@@ -566,6 +574,20 @@ check(
   cherryCloseWrite?.reason
 );
 check('nothing was reopened, merged or pushed', !cardOverCherried.writes.some((w) => w.kind === 'update'), kinds(cardOverCherried));
+
+/* ------------------------------------------------------ a replay under a new patch-id */
+
+console.log('\na branch replayed onto main under a new patch-id');
+
+check(
+  'a replay with an identical bead-prefixed subject counts as upstream',
+  await commitsUpstream(REPO, iii, (await pickBase(REPO, 'main')).ref)
+);
+setPrs([]);
+const replayed = fakeBd([{ id: 'wg-iii', title: 'replayed', close_reason: 'On worktree-replayed-iii.' }]);
+const rReplay = await sweepNotInMain(replayed, ws('replayed'), REPO);
+check('a replayed branch is not called stranded', rReplay.flagged.length === 0, JSON.stringify(rReplay.flagged));
+check('and nothing was written to the tracker', kinds(replayed) === '', kinds(replayed));
 
 /* ------------------------------------------------------ a tag collision */
 //

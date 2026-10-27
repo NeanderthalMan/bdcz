@@ -54,6 +54,9 @@ import { cleanupTmp } from './helpers/tmp.mjs';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(HERE, '..');
 const MONITOR = fs.readFileSync(path.join(ROOT, 'public', 'monitor.js'), 'utf8');
+// monitor.js mounts the shared proposal card at IIFE time (bc-yjekg.5), so this runs in
+// the context first — the order public/monitor.html loads them in.
+const PROPOSAL = fs.readFileSync(path.join(ROOT, 'public', 'proposal.js'), 'utf8');
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'beadcause-heldsubcard-'));
 // Before anything under lib/ is imported: CONFIG_DIR resolves once, at module load.
@@ -366,6 +369,7 @@ async function drawConsole(payload, open) {
       return { ok: true, status: 200, json: async () => body };
     },
   });
+  vm.runInContext(PROPOSAL, ctx, { filename: 'proposal.js' });
   vm.runInContext(MONITOR, ctx, { filename: 'monitor.js' });
   // The boot is async and the IIFE hands nothing back, so settle on the stubs' own
   // microtasks. Bounded rather than timed: nothing here waits on a clock.

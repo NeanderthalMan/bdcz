@@ -1,0 +1,130 @@
+#!/usr/bin/env node
+/**
+ * b7e-origin — run `git fetch`/`git push`/`git ls-remote` against a checkout's `origin`
+ * as whichever account can actually reach it, instead of whatever `gh auth status`
+ * calls active.
+ *
+ *   b7e-origin fetch origin main
+ *   b7e-origin push --set-upstream origin my-branch:my-branch
+ *   b7e-origin ls-remote origin refs/heads/main
+ *   b7e-origin fetch origin main --dir /path/to/other/checkout
+ *   b7e-origin --which                    print the resolved account and exit
+ *
+ * bc-dgx7.160: six sessions (bc-arj0.25, bc-dgx7.131, bc-dgx7.134, bc-nc6o.12,
+ * bc-xlz32.11, bc-xlz32.12) each hit the same failure by hand — the checkout's ambient
+ * `gh` account cannot see `origin` — and worked around it five different ways: a
+ * hand-built Basic auth header, an inline `credential.helper` override, a token written
+ * to a tmp file, `GH_TOKEN=$(gh auth token --user X)` typed before the real command, and
+ * one session that gave up and read stale refs instead. `lib/pr.js` already resolves the
+ * right account per checkout for its own `gh` calls; this puts that same resolution in
+ * front of `git` itself, as `gitEnvIn`/`originAccount`. `bin/deliver.js`'s own push uses
+ * the same export directly, so a delivery needs no workaround typed by hand either.
+ *
+ * Takes the git subcommand and its own arguments verbatim — nothing here parses them,
+ * so any flag `git fetch`/`git push`/`git ls-remote` accepts works unchanged. `--dir`
+ * names a checkout other than the current directory and is stripped before the rest is
+ * handed to `git`.
+ *
+ * Exit codes: whatever `git` itself exits with, once an account has been resolved; `2`
+ * for a bad invocation; `3` when no logged-in account can see the repo at all — the one
+ * case this exists to turn into a sentence instead of git's own opaque authentication
+ * failure, naming every account that was tried.
+ *
+ * b7e-origin is deliberately NOT on DEFAULT_TOOL_LIST. It runs git fetch/push against a
+ * remote, which lib/grants.js already classifies a write held by merge-advocate alone;
+ * dispatch has no branch of its own to push and the worker sessions this serves already
+ * carry the unrestricted CLI default. See docs/b7e/b7e-origin.md.
+ *
+ * @grant excluded
+ */
+import { execFile } from 'node:child_process';
+import path from 'node:path';
+import { promisify } from 'node:util';
+import { gitEnvIn, originAccount } from '../lib/pr.js';
+
+const run = promisify(execFile);
+
+const USAGE = `usage: b7e-origin fetch|push|ls-remote [git args...] [--dir <checkout>]
+       b7e-origin --which [--dir <checkout>]
+
+Runs the git subcommand against <checkout>'s origin (default: the current directory)
+under GH_TOKEN set to whichever gh account lib/pr.js resolves as write-capable there —
+the same resolution bin/deliver.js's own push and every gh call in this repo already
+use. --which prints only the resolved account and exits; nothing is run.
+
+Exit codes: git's own exit code once an account is resolved; 2 for a bad invocation;
+3 when no logged-in account can see the repo — every account tried is named.`;
+
+const SUBCOMMANDS = ['fetch', 'push', 'ls-remote'];
+
+function parseArgs(argv) {
+  const rest = [];
+  let dir = process.cwd();
+  let which = false;
+  let help = false;
+  for (let i = 0; i < argv.length; i += 1) {
+    const a = argv[i];
+    if (a === '--dir') {
+      dir = argv[i + 1];
+      i += 1;
+    } else if (a === '--which') {
+      which = true;
+    } else if (a === '--help' || a === '-h') {
+      help = true;
+    } else {
+      rest.push(a);
+    }
+  }
+  return { rest, dir: path.resolve(dir || process.cwd()), which, help };
+}
+
+function noAccountMessage(dir, account) {
+  const tried = account.tried.length ? account.tried.join(', ') : '(no accounts logged in)';
+  return `b7e-origin: no logged-in account can see the origin of ${dir} — tried ${tried}`;
+}
+
+async function main() {
+  const { rest, dir, which, help } = parseArgs(process.argv.slice(2));
+
+  if (help || (!which && !rest.length)) {
+    console.log(USAGE);
+    process.exit(help ? 0 : 2);
+  }
+
+  if (which) {
+    const account = await originAccount(dir);
+    if (!account.ok) {
+      console.error(noAccountMessage(dir, account));
+      process.exit(3);
+    }
+    console.log(`${account.slug} via ${account.login}`);
+    process.exit(0);
+  }
+
+  const [sub, ...gitArgs] = rest;
+  if (!SUBCOMMANDS.includes(sub)) {
+    console.error(`b7e-origin: '${sub}' is not one of ${SUBCOMMANDS.join(', ')}\n\n${USAGE}`);
+    process.exit(2);
+  }
+
+  const account = await originAccount(dir);
+  if (!account.ok) {
+    console.error(noAccountMessage(dir, account));
+    process.exit(3);
+  }
+
+  const env = await gitEnvIn(dir);
+  try {
+    const { stdout, stderr } = await run('git', [sub, ...gitArgs], { cwd: dir, env, maxBuffer: 16 * 1024 * 1024 });
+    if (stdout) process.stdout.write(stdout);
+    if (stderr) process.stderr.write(stderr);
+    process.exit(0);
+  } catch (err) {
+    if (err.stdout) process.stdout.write(err.stdout);
+    if (err.stderr) process.stderr.write(err.stderr);
+    else console.error(`b7e-origin: ${err.message}`);
+    process.exit(typeof err.code === 'number' ? err.code : 1);
+  }
+}
+
+main();

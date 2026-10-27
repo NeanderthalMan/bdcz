@@ -135,7 +135,7 @@ function boot({ showing = 'epics' } = {}) {
 
 /* ============================================================ the list itself */
 
-console.log('\nwhich seven');
+console.log('\nwhich eight');
 
 await check('the seven are gone from the document and named in the loader', () => {
   const api = boot().api();
@@ -144,8 +144,8 @@ await check('the seven are gone from the document and named in the loader', () =
   const deferred = [...api.scripts()];
   assert.deepEqual(
     deferred,
-    ['/history.js', '/releases.js', '/config.js', '/montabs.js', '/monitor.js', '/prs.js', '/mirror.js'],
-    'the deferred list is not the seven bc-iaju1.6 measured'
+    ['/history.js', '/releases.js', '/config.js', '/montabs.js', '/monitor.js', '/mergeboard.js', '/prs.js', '/mirror.js'],
+    'the deferred list is not the seven bc-iaju1.6 measured, plus mergeboard.js (bc-gjlix)'
   );
   for (const src of deferred) {
     assert.ok(!TAGS.includes(src.slice(1)), `${src} is both a tag and injected — its IIFE would run twice`);
@@ -207,7 +207,7 @@ await check('nothing but the landed-on view goes out before the first paint', ()
   const app = boot({ showing: 'epics' });
   assert.deepEqual(app.sent(), [], 'a pane nobody is looking at was fetched on the critical path');
   app.paint();
-  assert.equal(app.sent().length, 7, 'the rest never went out at all — four pills would spin on the tap');
+  assert.equal(app.sent().length, 8, 'the rest never went out at all — four pills would spin on the tap');
 });
 
 await check('landing on a deferred view fetches its script at once', () => {
@@ -220,13 +220,13 @@ await check('landing on a deferred view fetches its script at once', () => {
 
 await check('landing on Advocates fetches all four of its sections, in order', () => {
   const app = boot({ showing: 'advocates' });
-  assert.deepEqual(app.sent(), ['/montabs.js', '/monitor.js', '/prs.js', '/mirror.js']);
+  assert.deepEqual(app.sent(), ['/montabs.js', '/monitor.js', '/mergeboard.js', '/prs.js', '/mirror.js']);
 });
 
 await check('the order is preserved, and every element says so', () => {
   const app = boot();
   app.paint();
-  assert.deepEqual(app.sent(), ['/history.js', '/releases.js', '/config.js', '/montabs.js', '/monitor.js', '/prs.js', '/mirror.js']);
+  assert.deepEqual(app.sent(), ['/history.js', '/releases.js', '/config.js', '/montabs.js', '/monitor.js', '/mergeboard.js', '/prs.js', '/mirror.js']);
   // The one line that makes the order above mean anything. A dynamically-inserted script
   // is async by default, so monitor.js — 163 kB against montabs.js's 22 kB — would run
   // whenever it arrived and the three chips would find no row to register on.
@@ -243,7 +243,7 @@ await check('a script is never injected twice', () => {
   app.paint();
   const sent = app.sent();
   assert.equal(new Set(sent).size, sent.length, `something was injected twice: ${sent.join(', ')}`);
-  assert.equal(sent.length, 7);
+  assert.equal(sent.length, 8);
 });
 
 /* ============================================================== the safety net */
@@ -253,7 +253,7 @@ console.log('\nthe thumb that beats it');
 await check('a pane shown before its script arrived fetches it on the spot', () => {
   const app = boot({ showing: 'epics' });
   app.show('advocates');
-  assert.deepEqual(app.sent(), ['/montabs.js', '/monitor.js', '/prs.js', '/mirror.js'], 'the pane would have been shown empty');
+  assert.deepEqual(app.sent(), ['/montabs.js', '/monitor.js', '/mergeboard.js', '/prs.js', '/mirror.js'], 'the pane would have been shown empty');
 });
 
 await check('and a view with nothing deferred is untouched by it', () => {
@@ -268,7 +268,7 @@ await check('the loader says what it has sent, in the order it sent it', () => {
   app.show('config');
   app.paint();
   assert.equal(app.api().sent()[0], '/config.js', 'the view that was asked for is not first');
-  assert.equal(app.api().sent().length, 7);
+  assert.equal(app.api().sent().length, 8);
 });
 
 /* ================================================ the handshake with the stager */
@@ -316,7 +316,7 @@ await check('Advocates is awaited until the last of its four has settled', () =>
   const app = boot({ showing: 'advocates' });
   let released = 0;
   app.api().whenSettled('advocates', () => { released += 1; });
-  for (const src of ['/montabs.js', '/monitor.js', '/prs.js']) {
+  for (const src of ['/montabs.js', '/monitor.js', '/mergeboard.js', '/prs.js']) {
     app.arrive(src);
     assert.equal(released, 0, `the wait ended while something after ${src} was still coming`);
   }

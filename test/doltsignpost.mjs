@@ -7,7 +7,7 @@
  *
  * `bd dolt push` force-pushes an orphan `__dolt_remote_info__` branch to the sync remote
  * unless DOLT_REMOTE_INFO_BRANCH is set **and empty**. For the architecture workspace that
- * remote is a shared team repo, and every push put a "Compare & pull request" banner
+ * remote is Northwind/architecture, and every push put a "Compare & pull request" banner
  * in front of the whole team, about ten times a day. Interactive shells carry the empty
  * value from ~/.zshenv; the daemon runs under launchd and spawns through execFile, so it
  * only ever has what `Bd.run` builds. Nothing pinned that environment before this.

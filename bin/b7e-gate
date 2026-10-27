@@ -8,6 +8,7 @@
  *     b7e-gate --skip test/browse.mjs       # known-flaky-under-concurrency, say so and drop it
  *     b7e-gate --jobs 4                     # how many suites at once (default: from the load)
  *     b7e-gate --timeout 120                # per-suite seconds, overriding the slow-suite default
+ *     b7e-gate --no-retry                   # a failed suite is red at once, with no solo retry (bc-iaju1.2)
  *     b7e-gate --json                       # one object per suite, streamed, for a caller to parse
  *     b7e-gate --log /path/to/gate.log      # also write every line here (default: a tmp file, named at the end)
  *     b7e-gate --run-id <id>                # file the run record under this id, rather than minting one
@@ -86,6 +87,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import {
   REPO_ROOT,
   SLOW_TIMEOUT_MS,
@@ -156,6 +158,7 @@ if (OWN_ARGV.includes('--help') || OWN_ARGV.includes('-h')) {
       'b7e-gate --skip test/browse.mjs       # known-flaky-under-concurrency, say so and drop it',
       'b7e-gate --jobs 4                     # how many suites at once (default: from the load)',
       'b7e-gate --timeout 120                # per-suite seconds, overriding the slow-suite default',
+      'b7e-gate --no-retry                   # a failed suite is red at once, with no solo retry (bc-iaju1.2)',
       'b7e-gate --json                       # one object per suite, streamed, for a caller to parse',
       'b7e-gate --log /path/to/gate.log      # also write every line here (default: a tmp file, named at the end)',
       'b7e-gate --list                       # what would run, without running it',
@@ -318,6 +321,27 @@ if (has('--list')) {
 }
 
 /**
+ * A tree that ships `scripts/preflight.mjs` gets to make itself runnable first — bc-th3i.
+ *
+ * Its own script rather than anything this gate knows: what a checkout needs borrowed
+ * (beadcause's is `node_modules` and `public/vendor`) is that checkout's business, and a
+ * tree without one is not asked. Output goes to stderr so `--json` stays parseable, and a
+ * non-zero exit is a refusal before the lock or a slot — the script has already said which
+ * prerequisite is missing and the command that fixes it, which is the whole point: the
+ * alternative is a suite three files deep failing a content assertion over it.
+ */
+if (!PY_ARM && fs.existsSync(path.join(ROOT, 'scripts', 'preflight.mjs'))) {
+  const pre = spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'preflight.mjs')], {
+    cwd: ROOT,
+    stdio: ['ignore', 2, 2],
+  });
+  if (pre.status !== 0) {
+    console.error(red('this checkout cannot run its own suites yet — refusing before any suite starts'));
+    await leave(2);
+  }
+}
+
+/**
  * Who started this, resolved before anything can make it wait (bc-xl7n.165). A gate
  * started from a Claude Code session answers to it, and if that session is gone while this
  * one is still queued nobody will read what it produces — see `ownerGone` in `lib/gate.js`.
@@ -437,7 +461,13 @@ const onResult = (r, done, total) => {
   if (record) {
     const tail =
       r.status !== 'ok' ? String(r.out || '').trim().split('\n').slice(-15).join('\n') : undefined;
-    appendResult(record.file, { suite: r.suite, status: r.status === 'ok' ? 'ok' : 'fail', elapsed: r.ms / 1000, tail });
+    appendResult(record.file, {
+      suite: r.suite,
+      status: r.status === 'ok' ? 'ok' : 'fail',
+      elapsed: r.ms / 1000,
+      tail,
+      ...(r.retry ? { retry: true } : {}),
+    });
   }
   if (JSON_MODE) {
     const line = toJsonRecord(r, done, total);
@@ -447,8 +477,9 @@ const onResult = (r, done, total) => {
   }
   const mark = r.status === 'ok' ? green('ok') : r.status === 'TIMEOUT' ? amber('TIMEOUT') : red('FAIL');
   const secs = (r.ms / 1000).toFixed(1);
-  console.log(`${dim(`[${done}/${total}]`)} ${mark} ${r.suite} ${dim(`${secs}s`)}`);
-  logLine(`[${done}/${total}] ${plainStatus(r)} ${r.suite} ${secs}s`);
+  const at = r.retry ? '[retry]' : `[${done}/${total}]`;
+  console.log(`${dim(at)} ${mark} ${r.suite} ${dim(`${secs}s`)}`);
+  logLine(`${at} ${plainStatus(r)} ${r.suite} ${secs}s`);
   if (r.status !== 'ok') {
     const tail = String(r.out || '').trim().split('\n').slice(-15);
     for (const line of tail) {
@@ -532,6 +563,7 @@ try {
       timeoutOverrideMs: TIMEOUT_MS,
       onResult,
       signalAbort: onExit,
+      retry: !has('--no-retry'),
     });
   }
 } finally {
@@ -561,7 +593,15 @@ if (!result.total) {
 // line, which is how main went red under load 40 on 2026-10-01.
 const line = summaryLine(result);
 if (JSON_MODE) {
-  console.log(JSON.stringify({ summary: true, total: result.total, passed: result.passed, failed: result.failed.map((f) => f.suite) }));
+  console.log(
+    JSON.stringify({
+      summary: true,
+      total: result.total,
+      passed: result.passed,
+      failed: result.failed.map((f) => f.suite),
+      flaky: result.flaky || [],
+    })
+  );
 } else {
   console.log('');
   console.log(result.ok ? green(line) : red(line));

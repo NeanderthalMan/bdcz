@@ -81,11 +81,9 @@
    */
   const inShell = Boolean(panes && typeof panes.has === 'function' && panes.has(VIEW));
 
-  const out = document.getElementById('prs');
-  /* The brand dot. Left alone in the shell: it is the whole document's there, driven off
-     public/report.js's count of what is in flight, and a second writer toggling `busy` on
-     it would clear it under a fetch of the inbox's that is still out. */
-  const pulse = inShell ? null : document.getElementById('pulse');
+  /* `#prs-open` since bc-gjlix, the first of the PRs chip's two subtabs (public/mergeboard.js).
+     `#prs` is the fallback for a service worker still holding a monitor.html from before them. */
+  const out = document.getElementById('prs-open') || document.getElementById('prs');
   const observing = document.getElementById('observing');
 
   /**
@@ -97,7 +95,10 @@
    * every merge, all day, behind Home. That is the most expensive of the three to get
    * wrong, which is why the row answers it rather than each section guessing.
    */
-  const upNow = () => window.beadcause?.monTabs?.up?.(TAB) ?? !out.hidden;
+  const upNow = () => (window.beadcause?.monTabs?.up?.(TAB) ?? !out.hidden) && (window.beadcause?.prsTabs?.up?.(SUB) ?? true);
+  /** The subtab this board is under (bc-gjlix). The merge queue is the other one, and a
+   *  board behind it is not being looked at. */
+  const SUB = 'open';
 
   /* There was a minute-long `setInterval` here that re-asked for the whole board, a `gh`
      call per repo, for as long as the page was open. It is gone: the board follows the
@@ -787,7 +788,6 @@
   });
 
   async function load({ refresh = false } = {}) {
-    pulse?.classList.add('busy');
     try {
       const res = await fetch(`/api/prs${refresh ? '?refresh=1' : ''}`, { headers: { 'x-beadcause-token': token } });
       if (!res.ok) {
@@ -822,7 +822,6 @@
       state.error = err.message;
       render();
     } finally {
-      pulse?.classList.remove('busy');
       // Whether or not that worked, and deliberately: a board opened during a deploy —
       // which is exactly when this page is opened — is looking at a daemon that is
       // restarting, and with the minute timer gone the stream is the only thing that
@@ -1010,19 +1009,24 @@
        monitor.html from before the chip row was a file; see the same guard in monitor.js. */
     const tabs = window.beadcause?.monTabs;
     let mounted = false;
+    /* Either switch can bring the board on screen since bc-gjlix: the PRs chip, or the
+       Open PRs subtab under it. Both ask the one question, `upNow`. */
+    const arrive = () => {
+      // Away: nothing to stand down beyond the stream, which does it itself through
+      // `upNow` — see `ready` in `follow`, and `wake`'s first line in the shell. The
+      // empty string is one of the answers here now: it is the pane itself going away,
+      // which this section can no more tell from a chip swap than it needs to.
+      if (!upNow()) return;
+      if (!mounted) {
+        mounted = true;
+        return mount();
+      }
+      load();
+    };
     if (!tabs) mount();
-    else
-      tabs.onChange((which) => {
-        // Away: nothing to stand down beyond the stream, which does it itself through
-        // `upNow` — see `ready` in `follow`, and `wake`'s first line in the shell. The
-        // empty string is one of the answers here now: it is the pane itself going away,
-        // which this section can no more tell from a chip swap than it needs to.
-        if (which !== TAB) return;
-        if (!mounted) {
-          mounted = true;
-          return mount();
-        }
-        load();
-      });
+    else {
+      tabs.onChange(arrive);
+      window.beadcause?.prsTabs?.onChange?.(arrive);
+    }
   }
 })();

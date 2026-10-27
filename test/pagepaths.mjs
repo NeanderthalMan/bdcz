@@ -136,6 +136,10 @@ const PAGES = [
   // waiting to become one. No pill claims either, which is the recorded decision in
   // public/viewbar.js for a page you read when you are arguing about the system.
   { what: 'the skills view', marker: '/skills.js', paths: ['/skills', '/candidates', '/skills.html'] },
+  // DemoMode (bc-sj8k.2): the pull requests that can be tried on green. `/demomode` too,
+  // the epic's own word. No pill claims either — it is reached from where a candidate is
+  // announced and from the router's `/__demo/blue` — and it draws the row anyway.
+  { what: 'DemoMode', marker: '/demo.js', paths: ['/demo', '/demomode', '/demo.html'] },
   // The foundations register — the standing document behind the app's own design
   // decisions. It carries no pill and loads no /viewbar.js at all, unlike the two
   // entries below it: the `‹` anchor at the top of the page (id="back") is its only way

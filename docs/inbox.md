@@ -348,6 +348,46 @@ reporting a filter that is not filtering is noise around the one that is. `inSub
 in `test/inboxkinds.mjs` — getting this backwards is an All Beads pill that shows nothing
 at all, which reads as a broken sweep rather than as a filter.
 
+**And `Questions` has a third, which is PR status' shape applied to the pill that needed
+it most** (bc-iaju1.5). That pill carries two jobs at one address: a question somebody
+asked you, and a bead nobody may work until you endorse it. Measured on 2026-09-19 that
+was **58 questions with a median age of 26 days sharing a screen with 90 held beads with
+a median age of 36** — 89 of the 90 dating from August — so the queue that needed
+answering was never on screen without the queue that needed a different page entirely.
+
+Selecting `Questions` now reveals **Asked | Held**, and it has a `fallback` like PR
+status rather than none like bead status, for the same reason: the two are not two states
+of one thing. A held bead is decided on [/endorse](pull-requests.md#the-endorsement-queue--a-group-tap-or-a-row-at-a-time),
+where the group-select and *Endorse all* already live; the inbox is where a question gets
+answered. So with
+nothing chosen the pill reads `Questions: asked`, and the held half is one chip away.
+
+Three things follow from that, and all three are deliberate:
+
+- **The default bites on Home too.** `matches` applies `inSub` whatever is selected, so
+  the 90 come off an unnarrowed Home exactly as thirty merged pull requests do — and
+  `subSaid` confesses it there in the same breath it confesses `unmerged`. A default that
+  only applied under its own pill would be worse than none, because a pill's count is
+  taken *through* `inSub`: the badge would promise 148 over a screen that opens 58.
+- **It is the one sub-filter that is single-choice.** The other two are ladders where two
+  rungs at once is a real question; this one has two chips and picking both is the state
+  the split exists to get out of. `single` on the descriptor is what makes `pick` replace
+  rather than toggle — `multi` in `public/filtermenu.js` only decides whether the panel
+  closes on the tap.
+- **Held opens with a count and one way out**: a full-width row reading *90 held — review
+  in bulk*, linking to /endorse. The inbox deliberately does **not** rebuild bulk
+  endorsement; see [more than one at a time](answering.md#more-than-one-at-a-time) for the
+  same argument on the other half, where the bulk act does live here.
+
+**`Questions` also carries the one control on the row that is not a filter**: an `Order`
+group of `Most urgent | Oldest first`. The default is the order the tracker sent —
+priority, then age — which is right on a queue you are keeping up with and wrong on one
+you are not: priority-first means the oldest P2 is never on screen at all, because there
+is always a P1 above it. It is a page group like the bead search, `public/app.js` owns it,
+and it is remembered in `localStorage['beadcause.qsort']`. Its pill stays a bare `Order`
+while the list is in the default order, because a control announcing a filter that is not
+filtering is the noise `Bead status` refuses to make.
+
 A closed pull request gets **no card at all**: it is not on the way anywhere, and a rung
 the sub-filter deliberately does not offer must not be able to reach the list. The board
 still shows them.
@@ -400,7 +440,7 @@ the filter pills that view pill can use, and nothing else in the file decides it
 | Pill | What it can be narrowed by | Why not the rest |
 |---|---|---|
 | **Home** | the bead search | Home holds every kind, so both sub-filters *could* narrow it — and offering two second axes over a list that is mostly neither is two more controls for a view you have not picked. What they still do here is confessed as a note instead. |
-| **Questions** | the bead search | A question is not a pull request and it is not one of the live beads nobody is asking you about. |
+| **Questions** | the bead search, Asked/Held, Order | Its own split and its own order switch since bc-iaju1.5. Not the other two second axes: a question is not a pull request and it is not one of the live beads nobody is asking you about. |
 | **PRs** | the bead search, PR status | The one pill with both: a pull request follows its beads, so the search narrows it too. |
 | **Chats** | *nothing* | A chat is in no tracker. It is under no bead, and it has no rung. |
 | **All Beads** | the bead search, bead status | — |
@@ -1957,11 +1997,13 @@ to visibly cross the dot. Every cached view here answers in single figures,
 and a ring that flashed on for one frame of every tap would be noise the eye reads as a
 glitch rather than as work.
 
-**`.dot.busy` still works and its ten callers were not touched.** The stylesheet draws
-the orbit for that class as well as for the `loading` the shared watch sets, because two of
-those callers mean something a request count cannot see: the console and the agents page
-light the dot while an *agent* is thinking, which is not a fetch. Two reasons for one
-picture, and they are two classes rather than one so that neither can switch the other off.
+**`.dot.busy` still works, but only two pages still toggle it.** The stylesheet draws
+the orbit for that class as well as for the `loading` the shared watch sets. `bc-ka5y.18`
+(landed by `bc-ka5y.51`) removed every caller that meant nothing but "a fetch is out" —
+already covered by `loading`, on pages that all load the watch — and left the two that
+mean something a request count cannot see: the console and the agents page light the dot
+while an *agent* is thinking, which is not a fetch. Two reasons for one picture, and they
+are two classes rather than one so that neither can switch the other off.
 
 Under `prefers-reduced-motion` **the ring is drawn and does not turn**, which is a
 departure from what the rest of the app does under that preference. An animation that
@@ -2210,6 +2252,84 @@ label drawn there is one you can delete and watch come back. `isProtectedLabel` 
 nothing under `public/` imports from `lib/`. `human` is hidden for a neighbouring reason
 — `normalizeEdits` filters it out of the *incoming* set, so the card can never send it —
 and what that costs is `bc-ka5y.46`. `complexity:` is deliberately still offered.
+
+#### Move — where a bead sits, and what happens to what is under it
+
+The sheet has reparented a bead since bc-rfnr.7, and only ever one kind of bead. The
+adopt row is a *refusal being answered* — nothing has decided this one, so nothing will
+work it, and here is the fix — so `adoptRowHtml` draws nothing unless `noRoot`. That is
+the right row for that bead and it is not a way to move any other one: a bead under the
+wrong epic, filed in a hurry or adopted by an `Adopts:` line that meant a sibling, could
+be moved from a terminal and from nowhere else.
+
+**Move** is the second item behind the ⋮, and it is that same reparent offered
+unconditionally — every bead, closed ones included. Editing a closed bead rewrites the
+record of what was done, which is why `/api/bead/edit` refuses one; moving it only says
+where that record is filed, and a finished bead under a retired epic is exactly what
+somebody tidying the tracker from a phone picks up.
+
+The card is the edit card's shape a second time and adds no CSS the app did not already
+have. Two controls, one of which is usually not drawn:
+
+- **Where it goes** — every open root in the workspace (`/api/roots`, so an epic at any
+  priority since bc-htoy), plus **no parent — top level**, plus, when the bead's current
+  parent is an ordinary task and therefore not in that list, that parent labelled *where
+  it is now*. **It opens on where the bead already is**, so the first thing Save can do is
+  nothing: this control is reached by tapping ⋮ on a bead you are reading, and a picker
+  defaulting to whichever root sorted first would put one thumb-slip between reading a
+  bead and reparenting it.
+- **What happens to its children**, drawn only when it has some, because a question with
+  one possible answer is chrome. *Move them with it* — the epic and the work under it are
+  one thing — or *leave them*, which reparents each direct child to the departing bead's
+  **current** parent before the bead itself moves. Both are ordinary and neither is
+  guessable: sometimes `bc-x` was misfiled and the six beads under it were not, and
+  dragging six of somebody else's beads across the tracker to fix one is a bigger wrong
+  than the one being fixed.
+
+**When there is no grandparent, one is minted.** A bead at top level has nothing to leave
+its children with, and the obvious fallback — drop them at top level too — is the one
+outcome this control must not produce. `hasRootAbove` is a *gate*: a bead with nothing
+decided above it is filtered out of every advocate queue and refused at the launcher's
+door (`lib/underroot.js`, the teeth). So "leave them where they are" would
+silently convert working children into unworkable ones, as a side effect of a move that
+was about their parent — the app causing the exact hold the adopt row exists to clear,
+through the control built to clear it.
+
+So the move creates an **epic** in the departing bead's place and puts them under it. An
+epic rather than a task because only a root satisfies the gate, and a stand-in that does
+not satisfy it is furniture rather than a fix. Its title is prefilled from the bead that
+left (*What was under …*) and **editable in the card before it is written**, because the
+one thing neither the server nor the phone can know is what the group of beads is
+actually for; its description says what it stands in for and asks to be retitled or
+dissolved. It is born endorsed, unlabelled, and — being an epic — owned by whoever this
+Mac is, which keeps it off the unowned-root triage.
+
+Two refusals, and the **order between them is load-bearing**. A destination *under the
+bead being moved* is a loop, and `bd` will write one happily: `ancestorsOf` walks the ring
+with a seen-set and simply stops, so every bead inside it has no root above it and quietly
+leaves every queue. It has to be caught **first**, because the root check would *pass* for
+a descendant — it climbs through the bead being moved to the root above that. Then the
+one adopt already had: a destination with nothing decided above it, refused in adopt's own
+sentence, since moving a bead somewhere it cannot be worked is not a move anybody means.
+
+**Detaching is not a failure.** An empty destination is *top level*, which is how a move
+into the wrong epic is undone, and the sheet redraws the `nothing decided above this` row
+afterwards — that row appearing is the point rather than the problem. So *no path through
+this control leaves a bead parentless* is a statement about the **children**: nothing that
+was decided by the bead you moved comes out of this undecided. The bead you moved may end
+at top level, because you picked that.
+
+**The adopt row is untouched, and this does not duplicate it.** They are not the same
+control and must not read as one: the row is a refusal being answered, drawn on the sheet
+of the bead the refusal applies to and nowhere else, and Move is a menu item that draws
+nothing on the sheet at all until it is tapped. An orphan therefore has both, one of them
+saying *why* it is stuck and offering the one-tap fix, and the other being the general way
+to move any bead anywhere.
+
+**The picker is still `/api/roots`.** Moving a bead under an ordinary *task* it is not
+already under is the one destination this card cannot express — it would need either a
+widened list or the inbox's bead search dropped into the sheet, and neither is this bead.
+The route itself has no such limit: `POST /api/bead/reparent` takes any id.
 
 #### How it ended — the close reason, and when
 

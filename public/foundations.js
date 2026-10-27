@@ -591,6 +591,43 @@
   }
 
   /**
+   * The notes store's health against the pragma's targets (bc-u1ltu.6): hit rate, share of
+   * notes read in the window, bytes a session start loads, and notes retired. A number with
+   * no data behind it is drawn as "not measured" rather than as a zero, because a zero reads
+   * as a result.
+   */
+  const pct = (x) => `${Math.round(x * 100)}%`;
+  const kb = (n) => (n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : `${Math.round(n / 1024)} KB`);
+  function healthCard(h) {
+    if (!h || !h.live) return '';
+    const met = (x, target) => (x === null ? 'pill' : x >= target ? 'pill st-in_progress' : 'pill p0');
+    const hit = h.hitRate === null ? 'no reads' : `${pct(h.hitRate)} hit`;
+    const share = h.readShare === null ? 'nothing to read' : `${pct(h.readShare)} read`;
+    const loads =
+      h.indexBytes === null
+        ? `A session start still loads the whole store (${kb(h.storeBytes)}): it has not been converted to one blob per note yet.`
+        : `A session start loads the ${kb(h.indexBytes)} index and the notes it picks, not the whole ${kb(h.storeBytes)} store.`;
+    const retired =
+      `In the last ${h.days} days ${plural(h.archived, 'note was', 'notes were')} archived and ${plural(h.superseded, 'was', 'were')} superseded. ` +
+      (h.promoted === null ? 'Promotions to the README, a test or a lint are not measured until the curator files them.' : `${plural(h.promoted, 'note was', 'notes were')} promoted.`);
+    return `
+      <article class="card">
+        <div class="card-head">
+          <div class="meta">
+            <span class="pill id">health · ${esc(String(h.days))} days</span>
+            <span class="${met(h.hitRate, h.targets.hitRate)}">${esc(hit)} · target ${esc(pct(h.targets.hitRate))}</span>
+            <span class="${met(h.readShare, h.targets.readShare)}">${esc(share)} · target ${esc(pct(h.targets.readShare))}</span>
+          </div>
+          <p class="subtitle">${esc(
+            `${h.reads ? `${plural(h.reads, 'read')} in the last ${h.days} days. ` : ''}` +
+              `${h.readLive} of ${plural(h.live, 'live note')} read by name. ${loads}`
+          )}</p>
+          <p class="f-hint">${esc(retired)}</p>
+        </div>
+      </article>`;
+  }
+
+  /**
    * Tier 3, per arm, and never pooled.
    *
    * A total of one run reads as a live experiment; one-versus-zero is the shape that
@@ -669,6 +706,7 @@
         m.notes,
         `On ${m.notes.ref} in ${m.repo || 'this repo'} — knowledge about one codebase, worth nothing in another.`
       )}
+      ${healthCard(m.notes.health)}
       ${storeCard(
         'Memory that follows it everywhere',
         'tier 2',

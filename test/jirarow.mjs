@@ -253,7 +253,10 @@ await check('the monitor is not told a ticket is a question waiting on you', () 
 });
 
 await check('and it is not sorted among the beads either', () => {
-  assert.match(APP, /const beads = visible\.filter\(\(q\) => !q\.pr && !q\.session && !q\.jira\)/);
+  // bc-iaju1.5 wraps the filter in `byChosenOrder(…)` for Questions' oldest-first switch.
+  // The sort only ever sees what this filter let through, so a ticket still cannot be
+  // ordered among the beads — which is what this pins, not the call's exact shape.
+  assert.match(APP, /const beads = (?:byChosenOrder\()?visible\.filter\(\(q\) => !q\.pr && !q\.session && !q\.jira\)/);
   assert.match(APP, /const tickets = visible\s*\n?\s*\.filter\(\(q\) => q\.jira\)/, 'no section of its own');
 });
 

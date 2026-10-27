@@ -513,6 +513,55 @@ check('a suite that imports the spec enumerator covers a top-level doc', () => {
   assert.deepEqual(results[0].matches[0].reasons, ['reads the docs']);
 });
 
+// bc-baual: reaching the enumerator through a long import chain is running code above it,
+// not reading the docs.
+const chain = (n) => {
+  const files = {};
+  for (let i = 1; i < n; i++) files[`lib/hop${i}.js`] = `import '${i + 1 === n ? './docset.js' : `./hop${i + 1}.js`}';\n`;
+  return files;
+};
+
+check('a suite two imports from the enumerator still reads the docs', () => {
+  const dir = tree('prose-two-hops', {
+    ...enumerator,
+    ...chain(2),
+    'docs/guide.md': '# Guide\n',
+    'test/wrapper.mjs': "import '../lib/hop1.js';\n",
+  });
+  assert.equal(affected.SPEC_READER_HOPS, 2);
+  assert.deepEqual(affected.findAffected(dir, ['docs/guide.md']).suites, ['test/wrapper.mjs']);
+});
+
+check('a suite three imports from the enumerator does not read the docs', () => {
+  const dir = tree('prose-three-hops', {
+    ...enumerator,
+    ...chain(3),
+    'docs/guide.md': '# Guide\n',
+    'test/links.mjs': readsSpec,
+    'test/daemon.mjs': "import '../lib/hop1.js';\n",
+  });
+  assert.deepEqual(affected.findAffected(dir, ['docs/guide.md']).suites, ['test/links.mjs']);
+});
+
+check('the cap is on reading the docs only — a lib file deep under a suite is still imported by it', () => {
+  const dir = tree('prose-cap-imports', { ...enumerator, ...chain(3), 'test/daemon.mjs': "import '../lib/hop1.js';\n" });
+  assert.deepEqual(affected.findAffected(dir, ['lib/docset.js']).suites, ['test/daemon.mjs']);
+});
+
+check('hopsTo counts the shortest route, and Infinity when there is none', () => {
+  const forward = new Map([
+    ['a', new Set(['b', 'd'])],
+    ['b', new Set(['c'])],
+    ['c', new Set(['d'])],
+    ['d', new Set()],
+  ]);
+  const cache = new Map();
+  assert.equal(affected.hopsTo(forward, 'a', 'a', cache), 0);
+  assert.equal(affected.hopsTo(forward, 'a', 'c', cache), 2);
+  assert.equal(affected.hopsTo(forward, 'a', 'd', cache), 1);
+  assert.equal(affected.hopsTo(forward, 'd', 'a', cache), Infinity);
+});
+
 check('README.md is in the specification too', () => {
   const dir = tree('prose-readme', { ...enumerator, 'README.md': '# Readme\n', 'test/links.mjs': readsSpec });
   assert.deepEqual(affected.findAffected(dir, ['README.md']).suites, ['test/links.mjs']);

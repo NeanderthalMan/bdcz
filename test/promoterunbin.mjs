@@ -136,11 +136,11 @@ const cli = (args) =>
 
 /* -------------------------------------------------------------------------- usage */
 
-await check('refuses with no arguments — usage, and it says the driver is not bc-y8k4.3', async () => {
+await check('refuses with no arguments — usage, and it names the drivers there are', async () => {
   const r = await cli([]);
   assert.equal(r.code, 1);
   assert.match(r.stderr, /usage: beadcause-promoterun -w <workspace> -b <promotion bead> --driver/);
-  assert.match(r.stderr, /bc-y8k4\.3.*is still open/s, 'and says why there is no default driver to fall back to');
+  assert.match(r.stderr, /--driver pipeline.*\.beadcause\/pipeline\.json/s, 'and names the pipeline hook as the other driver');
 });
 
 await check('refuses an unknown workspace rather than guessing one', async () => {
@@ -219,6 +219,57 @@ await check('the non-JSON path prints the same record `carry` wrote to the bead'
   assert.equal(r.code, 0, `stderr: ${r.stderr}`);
   assert.match(r.stdout, /Promotion run/);
   assert.match(r.stdout, new RegExp(`Production is verified, so ${promo} is closed\\.`));
+});
+
+/* ------------------------------------------------------------- the pipeline hook */
+
+// bc-y8k4.3: `--driver pipeline` runs the program the workspace's bead repo declares in
+// `.beadcause/pipeline.json`. The fixture's bead repo is `tmp` — the directory its `.beads` is in.
+await check('`--driver pipeline` with no hook declared is refused before the bead is touched', async () => {
+  const { promo } = await fixture({ label: 'no hook declared yet' });
+  const r = await cli(['-w', 'promoterunbin', '-b', promo, '--driver', 'pipeline']);
+  assert.equal(r.code, 2);
+  assert.match(r.stderr, /no pipeline hook for promoterunbin — .*pipeline\.json` does not exist/);
+  const row = await bd.show(ws, promo);
+  assert.equal(row.status, 'open');
+});
+
+await check('`--driver pipeline` carries a real bead through a real hook process, and hands production the UAT image', async () => {
+  const seen = path.join(tmp, 'hook-calls.jsonl');
+  fs.mkdirSync(path.join(tmp, '.beadcause'), { recursive: true });
+  fs.writeFileSync(
+    path.join(tmp, 'hook.mjs'),
+    [
+      "import fs from 'node:fs';",
+      'const call = process.argv[2];',
+      "const input = JSON.parse(fs.readFileSync(0, 'utf8'));",
+      `fs.appendFileSync(${JSON.stringify(seen)}, JSON.stringify({ call, input, cwd: process.cwd() }) + '\\n');`,
+      "console.log('some log line a pipeline would print');",
+      "if (call === 'deployToUat') console.log(JSON.stringify({ state: 'passed', image: 'acr/demo:4242@sha256:feed' }));",
+      "else if (call === 'promoteToProd') console.log(JSON.stringify({ state: 'passed', image: input.image }));",
+      "else console.log(JSON.stringify({ state: 'passed', checks: [{ name: `i9n ${call}`, state: 'passed' }] }));",
+      '',
+    ].join('\n')
+  );
+  fs.writeFileSync(path.join(tmp, '.beadcause', 'pipeline.json'), JSON.stringify({ run: [process.execPath, 'hook.mjs'], timeoutMinutes: 1 }));
+
+  const { promo, work } = await fixture({ label: 'carried by a hook' });
+  const r = await cli(['-w', 'promoterunbin', '-b', promo, '--driver', 'pipeline', '--json']);
+  assert.equal(r.code, 0, `stderr: ${r.stderr}`);
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.closed, true);
+  assert.equal(out.legs[0].image, 'acr/demo:4242@sha256:feed');
+  assert.deepEqual(out.legs[0].steps.map((x) => x.state), ['passed', 'passed', 'passed', 'passed']);
+
+  const calls = fs.readFileSync(seen, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  assert.deepEqual(calls.map((c) => c.call), ['deployToUat', 'testInUat', 'promoteToProd', 'testInProd']);
+  assert.equal(fs.realpathSync(calls[0].cwd), fs.realpathSync(tmp), 'run in the bead repo');
+  assert.equal(calls[0].input.image, '', 'nothing is named before the first deploy');
+  assert.equal(calls[2].input.image, 'acr/demo:4242@sha256:feed', 'production is handed the image UAT tested');
+  assert.equal(calls[0].input.bead, promo);
+  assert.equal(calls[0].input.repo, 'demo-repo');
+  assert.deepEqual(calls[0].input.work, [work]);
+  assert.equal((await bd.show(ws, promo)).status, 'closed');
 });
 
 await cleanupTmp(tmp);

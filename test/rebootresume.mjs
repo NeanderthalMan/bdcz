@@ -268,9 +268,11 @@ test('a daemon that started long after the boot opens nothing, and records that 
       openWindow: async () => {
         opened += 1;
       },
-      // `os.uptime()` is read inside, so the clock is moved instead: "now" is an hour past
-      // the boot this process is running on.
-      now: now + BOOT_GRACE_MS + 60000,
+      // The uptime is given, not read. Moving `now` alone moved the boot with it, because
+      // the boot is `now - os.uptime()`, so this passed only on a machine that had been up
+      // past the grace: the studio Mac always, a fresh hosted runner never (bc-4fyq1, #288).
+      now,
+      uptimeSeconds: BOOT_GRACE_MS / 1000 + 60,
     }
   );
   assert.equal(out.ran, false);

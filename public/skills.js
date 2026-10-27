@@ -47,7 +47,6 @@
   })();
 
   const out = document.getElementById('skills');
-  const pulse = document.getElementById('pulse');
   const refreshBtn = document.getElementById('skills-refresh');
 
   const esc = (s) =>
@@ -299,7 +298,6 @@
   async function load(refresh) {
     if (state.loading) return;
     state.loading = true;
-    pulse?.classList.add('busy');
     try {
       const res = await fetch(`/api/skills${refresh ? '?refresh=1' : ''}`, {
         headers: { 'x-beadcause-token': token },
@@ -311,7 +309,6 @@
       return;
     } finally {
       state.loading = false;
-      pulse?.classList.remove('busy');
     }
     render();
   }

@@ -91,8 +91,8 @@ const ctx = vm.createContext({
   FROM_BD: { breaks: false },
   workspace: 'beadcause',
 });
-const { sheetHtml, relations, sessionRowHtml, docketRowHtml, sheetMenuHtml, sheetEditHtml, editFrom } = vm.runInContext(
-  `${region}\n;({ sheetHtml, relations, sessionRowHtml, docketRowHtml, sheetMenuHtml, sheetEditHtml, editFrom })`,
+const { sheetHtml, relations, sessionRowHtml, docketRowHtml, sheetMenuHtml, sheetEditHtml, sheetMoveHtml, editFrom } = vm.runInContext(
+  `${region}\n;({ sheetHtml, relations, sessionRowHtml, docketRowHtml, sheetMenuHtml, sheetEditHtml, sheetMoveHtml, editFrom })`,
   ctx,
   { filename: 'graph.js#sheet' }
 );
@@ -717,7 +717,9 @@ check('Escape takes the popover, and only the popover', () => {
 
 check('Edit swaps the body for the card, prefilled from the bead the sheet is showing', () => {
   assert.match(GRAPH, /\$\('sheet-body'\)\.innerHTML = sheetEditHtml\(sheetBead\)/, 'Edit does not draw the card');
-  assert.match(GRAPH, /closest\('\.sheet-head \[data-sheet-act="edit"\]'\)/, 'Edit is not caught above the body it replaces');
+  // The selector widened when Move joined it (bc-ka5y.44) — what has to stay true is that
+  // the head's items are caught above the body they replace, not that there is one of them.
+  assert.match(GRAPH, /closest\('\.sheet-head \[data-sheet-act\]'\)/, 'Edit is not caught above the body it replaces');
 });
 
 check('Save posts to the edit route, not to the verdict beside it', () => {
@@ -768,6 +770,211 @@ check('and the sheet forgets its bead when it closes', () => {
   // closed one is the difference between a live Edit and a greyed-out one.
   const close = GRAPH.slice(GRAPH.indexOf('function closeSheet()'));
   assert.match(close.slice(0, close.indexOf('\n  }')), /sheetBead = null;/, 'closeSheet keeps the last bead');
+});
+
+/* --------------------------------------------------------------- the move card */
+
+console.log('\nthe move card');
+
+/** Every open root in the workspace, as `/api/roots` sends them. */
+const ROOTS = [
+  { id: 'bc-l8jp', title: 'Rework the beadcause UX end to end', priority: 0, epic: true },
+  { id: 'bc-ka5y', title: 'The tracker holds structure', priority: 2, epic: true },
+];
+
+/** The bead being moved: a child of an ordinary task, with two of its own. */
+const mover = { id: 'bc-x9', title: 'Rewrite the picker', status: 'open' };
+const kids = [
+  { id: 'bc-x9.1', title: 'one', status: 'open' },
+  { id: 'bc-x9.2', title: 'two', status: 'closed' },
+];
+
+check('the menu offers Move, on an open bead and on a closed one', () => {
+  // The opposite call to Edit's, and it rests on the same distinction: editing a closed
+  // bead rewrites the record of what was done, and moving one only says where it is filed.
+  for (const status of ['open', 'in_progress', 'blocked', 'closed']) {
+    const menu = sheetMenuHtml({ ...plain, status });
+    assert.match(menu, /data-sheet-act="move"/, `${status} is not offered a move`);
+    assert.ok(!/data-sheet-act="move" disabled/.test(menu), `${status} is offered a dead Move`);
+  }
+});
+
+check('every open root is somewhere to move it to, and the bead itself is not', () => {
+  const card = sheetMoveHtml(mover, { roots: [...ROOTS, mover], children: [] });
+  assert.match(card, /<option value="bc-l8jp"/, 'the P0 is not offered');
+  assert.match(card, /<option value="bc-ka5y"/, 'the epic is not offered');
+  assert.ok(!/<option value="bc-x9"/.test(card), 'the bead is offered as its own parent');
+});
+
+check('and "no parent — top level" is one of them, first', () => {
+  const card = sheetMoveHtml(mover, { roots: ROOTS, children: [] });
+  assert.match(card, /<option value=""[^>]*>no parent — top level</, 'there is no way to detach it');
+  assert.ok(card.indexOf('top level') < card.indexOf('bc-l8jp'), 'detaching is buried under the roots');
+});
+
+check('it opens on where the bead already is, so the first thing Save can do is nothing', () => {
+  // This control is reached by tapping ⋮ on a bead you are reading. A picker defaulting to
+  // whichever root sorted first puts one thumb-slip between reading a bead and moving it.
+  const card = sheetMoveHtml(mover, { roots: ROOTS, children: [], parent: { id: 'bc-ka5y', title: 'x' } });
+  assert.match(card, /<option value="bc-ka5y" selected>/, 'the card does not open on where the bead is');
+  assert.ok(!/<option value="" selected>/.test(card), 'a bead with a parent opens on top level');
+});
+
+check('a bead with no parent opens on top level', () => {
+  const card = sheetMoveHtml(mover, { roots: ROOTS, children: [], parent: null });
+  assert.match(card, /<option value="" selected>/, 'an orphan does not open on where it is');
+});
+
+check('a parent that is not a root is still an option, labelled as where it is', () => {
+  // `/api/roots` lists roots only, so a bead filed under an ordinary task has a current
+  // parent that is not in the list — and a form that cannot express "leave it there"
+  // cannot be opened without risking a move.
+  const card = sheetMoveHtml(mover, { roots: ROOTS, children: [], parent: { id: 'bc-plain', title: 'An ordinary task' } });
+  assert.match(card, /<option value="bc-plain" selected>bc-plain \(where it is now\) — An ordinary task</, 'the current parent is unreachable');
+  // Before the title and not after it: a collapsed `<select>` at 360px shows about 36
+  // characters, measured with `b7e-eyeball`, so a note in the 50th is a note nobody sees.
+  const label = card.match(/<option value="bc-plain" selected>([^<]*)</)[1];
+  assert.ok(label.indexOf('where it is now') < 36, 'the warning is off the end of a collapsed select');
+});
+
+check('and a parent whose row never arrived is still an option, without a dangling dash', () => {
+  // `relations` falls back to `{id: b.parent}` when the edges did not come with the
+  // payload, so the title is a thing that may not be there rather than a short one.
+  const card = sheetMoveHtml(mover, { roots: ROOTS, children: [], parent: { id: 'bc-plain' } });
+  assert.match(card, /<option value="bc-plain" selected>bc-plain \(where it is now\)</, 'a titleless parent is unreachable');
+  assert.ok(!/\(where it is now\) — </.test(card), 'the option ends in a dash with nothing after it');
+});
+
+check('a bead with no children is not asked what happens to them', () => {
+  const card = sheetMoveHtml(mover, { roots: ROOTS, children: [] });
+  assert.ok(!/data-move="children"/.test(card), 'a leaf is asked a question with one answer');
+  assert.ok(!/data-move="standin"/.test(card), 'a leaf is offered an epic to leave nothing under');
+});
+
+check('a bead with children is, and leaving them names the grandparent', () => {
+  const card = sheetMoveHtml(mover, { roots: ROOTS, children: kids, parent: { id: 'bc-ka5y', title: 'x' } });
+  assert.match(card, /Its 2 children/, 'the question does not say how many');
+  assert.match(card, /<option value="with" selected>move with it</, 'the subtree does not travel by default');
+  assert.match(card, /<option value="leave"[^>]*>leave them under bc-ka5y</, 'leaving them does not say where they land');
+  assert.ok(!/data-move="standin"/.test(card), 'an epic is offered where a grandparent already exists');
+});
+
+check('one child is one child, not "1 children"', () => {
+  assert.match(sheetMoveHtml(mover, { roots: ROOTS, children: [kids[0]] }), /Its one child/, 'the count is not written as English');
+});
+
+check('with no grandparent, leaving them mints an epic — named, editable, and out of the way', () => {
+  const card = sheetMoveHtml(mover, { roots: ROOTS, children: kids, parent: null });
+  assert.match(card, /<option value="leave"[^>]*>leave them under a new epic</, 'the second option does not say what it makes');
+  assert.match(card, /id="sheet-move-standin" style="display:none"/, 'the title box is drawn before it is chosen');
+  assert.match(card, /data-move="standin" value="What was under Rewrite the picker"/, 'the epic is not prefilled from the departing bead');
+  // `.eq-lab` is `display: flex`, which outranks the UA's `[hidden]` rule — so a `hidden`
+  // attribute on this element draws it anyway. That is the whole reason for the inline style.
+  assert.ok(!/id="sheet-move-standin" hidden/.test(card), 'the box is hidden with an attribute a flex rule beats');
+});
+
+check('and the prefill is trimmed rather than pasted whole', () => {
+  const long = 'x'.repeat(200);
+  const card = sheetMoveHtml({ id: 'bc-x9', title: long }, { roots: ROOTS, children: kids, parent: null });
+  const value = card.match(/data-move="standin" value="([^"]*)"/)[1];
+  assert.ok(value.length < 120, `a 200-character title reached the box whole (${value.length})`);
+  assert.match(value, /…$/, 'the truncation does not say it happened');
+});
+
+check('a title with markup in it reaches the box escaped, not as markup', () => {
+  const card = sheetMoveHtml({ id: 'bc-x9', title: '"><img src=x onerror="boom">' }, { roots: ROOTS, children: kids, parent: null });
+  assert.ok(!/<img/.test(card), 'the title escaped its attribute');
+  assert.match(card, /&quot;&gt;&lt;img/, 'the title was not escaped into the value');
+});
+
+check('it carries Move, Cancel, a place for a refusal, and the bead id', () => {
+  const card = sheetMoveHtml(mover, { roots: ROOTS, children: [] });
+  assert.match(card, /id="sheet-move" data-id="bc-x9"/, 'the card does not say which bead it is');
+  assert.match(card, /data-sheet-act="move-save"/, 'there is nothing to press');
+  assert.match(card, /data-sheet-act="cancel"/, 'there is no way back to the bead');
+  assert.match(card, /id="sheet-move-err" hidden/, 'a refusal has nowhere to land');
+  // Cancel is the edit card's, by the same name, so the one listener puts both back.
+  assert.match(GRAPH, /btn\.dataset\.sheetAct === 'cancel'/, 'Cancel is not wired for either card');
+});
+
+check('the adopt row on an orphan is untouched, and Move does not draw a second one', () => {
+  // The two are not the same control and must not read as one: the row is a *refusal
+  // being answered*, drawn only where the refusal applies, and Move is a menu item that
+  // draws nothing on the sheet at all until it is tapped.
+  const orphan = sheetHtml({ id: 'bc-x9', title: 'x', status: 'open', noRoot: true });
+  assert.equal(orphan.match(/class="adopt-row"/g)?.length, 1, 'the adopt row is not drawn exactly once');
+  assert.ok(!/id="sheet-move"/.test(orphan), 'the sheet draws the move card before anybody asked for it');
+  const settled = sheetHtml({ id: 'bc-x9', title: 'x', status: 'open' });
+  assert.ok(!/class="adopt-row"/.test(settled), 'a bead with a root above it grew an adopt row');
+});
+
+check('the card wears only styles the app already ships', () => {
+  // Deliberate: every class here is one `style.css` had before this bead, so there is no
+  // mixed cached pair — a phone on an older stylesheet draws this card correctly.
+  const css = read('public/style.css');
+  for (const sel of ['.eq-edit', '.eq-lab', '.board-actions', '.board-btn', '.board-hint', '.edit-err']) {
+    assert.ok(css.includes(sel), `${sel} has no rule in style.css`);
+  }
+  const card = sheetMoveHtml(mover, { roots: ROOTS, children: kids, parent: null });
+  for (const cls of card.match(/class="([^"]*)"/g) || []) {
+    for (const one of cls.slice(7, -1).split(/\s+/).filter(Boolean)) {
+      assert.ok(css.includes(`.${one}`), `.${one} is drawn by the move card and styled by nothing`);
+    }
+  }
+});
+
+console.log('\nand something actually moves it');
+
+check('Move opens the card, and only once both reads have landed', () => {
+  // A card drawn without `/api/bead-links` is a card with no children question on a bead
+  // that has six, and Save on it drags all six across the tracker without having asked.
+  const open = GRAPH.slice(GRAPH.indexOf('async function openMoveCard()'));
+  const body = open.slice(0, open.indexOf('\n  }'));
+  assert.match(GRAPH, /if \(act === 'move'\) return openMoveCard\(\)/, 'the menu item is not wired to anything');
+  assert.match(body, /api\(`\/api\/roots\?workspace=/, 'the card is drawn without asking what there is to move to');
+  assert.match(body, /api\(`\/api\/bead-links\?workspace=/, 'the card is drawn without asking what is under the bead');
+  assert.match(body, /\$\('sheet-body'\)\.innerHTML = sheetMoveHtml\(/, 'nothing draws the card');
+  // The draw is after the catch, so a failed read cannot reach it.
+  assert.ok(body.indexOf('catch') < body.indexOf('innerHTML = sheetMoveHtml'), 'a failed read still draws a card');
+  assert.match(body, /if \(seq !== sheetSeq\) return;\s*\n\s*\$\('sheet-body'\)\.innerHTML = sheetMoveHtml/, 'the card can land on another bead');
+});
+
+check('a read that fails leaves the bead you were reading exactly as it was', () => {
+  const open = GRAPH.slice(GRAPH.indexOf('async function openMoveCard()'));
+  const body = open.slice(0, open.indexOf('\n  }'));
+  const caught = body.slice(body.indexOf('} catch'), body.indexOf('if (seq !== sheetSeq) return;\n    $('));
+  assert.ok(!/innerHTML/.test(caught), 'a failed read replaces the sheet');
+  assert.match(caught, /notice\('edit-err'/, 'a failed read says nothing about why there is no card');
+});
+
+check('Save posts the move, mode and all', () => {
+  const save = GRAPH.slice(GRAPH.indexOf('async function saveMove()'));
+  const body = save.slice(0, save.indexOf('\n  }'));
+  assert.match(body, /post\('\/api\/bead\/reparent'/, 'Save does not post the card');
+  assert.match(body, /parent: val\('parent'\)/, 'the destination is not sent');
+  assert.match(body, /children: card\.querySelector\('\[data-move="children"\]'\) \? val\('children'\) : 'with'/, 'the mode is not sent');
+  assert.match(body, /standIn: val\('standin'\)/, 'the typed epic title is not sent');
+  assert.ok(!/post\('\/api\/bead\/adopt'/.test(body), 'the move card posts the adopt route instead');
+});
+
+check('and then repaints from what the server holds', () => {
+  // The acceptance criterion — picking a parent reparents and the Parent row repaints to
+  // match, and detaching draws the "nothing decided above this" row. Both are `/api/bead`
+  // answering again, which is what `paintSheet` is.
+  const save = GRAPH.slice(GRAPH.indexOf('async function saveMove()'));
+  const body = save.slice(0, save.indexOf('\n  }'));
+  assert.match(body, /await paintSheet\(id, sheetSeq\)/, 'the move does not redraw the bead it wrote');
+  const caught = body.slice(body.indexOf('} catch'), body.lastIndexOf('return;'));
+  assert.match(caught, /err\.hidden = false;/, 'a refusal is not shown on the card');
+  assert.ok(!/paintSheet/.test(caught), 'a refusal repaints the sheet and throws the card away');
+});
+
+check('picking "leave" is what reveals the epic to leave them under', () => {
+  const at = GRAPH.indexOf(`ev.target.matches?.('[data-move="children"]')`);
+  assert.ok(at > 0, 'nothing listens for the children choice');
+  const body = GRAPH.slice(at, GRAPH.indexOf('\n  });', at));
+  assert.match(body, /box\.style\.display = ev\.target\.value === 'leave' \? '' : 'none'/, 'the box is not toggled by the choice');
+  assert.ok(!/\.hidden = /.test(body), 'the box is toggled with an attribute `.eq-lab`\'s flex rule beats');
 });
 
 console.log(failures ? `\n${failures} failed\n` : '\nall good\n');

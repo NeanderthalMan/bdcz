@@ -23,8 +23,8 @@ Nothing anybody else is editing, which is the whole design:
 | `docs/b7e/<name>.md` | the `### <what it answers> — \`b7e-<name>\`` section, which `b7e-enroll`'s check 5 asks for by that path |
 
 Plus one line in `package.json`'s `bin` map and its mirror in `package-lock.json`, which
-`b7e-register` writes and which `.gitattributes` gives `merge=union` so two branches adding
-a line resolve themselves. That is the whole of it.
+`b7e-register` writes and which `.gitattributes` gives `merge=jsonmerge` (bc-g95u9, a
+structural merge that replaced union) so two branches adding a line resolve themselves. That is the whole of it.
 
 It was not always. Until bc-fmk4v a tool also appended its section to the end of *this*
 file and its grant argument to the end of `lib/tooldecl.js`, and both were one shared

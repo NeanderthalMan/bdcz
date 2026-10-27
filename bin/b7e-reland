@@ -1,0 +1,88 @@
+#!/usr/bin/env node
+/**
+ * `b7e-reland` — land a branch that never reached `main` onto today's `main`, one method,
+ * with the downmerges already set aside.
+ *
+ *     b7e-reland <branch> --dry-run                 what landing it would involve; writes nothing
+ *     b7e-reland <branch> --how merge|squash|pick   land it in this (clean) worktree
+ *     b7e-reland <branch> --bead <id>               name the closed bead in the commit message
+ *     b7e-reland <branch> --base main --dir <root> --json
+ *
+ * bc-dgx7.199: four "Land it" sessions on notinmain cards each picked a different method
+ * and re-derived what it would leave the sweep seeing. `lib/reland.js` carries the reading
+ * and the landing; this file is argv and printing.
+ *
+ * Exit codes: `0` printed the plan or landed cleanly; `1` the landing stopped on conflicts
+ * (left in progress in the tree, files named); `2` refused — bad usage, unknown branch, or
+ * a tree that is not clean and on `main`.
+ *
+ * b7e-reland is deliberately NOT on DEFAULT_TOOL_LIST, and `excluded` from the grant tiers: unlike the read-only
+ * `b7e-landed` it writes the working tree and makes commits, which no read tier may do.
+ * `--dry-run` is the read half, and it still asks GitHub for the branch's pull requests.
+ *
+ * @grant excluded
+ */
+import path from 'node:path';
+import { parseArgs, plan, land, SWEEP_EFFECT } from '../lib/reland.js';
+
+const args = parseArgs(process.argv.slice(2));
+if (process.argv.includes('--help') || process.argv.includes('-h')) {
+  console.log('b7e-reland <branch> [--dry-run] [--how merge|squash|pick] [--bead <id>] [--base main] [--dir <root>] [--json]');
+  process.exit(0);
+}
+if (args.error) {
+  console.error(`b7e-reland: ${args.error}`);
+  process.exit(2);
+}
+
+const dir = path.resolve(args.dir || process.cwd());
+const p = await plan(dir, args.branch, { base: args.base });
+if (!p.ok) {
+  console.error(`b7e-reland: ${p.reason}`);
+  process.exit(2);
+}
+
+const short = (s) => s.slice(0, 8);
+const out = [];
+const say = (s = '') => out.push(s);
+say(`${args.branch}  ${short(p.tip)}  — ${p.total} commit${p.total === 1 ? '' : 's'} not on ${p.base}, ${p.behind} behind it`);
+say(`  real commits (${p.real.length}):`);
+for (const c of p.real) say(`    ${short(c.sha)}  ${c.subject}`);
+say(`  downmerges, set aside (${p.downmerges.length})`);
+say(`  already on ${p.base} by patch-id (${p.alreadyOnMain.length}):`);
+for (const c of p.alreadyOnMain) say(`    ${short(c.sha)}  ${c.subject}`);
+if (p.prError) say(`  pull requests: could not ask GitHub (${p.prError})`);
+else if (!p.pulls.length) say('  pull requests: none for this branch');
+for (const r of p.pulls) say(`  PR #${r.number} ${String(r.state).toUpperCase()}${r.url ? `  ${r.url}` : ''}`);
+if (!p.preview.ok) say(`  merge preview: unavailable — ${p.preview.reason}`);
+else {
+  say(`  merge preview: ${p.preview.clean ? 'clean' : `${p.preview.conflicted.length} conflicted`}`);
+  for (const f of p.preview.conflicted) say(`    conflict  ${f}`);
+  for (const r of p.preview.revertsMain) {
+    say(`    CLEAN BUT REVERTS ${p.base}'s text  ${r.file}  (${r.count} line${r.count === 1 ? '' : 's'})`);
+    for (const l of r.lines) say(`        - ${l.slice(0, 100)}`);
+  }
+  if (p.preview.cleanBoth.length) say(`  touched on both sides, merged clean: ${p.preview.cleanBoth.join(', ')}`);
+}
+if (p.pulls.some((r) => String(r.state).toUpperCase() === 'MERGED')) say('  NOTE: GitHub says a pull request for this branch already merged — check it is not already landed');
+
+if (!args.how || args.dryRun) {
+  say('');
+  for (const [how, effect] of Object.entries(SWEEP_EFFECT)) say(`  --how ${how}: ${effect}`);
+  if (args.json) console.log(JSON.stringify(p));
+  else console.log(out.join('\n'));
+  process.exit(0);
+}
+
+const result = await land(dir, p, args.how, { bead: args.bead });
+if (args.json) console.log(JSON.stringify({ plan: p, result }));
+else {
+  console.log(out.join('\n'));
+  console.log('');
+  if (result.ok) console.log(`landed with --how ${args.how} as ${short(result.head)} — ${SWEEP_EFFECT[args.how]}`);
+  else {
+    console.error(`b7e-reland: ${result.reason}`);
+    for (const f of result.conflicted || []) console.error(`  conflict  ${f}`);
+  }
+}
+process.exit(result.ok ? 0 : result.conflicted ? 1 : 2);

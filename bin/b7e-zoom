@@ -1,0 +1,122 @@
+#!/usr/bin/env node
+/**
+ * `b7e-zoom` — a region of a panel, magnified, with the plate's own pixel coordinates on
+ * it, for writing `plate_fix` recipe polygons.
+ *
+ *   b7e-zoom P50w_f1 1400,1120,1600,1160 --grid 10
+ *   b7e-zoom P25r 1850,720,2300,1100 --scale 2 --recipe fixes/P25t.json
+ *   b7e-zoom P50v_f1 400,600,900,900 --vs P50v_f2
+ *   b7e-zoom graphic-novel/Teaser_01/panels/P50v_f1.png 0,0,800,600 --json
+ *
+ * bc-dgx7.195 — see `lib/zoom.js` for the history (five Teaser 01 rounds each wrote a
+ * scratch crop script) and the coordinate mapping. This file is the argv parsing and the
+ * printing around `lib/zoom.js`'s `buildZoom`, the split every `b7e-*` command uses.
+ *
+ * Exit codes: `0` the PNG was written. `2` refused — bad usage, a panel that resolves
+ * nowhere (the message names every place looked), a box wholly outside the plate, or
+ * `sips`/`python3`+Pillow not runnable.
+ *
+ * b7e-zoom (bc-dgx7.195) is deliberately NOT on DEFAULT_TOOL_LIST, for the reason
+ * `b7e-plate` is not: it shells out to
+ * composite and write an image file, which `lib/grants.js` calls a write, and its
+ * occasion is a worker session whose tool list is already the unrestricted CLI default.
+ *
+ * @grant excluded
+ */
+import { buildZoom, toolsAvailable } from '../lib/zoom.js';
+
+const USAGE = `usage: b7e-zoom <panel-id|path> <x0,y0,x1,y1> [--scale N] [--grid STEP]
+                [--recipe fixes/X.json] [--vs <panel-id|path>] [--out <path>] [--json]
+
+  <panel-id|path>   a panel id (P50w_f1), or a path; looked up in the worktree
+                     (graphic-novel/*/panels/), then in the media_vault cache
+                     (~/.cache/delmar-media, or $DELMAR_MEDIA_CACHE)
+  <x0,y0,x1,y1>      the region, in the plate's own pixels; cut to the plate if it overhangs
+  --scale N           whole-number magnification, nearest-neighbour (default 3)
+  --grid STEP          gridlines every STEP plate pixels, labelled with plate coordinates
+  --recipe <file>        draw that plate_fix recipe's polygons, lines and boxes, tagged op:field
+  --vs <panel>         the same box of another panel, set beside the first
+  --out <path>          where to write the PNG (default: a fresh temp directory)
+  --json              the manifest as JSON
+
+Plate pixel (x,y) lands on output pixel ((x-x0)*scale + scale/2, (y-y0)*scale + scale/2):
+nothing is added around the crop, so a coordinate read off the grid is the coordinate to
+put in a recipe.`;
+
+const argv = process.argv.slice(2);
+if (argv.includes('--help') || argv.includes('-h')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+
+const die = (msg) => {
+  console.error(`b7e-zoom: ${msg}`);
+  process.exit(2);
+};
+
+const opts = { scale: 3, grid: 0, recipe: null, vs: null, out: null };
+let json = false;
+const positional = [];
+for (let i = 0; i < argv.length; i += 1) {
+  const a = argv[i];
+  const need = () => {
+    if (argv[i + 1] === undefined) die(`${a} needs a value`);
+    i += 1;
+    return argv[i];
+  };
+  switch (a) {
+    case '--scale':
+      opts.scale = Number(need());
+      break;
+    case '--grid':
+      opts.grid = Number(need());
+      break;
+    case '--recipe':
+      opts.recipe = need();
+      break;
+    case '--vs':
+      opts.vs = need();
+      break;
+    case '--out':
+      opts.out = need();
+      break;
+    case '--json':
+      json = true;
+      break;
+    default:
+      if (a.startsWith('--')) die(`unknown flag ${a}`);
+      positional.push(a);
+  }
+}
+
+if (positional.length !== 2) {
+  console.error('b7e-zoom: needs a panel and a box\n');
+  console.error(USAGE);
+  process.exit(2);
+}
+[opts.panel, opts.box] = positional;
+
+const availability = toolsAvailable();
+if (!availability.sips) die('`sips` is not runnable on this machine (the plate size needs it)');
+if (!availability.pil) die('`python3 -c "import PIL"` failed — Pillow is not installed');
+
+let m;
+try {
+  m = buildZoom(opts);
+} catch (err) {
+  die(err.message);
+}
+
+if (json) {
+  console.log(JSON.stringify(m, null, 2));
+  process.exit(0);
+}
+
+console.log(m.outPath);
+console.log(`${m.panel}: ${m.width}x${m.height} plate, found in the ${m.foundIn} (${m.file})`);
+const b = m.box;
+console.log(`box ${b.x0},${b.y0},${b.x1},${b.y1}${m.clamped ? ' (clamped to the plate)' : ''} at ${m.scale}x -> ${m.renderedWidth}x${m.renderedHeight}`);
+console.log(m.mapping);
+if (m.vs) console.log(`vs ${m.vs.panel}: ${m.vs.width}x${m.vs.height}, found in the ${m.vs.foundIn}${m.vs.clamped ? ' (box clamped)' : ''}`);
+if (opts.recipe) console.log(`recipe: ${m.shapes} shapes drawn${m.skipped.length ? `; skipped ${m.skipped.join(', ')}` : ''}`);
+process.exit(0);

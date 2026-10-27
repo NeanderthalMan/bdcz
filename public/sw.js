@@ -39,12 +39,16 @@
   directory, and re-read the line: git may well have merged it silently. `node
   test/swcache.mjs` checks precisely that, in about a second.
 */
-const CACHE = 'beadcause-v114';
+const CACHE = 'beadcause-v117';
 const SHELL = [
   '/',
   '/index.html',
   '/style.css',
   '/app.js',
+  // The one proposal card (bc-yjekg.5). In the shell beside app.js because a page that
+  // gets the new app.js without it draws no inbox at all — app.js mounts it at the top
+  // of its IIFE. The Advocates pane and the Mirror draw the same card with it.
+  '/proposal.js',
   // The answer's flight to the mark. In the shell rather than left to network-first
   // because it is loaded on the tap that answers a question — the one moment the
   // link is least likely to be there and most likely to be slow.
@@ -194,6 +198,9 @@ const SHELL = [
   // redirected response. They are the only hops in the app that carry a chip as well as a
   // view, `#advocates?tab=prs`, and `VIEW_HOPS` answers them with it.
   '/prs.js',
+  // The merge queue, and the switch between it and the board above (bc-gjlix). Loaded
+  // before prs.js, which asks it which subtab is up.
+  '/mergeboard.js',
   // Releases (bc-khoe.7) — where everything in flight is, and where the deploy strip went
   // when it left the board above. A pane of the shell since bc-khoe.30.14, so the script
   // stays and its three addresses have left this list for `VIEW_HOPS`.

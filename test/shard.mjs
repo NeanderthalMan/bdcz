@@ -17,6 +17,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { discoverSuites, REPO_ROOT } from '../lib/gate.js';
@@ -143,6 +144,100 @@ const runCli = (args) => execFileSync(process.execPath, [CLI, ...args], { encodi
   const guards = /if \[ ! -s slice\.txt \]/.test(wf) && /--from affected\.txt/.test(wf);
   if (guards) ok('the workflow refuses to run a shard whose narrowed slice is empty');
   else bad('the workflow refuses to run a shard whose narrowed slice is empty', 'the -s slice.txt guard is gone — an empty slice would run every suite');
+}
+
+{
+  // bc-rcrt.2 gave a downmerged branch the whole roster; bc-3crv6 narrows it on its own
+  // diff against the base's tip, like any other branch. The step is shell inside YAML. It is lifted out of the workflow and
+  // actually run, against a real repo, with the two shas GitHub would pass it and a
+  // stand-in `bin/b7e-affected`. The only question is whether it narrowed, meaning whether
+  // affected.txt exists afterwards: a missing affected.txt is how the next step spells
+  // "every suite".
+  const check = (name, cond, detail) => (cond ? ok(name) : bad(name, detail));
+  const wf = fs.readFileSync(path.join(ROOT, '.github', 'workflows', 'test.yml'), 'utf8').split('\n');
+  const at = wf.findIndex((l) => /- name: Work out which suites this pull request affects/.test(l));
+  const runAt = wf.findIndex((l, i) => i > at && /^\s*run: \|\s*$/.test(l));
+  const indent = runAt < 0 ? 0 : wf[runAt].match(/^\s*/)[0].length;
+  const body = [];
+  for (let i = runAt + 1; runAt > 0 && i < wf.length; i++) {
+    if (wf[i].trim() && wf[i].match(/^\s*/)[0].length <= indent) break;
+    body.push(wf[i].slice(indent + 2));
+  }
+  const script = body.join('\n');
+  check('the narrowing step reads its shas from env, not from an interpolation inside the script', at > 0 && runAt > at && /BASE_SHA/.test(script) && !/\$\{\{/.test(script), script.slice(0, 200));
+
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'beadcause-shard-downmerge-'));
+  const g = (...a) =>
+    execFileSync('git', a, {
+      cwd: repo,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@e', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@e' },
+    }).trim();
+  const commit = (file, msg) => {
+    fs.writeFileSync(path.join(repo, file), `${msg}\n`);
+    g('add', file);
+    g('commit', '-q', '-m', msg);
+    return g('rev-parse', 'HEAD');
+  };
+  const step = (base, head) => {
+    fs.rmSync(path.join(repo, 'affected.txt'), { force: true });
+    fs.rmSync(path.join(repo, 'changed.txt'), { force: true });
+    try {
+      // `bash -e`, because that is what a GitHub `run:` step is.
+      execFileSync('bash', ['-e', '-c', script], { cwd: repo, encoding: 'utf8', stdio: 'pipe', env: { ...process.env, BASE_SHA: base, HEAD_SHA: head } });
+    } catch (e) {
+      return { exit: e.status, narrowed: null, changed: [], out: `${e.stdout}${e.stderr}` };
+    }
+    const changedPath = path.join(repo, 'changed.txt');
+    const changed = fs.existsSync(changedPath) ? fs.readFileSync(changedPath, 'utf8').split('\n').filter(Boolean) : [];
+    return { exit: 0, narrowed: fs.existsSync(path.join(repo, 'affected.txt')), changed };
+  };
+  try {
+    g('init', '-q', '-b', 'main');
+    fs.mkdirSync(path.join(repo, 'bin'));
+    // The stand-in names one suite for whatever it is asked about.
+    fs.writeFileSync(path.join(repo, 'bin', 'b7e-affected'), "console.log('test/x.mjs');\n");
+    g('add', 'bin');
+    g('commit', '-q', '-m', 'root');
+    commit('a.txt', 'main one');
+    g('checkout', '-q', '-b', 'topic');
+    const own = commit('b.txt', 'the branch');
+    g('checkout', '-q', 'main');
+    const moved = commit('c.txt', 'main moves on');
+
+    // GitHub checks out a synthetic merge of the pull request onto its base, so HEAD is a
+    // merge commit even for a branch that never brought main in. The rule must ignore that.
+    g('checkout', '-q', '--detach', moved);
+    g('merge', '-q', '--no-ff', '-m', 'synthetic', own);
+    const plain = step(moved, own);
+    check('a branch that never merged main in is narrowed, synthetic merge HEAD or not', plain.exit === 0 && plain.narrowed === true, JSON.stringify(plain));
+
+    check('and it narrows on its own files only', plain.changed.join(' ') === 'b.txt', plain.changed.join(' '));
+
+    // The queue's downmerge: main merged into the branch, as pr.updateBranch does it.
+    // bc-3crv6: it narrows on its own files, the same as a branch that never merged main.
+    g('checkout', '-q', 'topic');
+    g('merge', '-q', '--no-ff', '-m', "Merge branch 'main' into topic", 'main');
+    const down = g('rev-parse', 'HEAD');
+    g('checkout', '-q', '--detach', moved);
+    g('merge', '-q', '--no-ff', '-m', 'synthetic', down);
+    const combined = step(moved, down);
+    check('a downmerged branch is narrowed', combined.exit === 0 && combined.narrowed === true, JSON.stringify(combined));
+    check('on its own files, not on what the downmerge brought in', combined.changed.join(' ') === 'b.txt', combined.changed.join(' '));
+
+    // A branch that downmerged and then committed again narrows on all of its own commits.
+    g('checkout', '-q', 'topic');
+    const later = commit('d.txt', 'more on the branch');
+    g('checkout', '-q', '--detach', moved);
+    g('merge', '-q', '--no-ff', '-m', 'synthetic', later);
+    const after = step(moved, later);
+    check('a branch that downmerged earlier and committed since narrows on all its own commits', after.exit === 0 && after.narrowed === true && after.changed.join(' ') === 'b.txt d.txt', JSON.stringify(after));
+    const unknown = step('0'.repeat(40), own);
+    check('a sha the clone does not have is not narrowed, and does not fail the step', unknown.exit === 0 && unknown.narrowed === false, JSON.stringify(unknown));
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
 }
 
 {

@@ -1,0 +1,262 @@
+#!/usr/bin/env node
+/**
+ * `b7e-rehome` — move a bead to the tracker that can actually deliver it, verbatim,
+ * with the rival sweep and the supersede marker in one call.
+ *
+ *     b7e-rehome -b dv-afr.40 -w delmar --to beadcause --under bc-dgx7
+ *     b7e-rehome -b dv-afr.40 -w delmar --to beadcause --under bc-dgx7 --dry-run
+ *     b7e-rehome -b dv-afr.40 -w delmar --to beadcause --under bc-dgx7 --json
+ *
+ * `bc-dgx7.138`: four delmar sessions (`dv-afr.35`, `.36`, `.39`, `dv-b5d.52`) each hit
+ * a bead whose whole deliverable was beadcause tooling — filed under a delmar epic that
+ * cannot deliver into another repo's `bin/` — and each did the same four things by hand,
+ * no two of them the same way: a `bin/` collision check for the command name the bead
+ * proposes, a sweep of the destination tracker for something that already covers it, the
+ * move itself (one session's own account of doing it "properly" still cost a `bd show
+ * --json`, a Python reshape, a hand-rolled poll loop), and a `bin/supersede.js` call at
+ * the end, one of which used an unqualified `--original` that `bd` refused with "no issue
+ * found" because a cross-tracker original has to be written `<workspace>/<id>`.
+ * `lib/rehome.js` does the ranking and the field-carrying; this is the argv and the
+ * report printed around it.
+ *
+ * **Prints, in order, on one stream:** the collision check (does the command name this
+ * bead's title proposes already exist in the destination checkout's `bin/`?), the rival
+ * sweep (the destination tracker's own rows, open and closed, ranked against the source
+ * bead's text — so "nothing covers this" is checked rather than assumed), then — unless
+ * `--dry-run` — the new bead's id and where it landed, and what the supersede marker
+ * wrote.
+ *
+ * **`--under` is required and never guessed.** There is no `discovered-from` bead in the
+ * destination tracker to derive a home from — the bead being moved was never filed there
+ * — so a caller who has not decided where it belongs gets a refusal instead of a bead
+ * landing under whatever epic happened to be first in a list.
+ *
+ * **`--to` must name a different, real workspace.** The same name as `-w` is refused
+ * (there is nowhere to move to), an unknown name is refused, and either refusal writes
+ * nothing to either tracker — never a bead created with no supersede, never a supersede
+ * with no bead.
+ *
+ * Exit codes: `0` moved (or `--dry-run` printed the plan). `1` the bead was filed but the
+ * supersede half could not be completed — the id it landed at is on stdout regardless,
+ * because a caller told "nothing happened" would go looking for the duplicate this just
+ * created. `2` bad usage. `4` `-w`, `--to`, `-b` or `--under` named something the
+ * tracker(s) do not have. `5` a tracker could not be read at all — a Dolt lock, a
+ * timeout — which is a different answer from "no such bead" and must not be printed as
+ * one.
+ *
+ * b7e-rehome (bc-dgx7.138) is deliberately NOT on DEFAULT_TOOL_LIST, for the same reason
+ * b7e-apply and b7e-commit are not: without `--dry-run` it writes to two trackers
+ * unconditionally — a new bead in one, a supersede marker in the other — and the
+ * allowlist cannot see which argv a caller is about to pass. A one-shot reply agent has
+ * no business moving beads between workspaces, so not granting it is the answer.
+ *
+ * @grant excluded
+ */
+import { execFileSync } from 'node:child_process';
+import { loadConfig } from '../lib/config.js';
+import { Bd } from '../lib/bd.js';
+import { resolveSessionDir } from '../lib/session.js';
+import { autoEndorseAllowed } from '../lib/spaces.js';
+import { bylineFor } from '../lib/byline.js';
+import { beadRow } from '../lib/park.js';
+import { mark, parseSupersedeTarget } from '../lib/superseded.js';
+import { impliedCommandName, binCollision, carryFields, rivalSweep } from '../lib/rehome.js';
+
+const argv = process.argv.slice(2);
+const has = (f) => argv.includes(f);
+const value = (...names) => {
+  for (const f of names) {
+    const inline = argv.find((a) => a.startsWith(`${f}=`));
+    if (inline) return inline.slice(f.length + 1);
+    const at = argv.indexOf(f);
+    if (at > -1) return argv[at + 1];
+  }
+  return undefined;
+};
+
+const USAGE = `usage: b7e-rehome -b <bead> -w <workspace> --to <workspace> --under <bead> [--dry-run] [--json]
+
+Move <bead> out of <workspace> and into <to>, verbatim — same title, description,
+acceptance, design, notes, type and priority — filed under <under> in <to>, and mark
+<bead> superseded-by <to>/<new-id> in <workspace>. Prints the destination bin/
+collision check and the rival sweep first, on every run, dry or not.
+
+  -b, --bead <id>          the bead to move (required)
+  -w, --workspace <name>   where it is now (required)
+  --to <name>              where it belongs — a different, real workspace (required)
+  --under <bead>           the epic in <to> to file it beneath (required)
+  --dry-run                print the plan, write to neither tracker
+  --json                   one object on stdout instead of the printed report
+
+Exits 0 moved (or --dry-run), 1 filed but not superseded, 2 bad usage, 4 an id or
+workspace named does not exist, 5 a tracker could not be read.`;
+
+if (has('--help') || has('-h')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+
+const wsName = value('-w', '--workspace');
+const beadId = value('-b', '--bead');
+const toName = value('--to');
+const under = value('--under');
+const dryRun = has('--dry-run');
+const jsonMode = has('--json');
+
+if (!wsName || !beadId || !toName || !under) {
+  console.error('b7e-rehome: -w, -b, --to and --under are all required');
+  console.error(USAGE);
+  process.exit(2);
+}
+if (toName === wsName) {
+  console.error(`b7e-rehome: --to ${toName} is the same as -w ${wsName} — there is nowhere to move this to`);
+  process.exit(4);
+}
+
+const cfg = loadConfig();
+const workspaceNamed = (name) => (cfg.workspaces || []).find((w) => w.name === name);
+const ws = workspaceNamed(wsName);
+const toWs = workspaceNamed(toName);
+if (!ws) {
+  console.error(`b7e-rehome: no workspace named ${wsName}`);
+  process.exit(4);
+}
+if (!toWs) {
+  console.error(`b7e-rehome: no workspace named ${toName} (--to)`);
+  process.exit(4);
+}
+
+const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me });
+
+const MISSING = /no issue found|not found|does not exist/i;
+async function tracker(what, run) {
+  try {
+    return await run();
+  } catch (err) {
+    const msg = String(err?.message || err);
+    if (MISSING.test(msg)) return null;
+    console.error(`b7e-rehome: could not read ${what} — ${msg.split('\n')[0]}`);
+    process.exit(5);
+  }
+  return null;
+}
+
+const sourceRow = await tracker(`${ws.name}/${beadId}`, () => bd.show(ws, beadId));
+if (!sourceRow) {
+  console.error(`b7e-rehome: ${ws.name} has no bead ${beadId}`);
+  process.exit(4);
+}
+const underRow = await tracker(`${toWs.name}/${under}`, () => bd.show(toWs, under));
+if (!underRow) {
+  console.error(`b7e-rehome: ${toWs.name} has no bead ${under} (--under)`);
+  process.exit(4);
+}
+
+/** Best-effort — a workspace this checkout cannot resolve a repo for still runs, just
+ * without a guessed-file signal on the rival sweep and no collision check to print. */
+function dirFor(workspace, bead = null) {
+  try {
+    return resolveSessionDir(cfg, workspace, bead) || null;
+  } catch {
+    return null;
+  }
+}
+const sourceDir = dirFor(ws, sourceRow);
+const destDir = dirFor(toWs, underRow);
+
+const impliedName = impliedCommandName(sourceRow.title);
+const collision = impliedName && destDir ? binCollision(destDir, impliedName) : null;
+
+const destRows = ((await tracker(toWs.name, () => bd.listAll(toWs))) || []).map((r) => ({ ...r, workspace: toWs.name }));
+const rivals = rivalSweep(sourceRow, destRows, {
+  sourceDirs: sourceDir ? [sourceDir] : [],
+  destDirs: destDir ? [destDir] : [],
+  destWorkspace: toWs.name,
+});
+
+function printReport() {
+  if (impliedName) {
+    console.log(
+      collision
+        ? `collision: ${impliedName} already exists at ${collision} — check whether this is already done before filing another bead over it`
+        : `collision: ${impliedName} — nothing at that path in ${toWs.name}'s bin/`
+    );
+  } else {
+    console.log('collision: no b7e-<verb> command name found in the title — nothing to check');
+  }
+  if (!rivals.length) {
+    console.log(`rivals: nothing in ${toWs.name} ranks above the floor — no rival found`);
+  } else {
+    console.log(`rivals in ${toWs.name}:`);
+    for (const r of rivals) {
+      const via = r.via ? ` (via ${r.via})` : '';
+      const score = r.score == null ? '' : ` score ${r.score}`;
+      console.log(`  ${r.id} [${r.closed ? 'closed' : r.status}]${score}${via} — ${r.title}`);
+    }
+  }
+}
+
+if (jsonMode) {
+  const report = { source: `${ws.name}/${beadId}`, to: toWs.name, under, collision: collision || null, impliedName: impliedName || null, rivals };
+  if (dryRun) {
+    console.log(JSON.stringify({ ...report, dryRun: true }));
+    process.exit(0);
+  }
+  const result = await apply();
+  console.log(JSON.stringify({ ...report, ...result }));
+  process.exit(result.supersedeRefused ? 1 : 0);
+}
+
+printReport();
+if (dryRun) {
+  console.log(`DRY RUN — would file this under ${toWs.name}/${under} and mark ${ws.name}/${beadId} superseded-by ${toWs.name}/<new-id>. Nothing written.`);
+  process.exit(0);
+}
+
+const result = await apply();
+console.log(`filed ${toWs.name}/${result.newId}, under ${under}`);
+if (result.supersedeRefused) {
+  console.error(
+    `b7e-rehome: ${ws.name}/${beadId} was NOT marked superseded — ${result.supersedeRefused}. ` +
+      `The new bead exists at ${toWs.name}/${result.newId}; finish the mark by hand with ` +
+      `beadcause-supersede -w ${ws.name} -b ${beadId} --original ${toWs.name}/${result.newId}.`
+  );
+  process.exit(1);
+}
+console.log(`marked ${ws.name}/${beadId} superseded-by ${toWs.name}/${result.newId}`);
+for (const note of result.supersedeNotes) console.log(`  note: ${note}`);
+process.exit(0);
+
+async function apply() {
+  const endorsed = autoEndorseAllowed(cfg, toWs.name);
+  const fields = carryFields(sourceRow, { parent: under, endorsed, rehomedFrom: `${ws.name}/${beadId}` });
+  const byline = bylineFor(cfg);
+  const newId = await bd.create(toWs, fields, { actor: byline });
+
+  // The supersede half is `mark` itself (lib/superseded.js) — the same three writes
+  // `bin/supersede.js` makes — run against a raw `execFileSync` runner exactly like
+  // that command builds one, because `mark` takes a runner function, not a `Bd`.
+  const runner = (workspace) => (args) =>
+    execFileSync(cfg.bdBin, [...args, '--actor', byline], {
+      env: { ...process.env, BEADS_DIR: workspace.dir, BEADS_ACTOR: byline },
+      cwd: workspace.dir,
+      encoding: 'utf8',
+      maxBuffer: 16 * 1024 * 1024,
+    });
+  const bdSource = runner(ws);
+  const bdDest = runner(toWs);
+  const dupRow = beadRow(bdSource, beadId);
+  const originalRow = beadRow(bdDest, newId);
+  const target = `${toWs.name}/${newId}`;
+  const knownWorkspaces = (cfg.workspaces || []).map((w) => w.name);
+  const parsed = parseSupersedeTarget(target, knownWorkspaces);
+  if (parsed.reason) return { newId, supersedeRefused: parsed.reason, supersedeNotes: [] };
+  const markResult = mark(bdSource, beadId, target, { dupRow, originalRow, knownWorkspaces });
+  if (markResult.refused) return { newId, supersedeRefused: markResult.refused, supersedeNotes: [] };
+  try {
+    bdSource(['comment', beadId, `Superseded by ${target} — moved verbatim to the tracker that can deliver it (b7e-rehome).`]);
+  } catch (err) {
+    markResult.notes.push(`could not comment on ${beadId} — ${String(err?.message || err).split('\n')[0]}`);
+  }
+  return { newId, supersedeRefused: null, supersedeNotes: markResult.notes };
+}

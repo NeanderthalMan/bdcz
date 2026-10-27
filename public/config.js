@@ -85,11 +85,6 @@
       })();
 
   const out = document.getElementById('space');
-  /* The brand dot. Left alone in the shell for the reason public/releases.js leaves it
-     alone: it is the whole document's there, driven off public/report.js's own count of
-     what is in flight, and a second writer toggling `busy` on it would clear it under a
-     fetch of the inbox's that is still out. */
-  const pulse = inShell ? null : document.getElementById('pulse');
   /* `cfg-observing` rather than the `observing` this page used before bc-khoe.60 — see
      the id's own comment in public/config.html and public/index.html. One id across
      both documents, so this lookup does not need to ask which one it is in. */
@@ -783,15 +778,10 @@
     }
   }
 
-  /** The one fetch this page makes, with the pulse on it while it is in flight. */
+  /** The one fetch this page makes. */
   async function load() {
-    pulse?.classList.add('busy');
-    try {
-      await loadSpace();
-      render();
-    } finally {
-      pulse?.classList.remove('busy');
-    }
+    await loadSpace();
+    render();
   }
 
   /**

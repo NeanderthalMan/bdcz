@@ -48,6 +48,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { describe, repair } from '../lib/borrow.js';
 import { NO_LAUNCH } from '../lib/launchguard.js';
 import { onExit } from '../lib/teardown.js';
 import { HELD_ENV, acquireSlot, findOwner, ownerGone, timeoutMsFor, waitingLine } from '../lib/gate.js';
@@ -93,6 +94,28 @@ if (listOnly) {
 if (!suites.length) {
   console.log(`\x1b[31mno suites found under ${testDir}\x1b[0m`);
   process.exit(1);
+}
+
+/**
+ * The checkout has to be runnable before any suite is worth starting — bc-th3i.
+ *
+ * A fresh worktree has neither `node_modules` nor `public/vendor` (both gitignored, both
+ * borrowed from the main checkout), and because this runner stops at the first failure
+ * each gap surfaced as a content assertion in some unrelated suite — four runs to get
+ * past setup in design-system-z665. `repair` does the two symlinks itself (idempotent,
+ * ignored by `.gitignore`), and what it cannot do it names with the command and stops
+ * here, before a slot is taken. A tree that declares neither prerequisite — every temp
+ * tree `test/testrunner.mjs` builds — has nothing to say and is untouched. Below `--list`,
+ * which still writes nothing.
+ */
+{
+  const { done, left } = repair(ROOT);
+  for (const d of done) console.log(`\x1b[2m[preflight] ${d.did}\x1b[0m`);
+  if (left.length) {
+    for (const p of left) console.log(`\x1b[31m[preflight] ${describe(p)}\x1b[0m`);
+    console.log('\x1b[2mthis checkout cannot run its own suites yet — no suite was started\x1b[0m');
+    process.exit(1);
+  }
 }
 
 /**

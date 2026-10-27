@@ -755,12 +755,11 @@ names the driver, and reads the record `carry()` writes back — the same text e
 **`--driver` is a path, not a name, because there is no default to pick.** `carry()` is
 written against a driver *interface* — `deployToUat`, `testInUat`, `promoteToProd`,
 `testInProd` — precisely so this file does not need to know what a pipeline is. bc-y8k4.3
-is meant to fill that interface with a pipeline driver for a real CI system, and as of this
-writing **it has not landed** — nothing outside `lib/promoterun.js` and its own test
-defines any of the four calls. A `--pipeline <ci>` flag wired to code that does not exist
-would be a CLI that looks finished and refuses every real bead; `--driver <path>` is
-dynamically imported instead, so the same file carries a bead against whichever driver a
-workspace actually has, real or otherwise, and needs no change the day bc-y8k4.3 lands.
+was meant to fill that interface with a pipeline driver for a real CI system, and landed
+instead as something that knows no pipeline at all: [`--driver pipeline`](#any-other-pipeline--the-pipeline-hook-a-bead-repo-declares),
+the hook a workspace's bead repo declares. A `--pipeline <ci>` flag would have been a CLI
+that knows one CI system; `--driver <path>` is dynamically imported instead, so the same file
+carries a bead against whichever driver a workspace actually has, real or otherwise.
 The first real one is now in the repo: [`lib/singledriver.js`](#one-environment--the-single-environment-driver-and-why-the-collapse-is-in-the-lib),
 for a repo with one environment. `test/promoterunbin.mjs` proves the whole thing against the real `bd` binary and a driver
 module loaded off disk — a fresh `bd init`, a real epic with a real closed work bead under
@@ -807,6 +806,18 @@ passed, any other exit failed, not runnable or timed out cannot-say. **A repo th
 none never closes a promotion** — its test step is cannot-say and says why, because a green
 deploy alone does not show the release is the one running.
 
+**beadcause's own entry is the one exception, because only the daemon can say what it is
+running** (bc-rfnr.9.13). `/api/health` carries `commit` — HEAD of the checkout *at the moment
+the backend booted*, not the router's build id (a bundle hash that does not move when only a
+comment does) and not the deploy record's `to` (which is what the runner fast-forwarded to, the
+very thing being checked). A `restarts: true` entry for this checkout that says nothing about
+`checks` gets one built in, `node {dir}/scripts/serving.mjs {image}`: it waits up to a minute for
+the restart the deploy just caused, then exits 0 only if the daemon reports that commit. Not
+answering, answering without a commit, and answering as another commit all fail it. `"checks":
+[]` is a declaration and turns it off; any `checks` you write replace it rather than join it.
+`/api/health` needs no token, so the commit is readable by anyone who can reach the port — the
+same audience that already reads the workspace names beside it.
+
 **Why the collapse is in `lib/promoterun.js` and not in the driver.** The step names on the
 record are the lib's, not the driver's, so a four-call driver for one environment prints
 "UAT deploy — passed" over a deploy that went straight to production. It then has two
@@ -825,6 +836,57 @@ survives the restart to write `ok`. A caller *inside* the daemon — the unatten
 dies with the restart, and hands the wait to the deploy journal instead: see how the sweep
 resumes a carry it finds half-done.
 
+### Any other pipeline — the pipeline hook a bead repo declares
+
+bc-y8k4.3: `lib/pipelinehook.js`. The bead asked for an Azure DevOps driver. The survey on
+bc-u7syq found that Northwind's pipeline is not the shape the bead assumed: ADO stops at
+staging, and UAT and production are blue/green releases run by another service's scripts.
+The answer there was that **beadcause stays agnostic of the company, organization and
+pipeline, and provides a hook for invoking the external one**. The bead repo that knows the
+pipeline configures its own.
+
+**Declared by the bead repo** — the checkout a workspace's `.beads` lives in, so for
+Northwind that is `architecture` — at `.beadcause/pipeline.json`, beside `views.json` and
+`derived.json`:
+
+```json
+{ "run": ["node", "tools/beadcause-pipeline.mjs"], "environments": 2, "timeoutMinutes": 90 }
+```
+
+`run` is argv, never a shell string, run in the bead repo. `environments` is 2 (the default:
+`deployToUat`, `testInUat`, `promoteToProd`, `testInProd`) or 1 (`deploy`, `test` — see the
+section above). `timeoutMinutes` bounds one call and defaults to 60.
+
+**One call per step, JSON both ways.** The hook is run as `run… <call>`. It gets
+`{ call, bead, epic, workspace, repo, image, work }` on stdin, where `image` is empty before
+the first deploy and is what that deploy named on every later step, so `promoteToProd` is
+*handed* the image UAT tested. It answers with the same object an in-process driver returns,
+on the last stdout line that parses, so it may log above it:
+
+```json
+{ "state": "passed", "image": "simptek.azurecr.io/api:4242@sha256:…", "detail": "…",
+  "checks": [{ "name": "i9n", "state": "passed" }] }
+```
+
+The answer goes through the same `readStep` as every driver's. A test pass that names no
+check, a deploy that names no image, and a promote that comes back with a different image are
+all refused, exactly as they would be for a driver in a module.
+
+**Cannot-say is never invented into failed.** A hook that cannot be started, overruns its
+timeout, or exits without a JSON answer has told nobody anything, and every one of those is
+`unknown`. A non-zero exit *with* an answer is that answer, so a hook may say `failed` and
+exit 1. What the hook does — deploy, ask a person to, or request an approval gate and answer
+`unknown` until it is granted — is its repo's business.
+
+```
+beadcause-promoterun -w architecture -b <promotion bead> --driver pipeline
+```
+
+**The unattended sweep uses it too.** A repo that [`promoteDrivers`](config.md) does not name
+is carried by the bead repo's hook when one is declared. That is a declaration, made in that
+repo's own commit, rather than an inference. A named entry still wins, and a malformed
+`pipeline.json` is refused by name rather than read as undeclared.
+
 ### The daemon carries an endorsed promotion bead itself
 
 bc-y8k4.8: `lib/promotesweep.js`, called from `cycle()` beside `sweepRelease` and holding no
@@ -841,7 +903,7 @@ A bead it does not carry is **never silent about why** — one log line per chan
 |---|---|
 | it is `human`, or `unendorsed` | a question waiting on a person / nobody has agreed to it |
 | the workspace's [`autoShip`](pull-requests.md#auto-ship--the-merge-that-does-not-wait-for-the-tap) answer is no | a space that has not said yes to unattended deploys gets nothing carried unattended; `beadcause-promoterun` by hand is still there |
-| a repo it names has no [`promoteDrivers`](config.md) entry, or two repos name different ones | never inferred — `carry()` takes one driver, and whether it is single-environment is that driver's property |
+| a repo it names has no [`promoteDrivers`](config.md) entry and its bead repo declares no [pipeline hook](#any-other-pipeline--the-pipeline-hook-a-bead-repo-declares), or two repos name different drivers | never inferred — `carry()` takes one driver, and whether it is single-environment is that driver's property |
 | `bd ready` does not list it | a dependency, or a `blocked-by:` marker, says not yet |
 | a `held:` lease is live on it, or a deploy for it or its repo is in flight | somebody, or something, is on it |
 | it is claimed by somebody else, or by the daemon's own actor and the claim is fresh | `carry()` only refuses a *different* holder, and the daemon's actor is the one `beadcause-promoterun` uses, so the sweep reads the lease itself |
@@ -3183,6 +3245,17 @@ and nothing else — a *locked* worktree needs two, and the lock gate means this
 reaches one; tracked edits and unmerged commits were both refused several gates earlier,
 on their own evidence.
 
+**A deletion is not an edit, and reading it as one wedges an entry for ever.** The
+tracked-modifications gate counted `git status --porcelain` lines, and a directory whose
+*contents* had been removed — by a hand `rm`, a tool clearing space, anything outside this
+sweep — reports one line per file. Five entries on this repo sat in the attic 28–29 days
+being told they had "465 uncommitted tracked files" when nothing had been edited at all,
+and waiting could never clear it: a removed file does not come back, so the count only
+grows. A deletion carries nothing to lose, so the gate now looks only at lines that are
+*not* deletions. Whether the work survives is still asked separately, on its own evidence:
+the branch has to be in main. An entry that has been **edited** is kept exactly as before,
+because an edit is somebody's unsaved work (bc-iaju1.8).
+
 **Occupancy is compared through symlinks.** git reports worktree paths fully resolved
 and a session's `cwd` keeps whatever prefix it started with — on macOS `/var/folders/…`
 and `/private/var/folders/…` are one directory sharing none of their first eight
@@ -3325,6 +3398,75 @@ that later entered a worktree does not show as being *in* it — the lock is wha
 actually protects it, which is why `EnterWorktree` taking one matters. And the sweep
 runs whether or not the advocate is paused: pausing means "open no more sessions",
 not "leave the mess". `tidyWorktrees: false` is the setting that means that.
+
+#### A lock whose window is dead is not a claim
+
+Gate 2 of the five above — *it is not locked* — is right almost all of the time and has
+one hole in it, which is that `git worktree lock` has no owner and no expiry. A window
+killed mid-session leaves its lock behind, nothing ever takes it off, and the worktree
+is pinned for ever: every other gate can pass and never gets asked. On the checkout that
+filed this, five of the empty never-committed-to worktrees were in exactly that state,
+the oldest 41 days old.
+
+So a lock is honoured while its holder is alive, and only then. Everything here writes
+its pid into the reason — `claude session <name> (pid N start <date>)` from a launch or
+from `EnterWorktree`, `resolver pid N #<pr>` from a resolver — and liveness is
+`process.kill(pid, 0)`, which is the kernel's own answer rather than a `ps` spawn. Pid
+reuse can make a dead holder read as alive, which leaves the worktree for another
+fifteen minutes; that is the direction to be wrong in.
+
+**A lock with no pid in it is honoured, always.** `live session: b7e-keep (bc-2pysw)`
+and `sorrel session editing … by path` are real locks on this laptop, written by a hand
+or by another tool, and "I cannot tell who holds this" must never read as "nobody holds
+this" — that is the one failure mode that loses work. The stale lock comes off at the
+last moment, immediately before `git worktree move`, so a worktree the dirty-tree or
+not-merged gate then declines to move is left locked exactly as it was found. It is
+recorded in the `.note`, because once the lock is off `git worktree list` will not say
+it again.
+
+### The branches nothing ever deleted
+
+The sweep above keeps the branch every time, on purpose: a retired worktree is resumable
+only while its ref is there. Nothing else deleted one either, and on a checkout that had
+been running for a few months that came to **687 local branches, 604 of them already
+contained in `origin/main`**. Every branch listing, every ref walk, every fanout over
+`worktree-*` pays for all of them, and a human looking for the one branch that has not
+landed reads six hundred that have.
+
+`pruneBranches` in lib/branchprune.js is the other end of the same job, on a **daily**
+clock rather than the sweep's fifteen minutes — a finished worktree is in the way of the
+next session immediately, a merged branch is in the way of somebody reading a list, and
+the number moves by a handful a day. Four gates, and anything failing one is left alone
+and named:
+
+1. **not the base itself**;
+2. **contained in `origin/main`** — the remote ref, not the local one. Nothing merges
+   locally here, so local `main` sits wherever it was last pulled to; asking it was fifty
+   commits wrong on this checkout, the same trap the worktree sweep documents;
+3. **`origin/<same name>` still exists**. Not about the commits — those are in `main` by
+   gate 2 and cannot be lost — but about the *name*. `tipOf` in lib/notinmain.js resolves
+   a bead's branch as `refs/heads/<b>` then `refs/remotes/origin/<b>`, and
+   `worktreeBranches` unions the two, so deleting a local branch origin has also
+   forgotten takes a name two sweeps can still ask about out of the repo entirely.
+   Keeping those cost six branches out of 604 here;
+4. **not checked out in any worktree**, the attic's entries included — they are still
+   registered worktrees. git refuses these on its own; asking first turns a thrown error
+   into a row naming the worktree that holds it.
+
+It runs after the attic expiry in the same tick, and the order is deliberate: expiring an
+entry is a `git worktree remove`, which un-checks-out a branch, so a branch freed this
+second is prunable this second rather than tomorrow.
+
+`git branch -d` is the safe one and it is the wrong tool for this — it checks containment
+against the current HEAD or the branch's upstream, which is that same lagging local
+`main`, so it refuses nearly everything gate 2 has already proved. `-D` skips that check,
+and gate 2 *is* that check asked of the ref that is actually authoritative.
+
+One property worth stating, because a few dozen suites build fixture repos with no remote
+at all: **in a repo with no origin this deletes nothing**, since every branch fails gate 3
+vacuously. `advocates.pruneBranches: false` turns it off; `advocates.pruneBranchesMax`
+(default 200) bounds a single run, because the first one on a checkout nobody has ever
+pruned has hundreds of candidates and no hurry about any of them.
 
 ### The Chromes and scratch directories nothing was clearing up
 
@@ -3748,6 +3890,110 @@ databases. The bead is held by the marker alone from the moment it is written to
 moment the far bead closes, and the sweep runs *before* the survey — clearing the marker
 is exactly what lets `Bd.ready`'s row filter admit the bead again, so a block that closed
 since the last sweep can go straight from cleared to queued in the same tick.
+
+
+### A session nobody briefed, which no window list can see
+
+bc-xl7n.156. The advocate knows a bead is being worked from its claim, its deps, its labels
+and the windows it opened itself. A Claude session Adam opens by hand in a worktree is in
+none of those. It has no brief on its command line for the brief's `ps` check to find, no
+worker record and usually no claim. So the advocate kept opening worker windows onto a bead
+he was building. Each window found him, commented and went quiet. The idle sweep then closed
+it, the hand-back took its claim off (every window claims as the same `bd` user, so a claim
+cannot say whose it is), and the next tick opened another one.
+
+The fix is the marker `worked-by:<pid>`, written by `beadcause-working` (`bin/working.js`),
+where the pid is the owning `claude` process:
+
+- **From inside the hand session:** `beadcause-working -w <ws> -b <bead>` walks up to its own
+  `claude` process and marks that. A briefed worker window is refused this form, because it
+  would be marking itself.
+- **From a worker window that found one:** `--pid <its pid>`. The brief tells a worker how to
+  find it. The command also releases the worker's claim, and the reconcile then treats the
+  quiet window as a **stand-down**: no attempt is charged.
+- **`--release`** takes the marker off by hand.
+
+`Bd.ready` filters a marked bead out of every queue with a row check, since the pid in the
+label leaves nothing fixed to exclude on. `openWorkSession` refuses one while its pid is a
+live `claude` process. Liveness is `ps -p <pid> -o args=`, and a pid that now belongs to
+anything other than `claude` counts as gone, so a reused pid holds nothing. The sweep reads
+every non-closed marked bead with `bd list --label-pattern 'worked-by:*'`, not `bd ready`,
+because a hand session that claimed its bead leaves it `in_progress`. When the process is
+gone the sweep removes the marker and says so in a comment, and the bead is ordinary work
+again. When `ps` cannot answer, the marker stays. `clearHandSessions: false` switches the
+sweep off, and `handSessionIntervalMinutes` (default 2) sets how often it runs.
+
+### The hold nobody ever answered
+
+Every sweep above this one *raises* something: a card, a finding, a marker coming off. None
+of them has an ending for the case where the thing raised is never answered, and both holds
+in this repo are cheap to raise and expensive to read.
+
+On 2026-09-19 that was measurable. **83 beads held for endorsement, 78 of them untouched
+for more than a month**, against an endorsement queue screen that draws sixty rows — so the
+oldest third of the pile was not merely unanswered, it was off the bottom of the only
+screen that shows it. Seven `superseded-by:` cards had been in the inbox between three and
+five weeks. That is not a backlog of decisions waiting to be made; it is a decision
+already made, by silence, with nothing written down — and the cost is paid twice, because
+the queue is unreadable while the answered-by-silence beads are still in it, and a bead
+somebody *would* have said yes to is buried among eighty they would not.
+
+So the silence is written down. Every `lapseIntervalMinutes`, a hold older than its
+threshold **lapses**: the bead is closed, with a close reason naming the hold and the age,
+and a comment saying plainly that nobody turned it down — the queue simply never reached
+it — and exactly which command brings it back. `lapseDays` is the threshold for an
+`unendorsed` bead, defaulting to 30, measured from the bead's **last write** rather than
+its filing date: a bead adjusted, commented on or argued about last week has been looked
+at, and the whole premise is that nothing has looked at it.
+
+This is the only sweep here that closes a bead on its own initiative, so it carries three
+guards the rest do not need:
+
+1. **It is reversible, and the bead says so.** A lapse is `bd close`, not a delete: the
+   description, the thread and the edges are all still there, and `bd update <id> --status
+   open` puts it back exactly where it was. The comment names that command, because whoever
+   reads it will be reading it on a phone weeks later.
+2. **It is announced.** Every lapse is a line in `~/Library/Logs/beadcause.log`, an event on
+   the advocate's stream and a count on its card.
+3. **It is capped.** `lapseMaxPerSweep`, default 20 — not a tracker limit, but what makes a
+   backlog drain over an hour of announced batches rather than vanish in a single tick
+   nobody was watching. Oldest first, so a backlog that keeps growing at the front does not
+   leave the forty-day beads for last on every pass.
+
+**What it will not touch.** An `unendorsed` marker is doing a job other than asking a
+question on four kinds of bead, and none of them has a silence to read: a `ship` bead (only
+a deploy closes one), a `promote` bead (the release agent carries it), a `container`, and
+any bead carrying `human` — which has a *different* question already in front of you, with
+its own card and its own answer. Only `open` beads lapse; `in_progress` has a window on it
+right now, and bd refuses to close a blocked bead anyway. A row whose timestamps cannot be
+read is never old enough, because "I cannot tell how old this is" must never resolve to
+"old enough to close".
+
+**The duplicates are the arguable half, and they have their own switch.**
+[The duplicate sweep](#the-duplicate-that-comes-ready-the-moment-its-original-lands)
+argues at length that closing a duplicate is yours and not an agent's, and it is right:
+"these two beads are the same job" is a judgement a worker made in passing. Nothing here
+weakens that. The lapse fires only on a bead that has **already been asked about** — the
+card is in the inbox, the ask block is on the bead, the comment that raised it is on the
+thread — and only once that card has sat there for `supersedeLapseDays`, defaulting to 14.
+The clock is that comment's date rather than the bead's, because the sweep's own writes
+would otherwise reset it. What closes the bead is the silence, not the marker; a bead
+carrying the marker with no ask on its thread is skipped and named in the log. Set
+`lapseSuperseded: false` to drain the endorsement backlog and leave the duplicates alone.
+
+**Delivery cards are deliberately not in it.** bc-iaju1.4 asked for those too — "close the
+delivery bead when its PR merges" — and
+[the merge-that-happened-somewhere-else sweep](#the-merge-that-happened-somewhere-else)
+already does it, on a `MERGED` state read from GitHub, which is a fact rather than an age.
+A second mechanism lapsing them on a clock would close cards whose pull request is still
+open and still wanted, which is the one delivery card that must never close by itself.
+
+`lapseBacklog: false` switches the whole thing off. Like the sweeps above it, it runs
+whether or not the advocate is paused — pausing means "open no more sessions", and this
+opens none; a paused workspace is in fact the one whose queue most needs draining, since
+nothing else is reading it — and like them it is off entirely under `BEADCAUSE_OBSERVE`,
+where it matters more than anywhere else in the file: a spare-port instance closing eighty
+beads in somebody else's tracker is the worst thing an observer could do.
 
 ### The bead whose branch is already in main
 
@@ -4743,6 +4989,99 @@ the filing seam — with a fake `bd` that inherits the way the real one does, si
 that a child is workable was green for three days over a hand-written child that could not
 occur — and, the assertion most likely to be "fixed" by somebody tidying, that the Epic
 Advocate's door still lets one through.
+
+### The workspace that opens no session — the one thing the card could not say
+
+Every refusal above is a **state**, and every one of them has a sentence on the advocate's
+card. Paused says `paused`. Quiet hours says `quiet — watching, not launching`. A full slot
+table says `at its limit of 2 session(s)`. Every hold list has a clause of its own and a
+pill beside it. Read the card and you know exactly why nothing is happening.
+
+What none of them says is **how long it has been the answer**. The card is one line,
+rewritten every thirty seconds and never compared with the one before it, so a workspace
+that has been saying the same thing since last month is drawn identically to one that
+started saying it a minute ago.
+
+That is not hypothetical. A queue whose every bead had been retired by
+`maxAttemptsPerBead` — the state with [no way back on its
+own](#a-bead-it-has-given-up-on-says-so) — reported itself as a suffix on that
+line, and for 27 days it sat beside a clause that read perfectly healthy. Nothing threw, so
+the error filer never saw it. Nothing changed, so no device was ever woken. The daemon was
+working correctly and the workspace was dead.
+
+**So the advocate keeps a clock, and the bead is the notification.** At the end of every
+tick, for every advocate: was it *free to launch*, was there work waiting, and how long has
+both been true with nothing opened? Past `advocates.stallHours` — six by default — it files
+one P0 into that workspace's own tracker naming the advocate, the queue length, how many
+windows it has open and the retired ids, which are the likeliest cause and the one the card
+buried. There is no alerting layer to add a rule to and deliberately will not be one: a P0
+lands on the inbox the phone is already polling, carries its own history, and is the same
+object that records, afterwards, that the outage was detected at all.
+
+**The clock stops for silence somebody asked for.** Paused, quiet hours, the nightly
+maintenance window, switched off — an advocate told to stay quiet is not stalled, and on
+this install quiet hours alone are longer than the window, so a clock that counted them
+would file a bead against a healthy workspace every morning. Being *busy* is not on that
+list: a window here times out at two hours, so six unbroken hours of a full slot table over
+a waiting queue means the windows are hung, and the bead says how many are open so the two
+are one glance apart.
+
+**One bead per workspace, and it closes itself.** It is found by its own exact title, with
+no number in it — a title carrying the queue length would be a different string every tick
+and so a fresh P0 every tick. The next tick on which that advocate opens a session, or its
+queue empties, or you pause it, closes the bead with the reason on it. An empty workspace
+never gets one: a tracker with nothing in it and an advocate doing nothing is an advocate
+that is right.
+
+The bead is filed `human` and `card`, which is load-bearing three times over. The one agent
+that would work it is the one that has stopped; a window opened on it would reset the very
+clock that filed it and be left working a closed bead; and a queueable bead is a bead *in
+the queue*, which would make "there is work waiting" true forever and the stall unable to
+end. `node test/stalled.mjs` covers the four answers, and most of it is the three that
+write nothing.
+
+### The worktrees holding work nobody committed
+
+Everything above is about beads. This one is about the directories a dead session leaves
+behind. A worker window that dies before it commits leaves its whole diff in its worktree,
+and `lib/tidy.js` — rightly — will not retire a worktree with uncommitted files, so it
+leaves them for ever. Nothing said so. Measured on one checkout on 2026-09-19 (bc-iaju1.12):
+of 105 live worktrees, 31 had no commits of their own, 28 of those had been untouched for a
+week, and 26 were dirty — one with 45 modified files, one holding a whole uncommitted
+`lib/surface.js` and two new suites, the oldest 41 days old. The bead each belonged to had
+gone back to the queue reading like work nobody had started.
+
+Every `orphanWorkIntervalMinutes` the advocate walks each approved checkout's
+`.claude/worktrees/` and names a worktree when **all** of these hold:
+
+- it has **no commits of its own** — nothing in `origin/main..HEAD`. One with commits is
+  the [closed-over-a-branch](#the-bead-that-is-closed-over-a-branch-that-never-reached-main)
+  case, and its work at least survives on a ref;
+- `git status` is not empty, untracked files included;
+- **the newest uncommitted file is `orphanWorkIdleDays` old or more** — measured on the
+  dirty files themselves, so a `node_modules` symlink or a build directory touched last
+  night cannot make a dead session look alive;
+- **nobody is in it**: no live `claude` session has it as a cwd, and it is not locked to a
+  pid that is still running. A lock whose pid is *dead* does not protect it — that is the
+  dead attempt this exists to find — and a lock whose reason names no pid at all is
+  honoured, since there is nothing to check it against.
+
+What it says is **one card per workspace**, not one per worktree: twenty-six cards would be
+the attention load the improvement review this came from is trying to reduce. The card
+lists them biggest first, with the file count split into modified and new, how long they
+have sat, the three first paths, and the bead the worktree's name encodes when exactly one
+bead does. It asks one question — *salvage them?* — and **salvage is the recommended
+answer and does not close the card**: it becomes ordinary work, and a session reads each
+diff and lands what is worth keeping. *Let them go* closes it.
+
+**It never deletes, moves, commits or cleans anything**, and must not grow into a sweep that
+does — the whole point is that this work is worth reading, not that it is in the way.
+
+The card is found again by its own title, not by a record on disk, and stays true: it is
+rewritten when the census moves, closed when it is empty, and left alone while a session
+is working it. A card that has been **answered** is not re-asked for the worktrees it
+listed — its description carries the names — so *let them go* holds, and only a worktree
+that was not on it is news. `flagOrphanWork: false` switches it off.
 
 ### The session log, kept in the repo
 

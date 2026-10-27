@@ -1,0 +1,298 @@
+#!/usr/bin/env node
+/**
+ * `b7e-probe` — serve any repo's static web directory in headless Chrome and evaluate an
+ * expression against it.
+ *
+ *     b7e-probe --dir ~/delmar --serve reference/maps/web \
+ *       --hash 'z=12&bp=12900' --eval 'map.getZoom()'
+ *     b7e-probe --dir . --serve public --eval 'document.title' --shot page --json
+ *
+ * bc-dgx7.145: three delmar sessions each hand-built this exact rig in a scratchpad — a
+ * static server over some directory, a headless Chrome, a probe that evaluates something
+ * against the loaded page, then a cleanup — and no two were alike. `lib/probe.js` carries
+ * the one answer and every trap that cost one of them real time; this file is the argv
+ * parsing, the Chrome, and the printing around it — the same split `bin/b7e-eyeball`
+ * draws against `lib/eyeball.js`, and for the same reason: this repo's suite does not
+ * depend on a browser, so the line is drawn exactly where the testable part stops.
+ *
+ * One JSON record per `--hash` given (default one, the bare page): the expression's
+ * value, console errors, failed requests, a screenshot path, and which files were
+ * resolved from the main checkout rather than the worktree (see `lib/probe.js` for why
+ * that resolution never touches disk).
+ *
+ * Exit codes: `0` every state clean. `1` a state's evaluate threw or timed out — the
+ * message names the CDP method it was waiting on. `2` refused — bad usage, or no Chrome.
+ *
+ * b7e-probe is deliberately NOT on DEFAULT_TOOL_LIST, on the same reading as b7e-eyeball:
+ * it launches a browser, binds a port and can read arbitrary files under `--dir`, which is
+ * the shape lib/grants.js calls a write, and `dispatch` — the one agent DEFAULT_TOOL_LIST
+ * governs — has no page of its own to probe either way. See docs/b7e/b7e-probe.md.
+ *
+ * @grant excluded
+ */
+import fs from 'node:fs';
+import path from 'node:path';
+import {
+  DEFAULT_HEIGHT,
+  DEFAULT_TIMEOUT_MS,
+  DEFAULT_WIDTH,
+  createProbeServer,
+  heartbeatInjection,
+  parseDurationMs,
+  planStates,
+  runProbe,
+  stateUrl,
+  summaryLine,
+  waitForGlobal,
+  withTimeout,
+} from '../lib/probe.js';
+import { CHROME, launchChrome } from '../scripts/helpers/chrome.mjs';
+
+const argv = process.argv.slice(2);
+const has = (f) => argv.includes(f);
+const multi = (f) => {
+  const out = [];
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === f && argv[i + 1] !== undefined) out.push(argv[++i]);
+    else if (argv[i].startsWith(`${f}=`)) out.push(argv[i].slice(f.length + 1));
+  }
+  return out;
+};
+const value = (f, fallback = null) => {
+  const all = multi(f);
+  return all.length ? all[all.length - 1] : fallback;
+};
+
+const dim = (s) => `\x1b[2m${s}\x1b[0m`;
+const red = (s) => `\x1b[31m${s}\x1b[0m`;
+const green = (s) => `\x1b[32m${s}\x1b[0m`;
+const amber = (s) => `\x1b[33m${s}\x1b[0m`;
+
+const leave = async (code) => {
+  await new Promise((r) => process.stdout.write('', r));
+  process.exit(code);
+};
+const refuse = async (msg) => {
+  console.error(red(msg));
+  await leave(2);
+};
+
+if (has('--help') || has('-h')) {
+  console.log(
+    [
+      'b7e-probe --dir <root> --serve <subdir> (--eval <js> | --script <file>)',
+      '',
+      '  --dir <root>           the checkout to serve from (required)',
+      '  --serve <subdir>       the directory under <root> to serve at / (required)',
+      '  --eval <js>            an expression to evaluate against the loaded page',
+      '  --script <file>        a file of JS to evaluate instead of --eval',
+      '  --hash <fragment>      repeatable — one URL state (page + #fragment) per hash;',
+      '                         default is the bare page with no fragment',
+      '  --width <px>           viewport width (default 1440)',
+      '  --height <px>          viewport height (default 900)',
+      '  --wait-global <name>   poll for window[name] before evaluating',
+      '  --timeout <60s|500ms>  per-state budget on the evaluate (default 60s)',
+      '  --shot <name>          write a screenshot per state under --out',
+      '  --out <dir>            where screenshots go (default .claude/shots)',
+      '  --baseline <git-ref>   serve that ref\'s committed tree instead of the worktree',
+      '  --json                 one JSON record per state and nothing else on stdout',
+    ].join('\n')
+  );
+  await leave(0);
+}
+
+const VALUED = new Set(['--dir', '--serve', '--eval', '--script', '--hash', '--width', '--height', '--wait-global', '--timeout', '--shot', '--out', '--baseline']);
+const KNOWN_FLAGS = new Set(['--json', '--help', '-h']);
+for (let i = 0; i < argv.length; i++) {
+  const a = argv[i];
+  if (VALUED.has(a)) {
+    i += 1;
+    continue;
+  }
+  if ([...VALUED].some((f) => a.startsWith(`${f}=`))) continue;
+  if (KNOWN_FLAGS.has(a)) continue;
+  await refuse(`unrecognised argument: ${a}`);
+}
+
+const ROOT = value('--dir');
+const SERVE = value('--serve');
+const EVAL = value('--eval');
+const SCRIPT = value('--script');
+const HASHES = multi('--hash');
+const WIDTH = Number(value('--width', DEFAULT_WIDTH));
+const HEIGHT = Number(value('--height', DEFAULT_HEIGHT));
+const WAIT_GLOBAL = value('--wait-global', null);
+const TIMEOUT_MS = parseDurationMs(value('--timeout'), DEFAULT_TIMEOUT_MS);
+const SHOT = value('--shot', null);
+const OUT = path.resolve(value('--out', path.join(process.cwd(), '.claude', 'shots')));
+const BASELINE = value('--baseline', null);
+const JSON_MODE = has('--json');
+
+if (!ROOT) await refuse('--dir is required — the checkout to serve from');
+if (!SERVE) await refuse('--serve is required — the directory under --dir to serve');
+if (!EVAL && !SCRIPT) await refuse('nothing to run: give --eval <js> or --script <file>');
+if (EVAL && SCRIPT) await refuse('--eval and --script are two different runs — pass one or the other');
+if (!Number.isFinite(WIDTH) || WIDTH < 120 || WIDTH > 4000) await refuse(`--width takes pixels: ${value('--width')}`);
+if (!Number.isFinite(HEIGHT) || HEIGHT < 120 || HEIGHT > 4000) await refuse(`--height takes pixels: ${value('--height')}`);
+if (!Number.isFinite(TIMEOUT_MS) || TIMEOUT_MS <= 0) await refuse(`--timeout takes a duration like 60s or 500ms: ${value('--timeout')}`);
+if (!fs.existsSync(CHROME)) await refuse(`Google Chrome not found at ${CHROME} — set CHROME_PATH`);
+
+const root = path.resolve(ROOT);
+if (!fs.existsSync(root)) await refuse(`${root} does not exist`);
+if (!fs.existsSync(path.join(root, SERVE))) await refuse(`${path.join(root, SERVE)} does not exist`);
+
+let expr;
+try {
+  expr = SCRIPT ? fs.readFileSync(path.resolve(SCRIPT), 'utf8') : EVAL;
+} catch (err) {
+  await refuse(err.message);
+}
+
+const states = planStates({ hashes: HASHES.length ? HASHES : [''], width: WIDTH, height: HEIGHT, outDir: SHOT ? OUT : null, name: SHOT || 'probe' });
+
+/* ----------------------------------------------------------------- the run */
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const partText = (a) => a.value ?? a.description ?? (a.preview ? a.preview.description : null) ?? a.unserializableValue ?? '';
+const pathOf = (u) => {
+  try {
+    return new URL(u).pathname;
+  } catch {
+    return u;
+  }
+};
+
+async function chromeDriver() {
+  const { s, close } = await launchChrome('beadcause-probe-');
+  await s.send('Page.enable');
+  await s.send('Runtime.enable');
+  await s.send('Network.enable');
+  // A backgrounded headless tab never fires requestAnimationFrame at all unless it is
+  // told it is the foreground tab — sent once, here, rather than per navigation.
+  await s.send('Page.bringToFront');
+  await s.send('Emulation.setFocusEmulationEnabled', { enabled: true });
+  await s.send('Page.addScriptToEvaluateOnNewDocument', { source: heartbeatInjection() });
+
+  let problems = [];
+  let docFailed = null;
+  let loaded = null;
+  const note = (kind, text) => {
+    if (!text) return;
+    problems.push({ kind, text });
+  };
+  s.on((method, p) => {
+    if (method === 'Page.loadEventFired') loaded?.(true);
+    else if (method === 'Runtime.consoleAPICalled' && p.type === 'error')
+      note('console.error', (p.args || []).map(partText).filter(Boolean).join(' ').trim().slice(0, 300));
+    else if (method === 'Runtime.exceptionThrown')
+      note('pageerror', ((p.exceptionDetails || {}).exception?.description || p.exceptionDetails?.text || 'uncaught exception').split('\n')[0].slice(0, 300));
+    else if (method === 'Network.loadingFailed' && !p.canceled) {
+      note('request failed', `${p.errorText} (${p.type || 'request'})`);
+      if (p.type === 'Document') docFailed = p.errorText;
+    } else if (method === 'Network.responseReceived' && p.response.status >= 400) note('http', `${p.response.status} ${pathOf(p.response.url)}`);
+  });
+
+  const evalJs = async (code, ms = TIMEOUT_MS) => {
+    const r = await withTimeout(s.send('Runtime.evaluate', { expression: code, returnByValue: true, awaitPromise: true }), ms, 'Runtime.evaluate');
+    if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description?.split('\n')[0] || 'evaluate failed');
+    return r.result.value;
+  };
+
+  return {
+    async shoot(state) {
+      problems = [];
+      docFailed = null;
+      await s.send('Emulation.setDeviceMetricsOverride', {
+        width: state.width,
+        height: state.height,
+        deviceScaleFactor: 2,
+        mobile: false,
+        screenWidth: state.width,
+        screenHeight: state.height,
+      });
+
+      const load = new Promise((resolve) => {
+        loaded = resolve;
+      });
+      await s.send('Page.navigate', { url: state.url });
+      // Not raced through `withTimeout`: a page that never fires `load` is still worth
+      // evaluating against (`docFailed`, set from `Network.loadingFailed`, is what
+      // actually reports a navigation that failed outright) — the same bargain
+      // `bin/b7e-eyeball` makes for a page holding a WebSocket open.
+      await Promise.race([load, sleep(TIMEOUT_MS)]);
+
+      if (WAIT_GLOBAL) {
+        const found = await waitForGlobal({ evalJs, name: WAIT_GLOBAL, timeoutMs: TIMEOUT_MS });
+        if (!found) note('wait', `--wait-global ${WAIT_GLOBAL} never appeared (${TIMEOUT_MS}ms)`);
+      }
+
+      let evaluated;
+      let failed = docFailed;
+      try {
+        evaluated = await evalJs(expr);
+      } catch (err) {
+        failed = failed || err.message;
+      }
+
+      let shot = false;
+      if (SHOT) {
+        try {
+          const png = await withTimeout(s.send('Page.captureScreenshot', { format: 'png' }), TIMEOUT_MS, 'Page.captureScreenshot');
+          fs.mkdirSync(path.dirname(state.png), { recursive: true });
+          fs.writeFileSync(state.png, Buffer.from(png.data, 'base64'));
+          shot = true;
+        } catch {
+          /* a state that could not be photographed is still worth its value */
+        }
+      }
+
+      return { value: evaluated, problems, failed, resolvedFiles: server.takeResolved(), shot };
+    },
+    close,
+  };
+}
+
+/* ------------------------------------------------------------------- setup */
+
+let server;
+let driver;
+try {
+  server = await createProbeServer({ root, serveDir: SERVE, baseline: BASELINE });
+} catch (err) {
+  await refuse(err.message);
+}
+
+const printRecord = (r) => {
+  if (JSON_MODE) return void console.log(JSON.stringify(r));
+  const mark = r.ok ? green('ok') : red('FAIL');
+  console.log(`${mark} ${r.hash ? `#${r.hash}` : '(no hash)'} ${r.width}x${r.height}`);
+  console.log(`  value: ${JSON.stringify(r.value)}`);
+  if (r.screenshot) console.log(dim(`  ${path.relative(process.cwd(), r.screenshot)}`));
+  if (r.resolvedFiles.length) console.log(dim(`  resolved from main checkout: ${r.resolvedFiles.join(', ')}`));
+  for (const e of r.consoleErrors) console.log(amber(`  console.error: ${e}`));
+  for (const e of r.failedRequests) console.log(amber(`  request: ${e}`));
+  if (!r.ok) for (const why of r.reasons) console.log(red(`  ↳ ${why}`));
+};
+
+if (!JSON_MODE) console.log(dim(`serving ${path.join(root, SERVE)} on 127.0.0.1:${server.port}${server.mainRoot ? ` (LFS pointers resolved from ${server.mainRoot})` : ''}${BASELINE ? ` at ${BASELINE}` : ''}\n`));
+
+const withUrls = states.map((st) => ({ ...st, url: stateUrl(server.origin, st) }));
+
+let result;
+try {
+  driver = await chromeDriver();
+  result = await runProbe({ states: withUrls, driver, onState: printRecord });
+} finally {
+  if (driver) driver.close();
+  await server.close();
+}
+
+const line = summaryLine(result.records);
+if (JSON_MODE) {
+  console.log(JSON.stringify({ summary: true, states: result.records.length, ok: result.ok, line }));
+} else {
+  console.log('');
+  console.log(result.ok ? green(line) : red(line));
+}
+
+await leave(result.ok ? 0 : 1);

@@ -86,7 +86,7 @@
     ['history', ['/history.js']],
     ['releases', ['/releases.js']],
     ['config', ['/config.js']],
-    ['advocates', ['/montabs.js', '/monitor.js', '/prs.js', '/mirror.js']],
+    ['advocates', ['/montabs.js', '/monitor.js', '/mergeboard.js', '/prs.js', '/mirror.js']],
   ];
 
   /** Scripts already injected. Injection, not execution — a second tag for a file already

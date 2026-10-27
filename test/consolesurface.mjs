@@ -366,11 +366,21 @@ await check('and the phone splits it without inventing a second opinion on what 
   );
 });
 
-await check('an advocate’s proposal card names the files too', () => {
-  // Both of them: the inbox row is the card Adam actually taps, the advocate's own
-  // dashboard row is where a proposal is read before it gets there.
-  assert.match(appJs, /Expects to touch/, 'the inbox row is where a wrong forecast gets corrected');
-  assert.match(monitorJs, /Expects to touch/);
+await check('an advocate’s proposal card names the files too — once, for all three screens', () => {
+  // This used to assert the label in app.js *and* monitor.js, because they were two
+  // renderers. bc-yjekg.5 made them one (public/proposal.js), the stronger version of the
+  // same guarantee: it cannot be on one screen and missing from another. app.js keeps
+  // the label legitimately on a different surface (`filesRowHtml`), so only the two
+  // screens that drew their own card are held to its absence.
+  const proposalJs = fs.readFileSync(PUBLIC('proposal.js'), 'utf8');
+  const mirrorJs = fs.readFileSync(PUBLIC('mirror.js'), 'utf8');
+  assert.match(proposalJs, /Expects to touch/, 'the row is where a wrong forecast gets corrected');
+  for (const [name, src] of [
+    ['monitor.js', monitorJs],
+    ['mirror.js', mirrorJs],
+  ]) {
+    assert.doesNotMatch(src, /Expects to touch/, `public/${name} is drawing its own proposal row again`);
+  }
 });
 
 await check('and no file but lib/beadfiles.js writes the block itself', () => {

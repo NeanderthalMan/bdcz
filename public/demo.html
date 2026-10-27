@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b0f14" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f6f7f9" media="(prefers-color-scheme: light)">
+  <title>Beadcause · DemoMode</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body class="doc-body">
+  <header class="topbar">
+    <div class="brand">
+      <span class="dot" id="pulse"></span>
+      <h1>DemoMode</h1>
+    </div>
+    <div class="sheet-actions">
+      <button id="demo-refresh" class="icon-btn" aria-label="Refresh">⟳</button>
+    </div>
+  </header>
+
+  <main class="work pagescroll">
+    <!--
+      Where a pull request goes to be judged by being used (bc-sj8k, this page bc-sj8k.2).
+      One card per open pull request of this app, and a tap on one puts it on green and
+      this device on it. The way back is the router's /__demo/blue, which lands here with
+      the candidate you were just on at the top.
+    -->
+    <div id="demo-where"></div>
+    <div id="demo">
+      <div class="empty">Reading the pull requests…</div>
+    </div>
+  </main>
+
+  <script src="/report.js"></script>
+  <!-- The beads that go round the brand dot while this page is fetching. See
+       public/orbit.js. -->
+  <script src="/orbit.js"></script>
+  <!-- Whether what you are looking at is current. See public/freshness.js. -->
+  <script src="/freshness.js"></script>
+  <!-- What the URL hash means — before viewbar.js, which reads the answer out of it. -->
+  <script src="/hashroute.js"></script>
+  <script src="/viewbar.js"></script>
+  <script src="/demo.js"></script>
+</body>
+</html>

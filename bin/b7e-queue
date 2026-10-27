@@ -1,0 +1,153 @@
+#!/usr/bin/env node
+/**
+ * Where a gate stands in the machine-wide slot queue, and whether anything ahead of it
+ * is actually alive.
+ *
+ *   b7e-queue                        the queue as it stands: limit, each ticket's
+ *                                     position, pid, worktree and age
+ *   b7e-queue --mine                 just my position, or "not queued"
+ *   b7e-queue --wait [--timeout <s>] block until my ticket holds a slot, exit 3 on the
+ *                                     deadline
+ *   b7e-queue --dir <path>           "mine" is <path>'s worktree, not the caller's cwd
+ *   b7e-queue --json                 one object per ticket instead of the printed report
+ *
+ * bc-dgx7.116 names six sessions that each hit `lib/gate.js`'s FIFO semaphore and
+ * invented a different way to sit through it, because `waitingLine`'s one-line
+ * "N gates ahead of you" was the only view the queue ever had. `lib/queue.js` carries
+ * the answer; this file is the argv parsing and printing around it, the same split
+ * every other `b7e-*` command uses.
+ *
+ * Exit codes: 0 a clean report, or `--mine`/`--wait` finding (or reaching) a held
+ * slot, or `--mine`/`--wait` finding no ticket of mine at all. 3 `--wait`'s deadline
+ * passed before my ticket held. 2 refused — bad usage.
+ *
+ * Granted read: the FIFO gate queue's own view — it reads liveSlots/slotLimit tickets and
+ * cross-checks lib/gates.js's discover; no writes, no kills. Section: docs/b7e/b7e-queue.md.
+ *
+ * @grant read
+ */
+import {
+  formatRow,
+  headerLine,
+  myRow,
+  queueRows,
+  queueSummary,
+  TIMEOUT_LINE,
+  waitEstimateLine,
+  waitForMine,
+  withMismatches,
+} from '../lib/queue.js';
+
+const argv = process.argv.slice(2);
+const has = (f) => argv.includes(f);
+const value = (f, fallback) => {
+  const inline = argv.find((a) => a.startsWith(`${f}=`));
+  if (inline) return inline.slice(f.length + 1);
+  const at = argv.indexOf(f);
+  return at === -1 ? fallback : (argv[at + 1] ?? fallback);
+};
+
+if (has('--help') || has('-h')) {
+  console.log(
+    [
+      'b7e-queue                        the queue as it stands: limit, position, pid, worktree, age',
+      'b7e-queue --mine                 just my position, or "not queued"',
+      'b7e-queue --wait [--timeout <s>] block until my ticket holds a slot, exit 3 on the deadline',
+      'b7e-queue --dir <path>           "mine" is <path>\'s worktree, not the caller\'s cwd',
+      'b7e-queue --json                 one object per ticket instead of the printed report',
+    ].join('\n'),
+  );
+  process.exit(0);
+}
+
+const DIR = value('--dir', process.cwd());
+const JSON_MODE = has('--json');
+const MINE_ONLY = has('--mine');
+const WAIT = has('--wait');
+const timeoutArg = value('--timeout', null);
+
+if (WAIT && timeoutArg != null && (!Number.isFinite(Number(timeoutArg)) || Number(timeoutArg) < 0)) {
+  console.error('--timeout wants a non-negative number of seconds');
+  process.exit(2);
+}
+
+const dim = (s) => `\x1b[2m${s}\x1b[0m`;
+const amber = (s) => `\x1b[33m${s}\x1b[0m`;
+const red = (s) => `\x1b[31m${s}\x1b[0m`;
+
+async function report() {
+  const resolvedRows = await withMismatches(queueRows(), { dir: DIR });
+  const summary = queueSummary(resolvedRows);
+  const mine = await myRow(resolvedRows, { dir: DIR });
+
+  if (JSON_MODE) {
+    for (const r of resolvedRows) console.log(JSON.stringify({ ...r, mine: mine === r }));
+    console.log(JSON.stringify({ summary: true, ...summary, mine: mine ? mine.pid : null }));
+    return;
+  }
+
+  console.log(headerLine(summary));
+  if (!resolvedRows.length) return;
+  for (const r of resolvedRows) {
+    const line = formatRow(r, { mine: mine === r });
+    console.log(r.mismatch ? red(line) : mine === r ? amber(line) : line);
+  }
+  const estimate = waitEstimateLine(resolvedRows, summary);
+  if (estimate) console.log(dim(estimate));
+}
+
+async function mineOnly() {
+  const rows = await withMismatches(queueRows(), { dir: DIR });
+  const mine = await myRow(rows, { dir: DIR });
+  if (!mine) {
+    console.log(JSON_MODE ? JSON.stringify({ queued: false }) : dim('not queued'));
+    process.exit(0);
+  }
+  if (JSON_MODE) {
+    console.log(JSON.stringify({ queued: true, ...mine }));
+  } else {
+    console.log(formatRow(mine, { mine: true }));
+  }
+  process.exit(0);
+}
+
+async function wait() {
+  const rows = await withMismatches(queueRows(), { dir: DIR });
+  const already = await myRow(rows, { dir: DIR });
+  if (!already) {
+    console.log(JSON_MODE ? JSON.stringify({ queued: false }) : dim('not queued — nothing to wait for'));
+    process.exit(0);
+  }
+
+  const timeoutMs = timeoutArg == null ? Infinity : Number(timeoutArg) * 1000;
+  let lastSaid = 0;
+  const held = await waitForMine({
+    dir: DIR,
+    timeoutMs,
+    onWait: (row) => {
+      if (JSON_MODE) return;
+      const now = Date.now();
+      if (lastSaid && now - lastSaid < 30_000) return;
+      lastSaid = now;
+      if (row) console.error(amber(`waiting — ${formatRow(row, { mine: true })}`));
+    },
+  });
+
+  if (!held) {
+    if (JSON_MODE) console.log(JSON.stringify({ queued: true, held: false, timedOut: true, message: TIMEOUT_LINE }));
+    else console.error(red(TIMEOUT_LINE));
+    process.exit(3);
+  }
+
+  if (JSON_MODE) console.log(JSON.stringify({ queued: true, held: true, ...held }));
+  else console.log(formatRow(held, { mine: true }));
+  process.exit(0);
+}
+
+if (MINE_ONLY) {
+  await mineOnly();
+} else if (WAIT) {
+  await wait();
+} else {
+  await report();
+}

@@ -258,7 +258,7 @@ solo install behaves exactly as it always did.
 
 - **`~/.config/beadcause/config.json` is written on first run** and holds the shared
   token. Everything below is tunable there; see [Config](config.md#config--configbeadcauseconfigjson).
-- **`assetRoots`** is what a question may show you — images and documents outside it
+- **`assetRoots`** is what a question may show you — images, documents and audio clips outside it
   are refused. Setup asks for your code directory; add more later.
 - **Sessions open in `~/beads/<workspace>` by default**, which always works. Setup
   asks whether your shell derives `BEADS_DIR` from the working directory; see

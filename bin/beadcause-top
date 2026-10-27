@@ -2,11 +2,12 @@
 /**
  * `beadcause-top` — every Claude Code session on this Mac, live, like `top`.
  *
- *     beadcause-top                 redraw every 3s until q
+ *     beadcause-top                 redraw every 3s until q; ↑↓ pick a row, f brings its window to the front
  *     beadcause-top --every 10      redraw every ten seconds
  *     beadcause-top --once          one frame and exit (screenshots, cron, a sanity check)
  *     beadcause-top --json          the rows as one object and exit
  *     beadcause-top --no-alt        draw inline instead of taking over the screen
+ *     beadcause-top --queue         start on the merge queue (m swaps views); with --once or --json, the queue
  *
  * bc-5to5r.7, from Adam's request on 2026-10-12: "one iterm window should remain separate,
  * and it is a monitor process that shows all the current sessions, like 'beadcause-top', it
@@ -24,36 +25,53 @@
  * nothing, opens nothing and needs no token or daemon — it works when the daemon is down,
  * which is when it is wanted most.
  *
+ * The merge-queue view (`m`, or `--queue`) is the exception, bc-n01yg: it reads the
+ * daemon's `/api/queues` and `/api/prs` on loopback with the config's token, and says in one
+ * line when it cannot. lib/topqueue.js says why it asks rather than reading the trackers.
+ *
  * @grant read
  */
 import { loadConfig } from '../lib/config.js';
-import { TOP_REFRESH_MS, collectTop, runTop } from '../lib/top.js';
+import { DEFAULT_SORT, SORTS, TOP_REFRESH_MS, collectTop, runTop, sortRows } from '../lib/top.js';
+import { collectQueue, queueRows } from '../lib/topqueue.js';
 
 const argv = process.argv.slice(2);
-const USAGE = `usage: beadcause-top [--once | --json] [--every <seconds>] [--no-alt]
+const USAGE = `usage: beadcause-top [--once | --json] [--queue] [--every <seconds>] [--sort <column>] [--reverse] [--no-alt]
 
 A live table of every Claude Code session on this Mac: name, workspace, bead, kind,
-busy/idle, context, cpu, memory, uptime, where, last write. q quits, r redraws now.
+busy/idle, context, cpu, memory, uptime, where, last write. The order is yours and does
+not move on its own: ${DEFAULT_SORT.by} then name to start, left/right (or h/l) pick the
+sort column, o reverses it. Up/down (or j/k) pick a row and f (or Enter) brings that
+session's iTerm tab and window to the front; r redraws now; q quits.
+
+m (or Tab) swaps to the merge queue: every queued pull request with its position, stage,
+attempts, checks, mergeable, size and age, then every open pull request that is not
+queued, and above them whether each base is green. There f opens the pull request in the
+browser. That view asks the running daemon; the sessions view never does.
 
   --once            one frame and exit
   --json            the rows as one object and exit
   --every <seconds> how often to redraw (default ${TOP_REFRESH_MS / 1000})
+  --sort <column>   the column to order by: ${Object.keys(SORTS).join(', ')} (default ${DEFAULT_SORT.by})
+  --reverse         that order, the other way up
+  --queue           start on the merge queue; with --once or --json, print the queue instead
   --no-alt          draw inline instead of taking over the screen`;
 
 if (argv.includes('--help') || argv.includes('-h')) {
   console.log(USAGE);
   process.exit(0);
 }
-const takes = new Set(['--every']);
-const known = new Set(['--once', '--json', '--no-alt', ...takes]);
+const takes = new Set(['--every', '--sort']);
+const known = new Set(['--once', '--json', '--no-alt', '--reverse', '--queue', ...takes]);
 let every = TOP_REFRESH_MS;
+let by = DEFAULT_SORT.by;
 for (let i = 0; i < argv.length; i += 1) {
   const a = argv[i];
   if (!known.has(a)) {
     console.error(`beadcause-top: unknown argument ${a}\n\n${USAGE}`);
     process.exit(2);
   }
-  if (takes.has(a)) {
+  if (a === '--every') {
     const v = Number(argv[i + 1]);
     if (!Number.isFinite(v) || v <= 0) {
       console.error(`beadcause-top: ${a} wants a number of seconds\n\n${USAGE}`);
@@ -62,16 +80,46 @@ for (let i = 0; i < argv.length; i += 1) {
     every = v * 1000;
     i += 1;
   }
+  if (a === '--sort') {
+    const v = String(argv[i + 1] || '');
+    if (!SORTS[v]) {
+      console.error(`beadcause-top: --sort wants one of ${Object.keys(SORTS).join(', ')}\n\n${USAGE}`);
+      process.exit(2);
+    }
+    by = v;
+    i += 1;
+  }
 }
+const sort = { by, reverse: argv.includes('--reverse') };
 
 const cfg = loadConfig();
 const collect = () => collectTop({ cfg });
+const queueDoor = ({ refresh = false } = {}) => collectQueue({ cfg, refresh });
+const queueFirst = argv.includes('--queue');
+
+if (argv.includes('--json') && queueFirst) {
+  const data = await queueDoor();
+  if (data.error) {
+    console.error(`beadcause-top: ${data.error}`);
+    process.exit(1);
+  }
+  console.log(
+    JSON.stringify({ at: data.queues?.at || null, bases: data.queues?.bases || [], errors: data.queues?.errors || [], rows: queueRows(data) }, null, 2)
+  );
+  process.exit(0);
+}
 
 if (argv.includes('--json')) {
   const { rows, report, register, boot } = await collect();
   console.log(
     JSON.stringify(
-      { boot: new Date(boot).toISOString(), report: report ? { boot: report.boot, at: report.at } : null, polledAt: register.polledAt, rows },
+      {
+        boot: new Date(boot).toISOString(),
+        report: report ? { boot: report.boot, at: report.at } : null,
+        polledAt: register.polledAt,
+        sort,
+        rows: sortRows(rows, sort),
+      },
       null,
       2
     )
@@ -82,6 +130,9 @@ if (argv.includes('--json')) {
 const code = await runTop({
   collect,
   every,
+  sort,
+  collectQueue: queueDoor,
+  view: queueFirst ? 'queue' : 'sessions',
   once: argv.includes('--once'),
   alt: Boolean(process.stdout.isTTY) && !argv.includes('--once') && !argv.includes('--no-alt'),
 });

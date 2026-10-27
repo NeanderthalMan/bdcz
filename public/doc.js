@@ -64,6 +64,13 @@
       return;
     }
 
+    // A sound is played, not read: fetching it as text would draw the bytes as a wall of
+    // replacement characters (bc-xl7n.167). The <audio> asks /api/asset for ranges itself.
+    if (/^(mp3|m4a|aac|wav|ogg|oga|opus|flac)$/.test(ext)) {
+      out.innerHTML = `<audio controls preload="metadata" src="${assetUrl(filePath)}"></audio>`;
+      return;
+    }
+
     let res;
     try {
       res = await fetch(assetUrl(filePath), { headers: { 'x-beadcause-token': token } });

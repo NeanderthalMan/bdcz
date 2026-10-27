@@ -88,6 +88,7 @@ await check('a spawn into a missing directory rejects STOPPED, and nothing is th
       ROOT: path.join(tmp, 'gone'),
       LOADED_ENV: 'BEADCAUSE_TEST_LOADED',
       freePort: async () => 1,
+      releasePort: () => {},
       localJson: async () => {
         throw new Error('connect ECONNREFUSED');
       },

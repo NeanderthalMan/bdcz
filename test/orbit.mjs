@@ -329,7 +329,7 @@ await check('a slow one shows it, on every dot, after the debounce and not befor
   assert.deepEqual(app.lit(), ['dot loading', 'dot loading']);
 });
 
-await check('it says `loading`, never `busy` — the class ten page scripts toggle themselves', async () => {
+await check('it says `loading`, never `busy` — the class console.js and foundations.js toggle themselves', async () => {
   const app = load();
   app.dots[0].classList.add('busy');
   app.ctx.window.fetch('/api/questions');

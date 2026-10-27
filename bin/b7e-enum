@@ -1,0 +1,158 @@
+#!/usr/bin/env node
+/**
+ * `b7e-enum` — every place a sibling name is registered, and whether a new name is
+ * registered alongside it, in one call instead of a grep-then-sed survey repeated by
+ * hand (bc-dgx7.153).
+ *
+ *   b7e-enum <sibling>                          every registration site of <sibling>
+ *   b7e-enum <sibling> --new <name>              the above, plus present/missing of <name>
+ *   b7e-enum <sibling> --dir <path>              another checkout, not this repo
+ *   b7e-enum <sibling> --ref <ref>               the tree as git saw it at <ref>
+ *   b7e-enum <sibling> --json                    machine-readable
+ *
+ * Four sessions (dv-5eu.1.16/.17/.18/.20 — see lib/enum.js's own header) each worked
+ * this out by hand for a different sibling name in the same repo, none the same way,
+ * and every one of them still missed at least one registry. This is the command that
+ * would have replaced all four: one pass over a tree, classifying every quoted
+ * occurrence of the sibling name as a tuple/list/set member, a dict key, an `==`
+ * comparison or an `in (...)` branch, naming the constant or function it belongs to,
+ * and — with `--new` — saying present or missing for the new name at that same site.
+ *
+ * Read-only by construction: a filesystem walk (or `git ls-tree`/`git show` under
+ * `--ref`), nothing written anywhere. See lib/enum.js for what it does and does not
+ * parse — it is a character scan, not a real parser for any of the languages it runs
+ * against, and that file's header says exactly where the tradeoffs are.
+ *
+ * Exit codes: `0` every registration site found, and — with `--new` — every one of
+ * them already has the new name too. `1` a real, non-error answer with something
+ * still missing: no site found at all, or (`--new`) at least one site missing the new
+ * name. `2` bad usage. `3` `--dir` does not exist, or `--ref` does not resolve.
+ *
+ * @grant read
+ */
+import fs from 'node:fs';
+import path from 'node:path';
+import { scanDir, scanRef } from '../lib/enum.js';
+
+const argv = process.argv.slice(2);
+const has = (f) => argv.includes(f);
+const value = (...names) => {
+  for (const f of names) {
+    const inline = argv.find((a) => a.startsWith(`${f}=`));
+    if (inline) return inline.slice(f.length + 1);
+    const at = argv.indexOf(f);
+    if (at > -1) return argv[at + 1];
+  }
+  return undefined;
+};
+
+const USAGE = `usage: b7e-enum <sibling> [--new <name>] [--dir <path>] [--ref <ref>] [--json]
+
+  <sibling>       the name to find every registration of
+  --new <name>    also report present/missing of this name at each site found
+  --dir <path>    scan another checkout instead of the current directory
+  --ref <ref>     read the tree as git saw it at this ref, instead of the working tree
+  --json          one object per row instead of the printed report`;
+
+if (has('--help') || has('-h')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+
+const JSON_MODE = has('--json');
+const NEW_NAME = value('--new');
+const REF = value('--ref');
+const DIR_GIVEN = value('--dir');
+const ROOT = path.resolve(DIR_GIVEN || process.cwd());
+
+const FLAG_VALUES = new Set(['--new', '--dir', '--ref']);
+const positional = [];
+for (let i = 0; i < argv.length; i += 1) {
+  const a = argv[i];
+  if (a === '--json' || a === '--help' || a === '-h') continue;
+  if (FLAG_VALUES.has(a)) {
+    i += 1;
+    continue;
+  }
+  if (a.startsWith('--') && a.includes('=')) continue;
+  if (a.startsWith('-')) {
+    console.error(`\x1b[31mb7e-enum: unrecognised flag: ${a}\x1b[0m`);
+    console.error(USAGE);
+    process.exit(2);
+  }
+  positional.push(a);
+}
+
+const SIBLING = positional[0];
+if (!SIBLING || positional.length > 1) {
+  console.error(`\x1b[31mb7e-enum: ${SIBLING ? 'too many arguments' : 'a sibling name is required'}\x1b[0m`);
+  console.error(USAGE);
+  process.exit(2);
+}
+
+if (!DIR_GIVEN && !fs.existsSync(ROOT)) {
+  console.error(`\x1b[31mb7e-enum: not a directory: ${ROOT}\x1b[0m`);
+  process.exit(3);
+}
+if (DIR_GIVEN && !fs.existsSync(ROOT)) {
+  console.error(`\x1b[31mb7e-enum: --dir does not exist: ${ROOT}\x1b[0m`);
+  process.exit(3);
+}
+
+let result;
+try {
+  result = REF ? scanRef(ROOT, REF, SIBLING, { newName: NEW_NAME }) : scanDir(ROOT, SIBLING, { newName: NEW_NAME });
+} catch (err) {
+  console.error(`\x1b[31mb7e-enum: ${REF ? `--ref ${REF} does not resolve` : 'scan failed'}\x1b[0m`);
+  if (err?.message) console.error(`      ${err.message.split('\n')[0]}`);
+  process.exit(3);
+}
+
+const { sites, prose } = result;
+const anyMissing = NEW_NAME ? sites.some((s) => s.newPresent === false) : sites.length === 0;
+
+if (JSON_MODE) {
+  for (const s of sites) console.log(JSON.stringify({ kind: 'site', ...s }));
+  for (const p of prose) console.log(JSON.stringify({ kind: 'prose', ...p }));
+  process.exitCode = anyMissing ? 1 : 0;
+} else if (sites.length === 0 && prose.length === 0) {
+  console.log(`no occurrence of "${SIBLING}" found under ${DIR_GIVEN || '.'}${REF ? ` at ${REF}` : ''}`);
+  process.exitCode = 1;
+} else {
+  let lastFile = null;
+  for (const s of sites) {
+    if (s.file !== lastFile) {
+      console.log(`\n${s.file}`);
+      lastFile = s.file;
+    }
+    const enc = s.enclosing ? ` in \x1b[2m${s.enclosing}\x1b[0m` : '';
+    let presence = '';
+    if (NEW_NAME) {
+      presence = s.newPresent
+        ? `  \x1b[32m${NEW_NAME} present\x1b[0m`
+        : `  \x1b[31m${NEW_NAME} missing\x1b[0m`;
+    }
+    console.log(`  :${s.line}  ${s.construct}${enc}${presence}`);
+    console.log(`      \x1b[2m${s.snippet}\x1b[0m`);
+  }
+  if (prose.length > 0) {
+    console.log(`\n\x1b[2mprose mentions (README, docstrings)\x1b[0m`);
+    let lastProseFile = null;
+    for (const p of prose) {
+      if (p.file !== lastProseFile) {
+        console.log(`  ${p.file}`);
+        lastProseFile = p.file;
+      }
+      console.log(`    :${p.line}  \x1b[2m${p.snippet}\x1b[0m`);
+    }
+  }
+  if (NEW_NAME && sites.length > 0) {
+    const missingCount = sites.filter((s) => s.newPresent === false).length;
+    console.log(
+      missingCount === 0
+        ? `\n\x1b[32mall ${sites.length} site(s) already have "${NEW_NAME}"\x1b[0m`
+        : `\n\x1b[31m${missingCount} of ${sites.length} site(s) missing "${NEW_NAME}"\x1b[0m`,
+    );
+  }
+  process.exitCode = anyMissing ? 1 : 0;
+}

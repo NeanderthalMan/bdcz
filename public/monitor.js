@@ -86,10 +86,6 @@
   })();
 
   const out = document.getElementById('mon');
-  /* The brand dot. Left alone in the shell: it is the whole document's there, driven off
-     public/report.js's count of what is in flight, and a second writer toggling `busy` on
-     it would clear it under a fetch of the inbox's that is still out. */
-  const pulse = inShell ? null : document.getElementById('pulse');
   const tally = document.getElementById('tally');
   const observing = document.getElementById('observing');
 
@@ -183,8 +179,16 @@
     logs: new Map(), // workspace → { lines, running }
     archives: new Map(), // workspace → { bead, ref, sessions } or { text }
     open: new Set(readOpen()),
-    picks: new Map(), // question key → Map(1-based bead index → 'yes' | 'no')
+    // The per-bead yes/no moved to public/proposal.js with the card that draws it
+    // (bc-yjekg.5), shared with the inbox and the Mirror on purpose: the same proposal
+    // is drawn on all three, and a ✓ that only counted on the screen you tapped it on
+    // was the duplication that bead exists to end.
     error: null,
+    /** The armed bulk control on a proposal, as `${key}|prop-yes` / `|prop-no`. */
+    armedProp: null,
+    armedPropTimer: null,
+    /** A poll wanted to repaint while the caret was in an adjust field. See `render`. */
+    repaintDeferred: false,
     /* The three halves of a stepper that has been moved but not yet applied — see
        `limitControl`. All keyed the same way (`stepKey`), and all in `state` rather
        than in the markup for one reason: this page repaints off a poll every couple
@@ -228,10 +232,36 @@
     localStorage.setItem('beadcause.mon.open', JSON.stringify([...state.open]));
   }
 
-  const picksFor = (key) => {
-    if (!state.picks.has(key)) state.picks.set(key, new Map());
-    return state.picks.get(key);
-  };
+  /**
+   * This page's mount of the one proposal card — public/proposal.js (bc-yjekg.5).
+   *
+   * `root` is the whole output element rather than a card: a proposal here is a block
+   * inside an advocate's "Waiting on you" section, keyed `.mon-proposal[data-key]`, and
+   * the module finds its rows by key from the root whatever wraps them.
+   *
+   * `arm` is a field of this page's own state. The inbox shares `state.armed` between
+   * merge, ship and every option tap; the only other armed control here is Ship, which
+   * has `armedShip` to itself.
+   */
+  const props = window.beadcause.proposal.bind({
+    root: () => out,
+    byKey: (key) => (state.proposals.get(key.split('/')[0]) || []).find((x) => x.key === key),
+    armed: () => state.armedProp,
+    arm: (token, repaint) => {
+      state.armedProp = token;
+      clearTimeout(state.armedPropTimer);
+      state.armedPropTimer = setTimeout(() => {
+        state.armedProp = null;
+        repaint();
+      }, 6000);
+    },
+    disarm: () => {
+      state.armedProp = null;
+      clearTimeout(state.armedPropTimer);
+    },
+    rerender: () => render(),
+    submit: (key, q, answer, restore) => submitProposal(key, q, answer, restore),
+  });
 
   /**
    * Is there a process behind this pid *in the payload we are drawing*?
@@ -1429,60 +1459,27 @@
    *
    * An advocate may work what exists without asking; filing something *for* you makes
    * you answerable for an idea an agent had, so nothing is created until you press it.
-   * The full text of each bead is here — description, done-when, and the advocate's
-   * argument for why your tracker should carry it — because a title and two buttons
-   * is precisely what makes a suggestion impossible to judge.
+   *
+   * **This used to be a second renderer and is now a mount of the first** (bc-yjekg.5,
+   * ux-review §4.3). What this file drew was recognisably a different question from what
+   * the inbox drew of the same proposal: Create/Decline instead of ✓/✎/✕, All/None
+   * instead of two counting bulk controls, a primary that stayed disabled until every
+   * row had been answered, no fold, no duplicate warning, and no way to adjust a title.
+   * The last cost something real — a proposal adjusted in the inbox and then filed from
+   * this page filed the agent's original words, because this file sent `create` and
+   * never `edits`. The card is public/proposal.js's now; what is left here is the frame.
    */
   function proposalHtml(q) {
     const beads = q.proposal?.beads || [];
-    const picks = picksFor(q.key);
-    const rows = beads
-      .map((b, i) => {
-        const n = i + 1;
-        const pick = picks.get(n) || '';
-        return `<div class="mon-bead${pick ? ` picked-${pick}` : ''}">
-          <div class="mon-bead-head">
-            <span class="mon-rank">${n}</span>
-            <strong>${esc(b.title)}</strong>
-            <span class="tag">${esc(P_LABEL[b.priority] ?? `P${b.priority}`)}</span>
-            <span class="tag dim">${esc(b.type)}</span>
-          </div>
-          ${b.description ? `<p class="mon-bead-body">${esc(b.description)}</p>` : ''}
-          ${b.acceptance ? `<p class="mon-bead-meta"><strong>Done when:</strong> ${esc(b.acceptance)}</p>` : ''}
-          ${b.rationale ? `<p class="mon-bead-meta why">Why: ${esc(b.rationale)}</p>` : ''}
-          ${b.deps?.length ? `<p class="mon-bead-meta"><strong>Depends on:</strong> ${esc(b.deps.join(', '))}</p>` : ''}
-          ${
-            b.files?.length
-              ? `<p class="mon-bead-meta"><strong>Expects to touch:</strong> ${esc(b.files.join(', '))}</p>`
-              : ''
-          }
-          <div class="mon-bead-acts">
-            <button class="adv-btn${pick === 'yes' ? ' on' : ''}" data-pick="yes" data-key="${esc(q.key)}" data-n="${n}">Create</button>
-            <button class="adv-btn${pick === 'no' ? ' on danger' : ''}" data-pick="no" data-key="${esc(q.key)}" data-n="${n}">Decline</button>
-          </div>
-        </div>`;
-      })
-      .join('');
-
-    const approved = [...picks.entries()].filter(([, v]) => v === 'yes').length;
-    const undecided = beads.length - picks.size;
+    if (!beads.length) return '';
     return `<div class="mon-proposal" data-key="${esc(q.key)}">
       <div class="mon-prop-head">
         <span class="pill id">${esc(q.id)}</span>
         <span class="mon-prop-title">${esc(q.title)}</span>
         <time>${esc(age(q.createdAt))}</time>
       </div>
-      ${rows}
-      <div class="mon-prop-foot">
-        <button class="adv-btn" data-pick-all="yes" data-key="${esc(q.key)}">All</button>
-        <button class="adv-btn" data-pick-all="no" data-key="${esc(q.key)}">None</button>
-        <span class="mon-prop-count">${
-          undecided ? `${plural(undecided, 'bead')} undecided` : `${approved} of ${beads.length} to create`
-        }</span>
-        <button class="adv-btn primary" data-submit="${esc(q.key)}"${undecided ? ' disabled' : ''}>${
-          approved ? `Create ${approved}` : 'Decline all'
-        }</button>
-      </div>
+      ${props.rowsHtml(q)}
+      ${props.bulkHtml(q)}
     </div>`;
   }
 
@@ -2147,6 +2144,21 @@
     const data = state.work;
     if (!data) return;
 
+    /*
+      Don't yank the field out from under a thumb mid-sentence (bc-yjekg.5).
+
+      New on this page, and new because of the shared proposal card: until then there
+      was nothing here you could type into, and this render rebuilds `out.innerHTML`
+      wholesale every time the poll answers. What you have typed is never at risk (it
+      lives in public/proposal.js's `edits` map, not in the DOM), so this only defers
+      the repaint. The `focusout` below flushes it.
+    */
+    if (document.activeElement?.matches?.('[data-role="edit-field"]') && out.contains(document.activeElement)) {
+      state.repaintDeferred = true;
+      return;
+    }
+    state.repaintDeferred = false;
+
     // A pending number the daemon has since arrived at anyway — this repo stepped from
     // another device, or the value applied and came back — is settled, not pending. Done
     // here rather than in `stepLimit` because it is a *poll* that makes it true, and an
@@ -2323,7 +2335,6 @@
   }
 
   async function load() {
-    pulse?.classList.add('busy');
     try {
       // Two requests, in parallel and independent: the proposals are ordinary inbox
       // questions, and a `bd` sweep that fails must not take the advocate state —
@@ -2364,7 +2375,6 @@
       // will most likely undo.
       if (!state.work) out.innerHTML = `<div class="empty"><strong>Can't reach the server</strong>${esc(err.message)}</div>`;
     } finally {
-      pulse?.classList.remove('busy');
       // Whether or not that worked, and deliberately: a page opened while the daemon is
       // restarting used to be brought back by the twenty-second timer, and with the
       // timer gone the stream is the only thing that can. Its own backoff is what stops
@@ -2626,41 +2636,35 @@
   /**
    * Answer a proposal: create the beads you picked, decline the rest.
    *
-   * The sentence is for you and the array is for the server — the same split
-   * public/app.js makes, and for the same reason: the numbers must not have to be
-   * read back out of prose. Nothing is sent until every bead has a decision, which
-   * is what the disabled submit enforces.
+   * The sentence is for you and the arrays are for the server — the same split
+   * public/app.js makes, and for the same reason: the numbers must not have to be read
+   * back out of prose. Both are public/proposal.js's now (bc-yjekg.5) and arrive as
+   * `answer`, which is the fix for the quiet half of the duplication: this page used to
+   * build its own near-identical sentence and send `create` **without** `edits`.
+   *
+   * What is left here is this page's own failure handling: the block stays where it is
+   * with the reason appended, and `restore` puts the picks and the rewrites back first.
    */
-  async function submitProposal(key, btn) {
-    const q = (state.proposals.get(key.split('/')[0]) || []).find((x) => x.key === key);
-    if (!q) return;
-    const beads = q.proposal?.beads || [];
-    const picks = picksFor(key);
-    const approved = [...picks.entries()]
-      .filter(([, v]) => v === 'yes')
-      .map(([n]) => n)
-      .sort((a, b) => a - b);
-    const declined = beads.length - approved.length;
-    const text = approved.length
-      ? `CREATE: ${approved.join(',')} — filing ${approved.length} of ${plural(beads.length, 'proposed bead')}${
-          declined ? `, declining ${declined}` : ''
-        }.`
-      : `Not now — none of the ${plural(beads.length, 'proposed bead')}.`;
-
-    btn.disabled = true;
-    btn.textContent = '…';
+  async function submitProposal(key, q, answer, restore) {
+    const block = () => out.querySelector(`.mon-proposal[data-key="${CSS.escape(key)}"]`);
+    const busy = block()?.querySelector('.prop-bulk');
+    if (busy) for (const b of busy.querySelectorAll('button')) b.disabled = true;
     try {
       await api('/api/respond', {
         method: 'POST',
-        body: JSON.stringify({ workspace: q.workspace, id: q.id, response: text, ...(approved.length ? { create: approved } : {}) }),
+        body: JSON.stringify({
+          workspace: q.workspace,
+          id: q.id,
+          response: answer.text,
+          ...(answer.create ? { create: answer.create } : {}),
+          ...(answer.edits ? { edits: answer.edits } : {}),
+        }),
       });
-      state.picks.delete(key);
       await load();
     } catch (err) {
-      btn.disabled = false;
-      btn.textContent = 'Retry';
-      out.querySelector(`.mon-proposal[data-key="${CSS.escape(key)}"]`)
-        ?.insertAdjacentHTML('beforeend', `<div class="adv-note bad">${esc(err.message)}</div>`);
+      restore();
+      render();
+      block()?.insertAdjacentHTML('beforeend', `<div class="adv-note bad">${esc(err.message)}</div>`);
     }
   }
 
@@ -2809,36 +2813,13 @@
       return;
     }
 
-    const pick = e.target.closest('[data-pick]');
-    if (pick) {
-      e.preventDefault();
-      const picks = picksFor(pick.dataset.key);
-      const n = Number(pick.dataset.n);
-      // Tapping the choice you already made clears it — undecided is a real state,
-      // and there has to be a way back to it.
-      if (picks.get(n) === pick.dataset.pick) picks.delete(n);
-      else picks.set(n, pick.dataset.pick);
-      render();
-      return;
-    }
-
-    const all = e.target.closest('[data-pick-all]');
-    if (all) {
-      e.preventDefault();
-      const key = all.dataset.key;
-      const q = (state.proposals.get(key.split('/')[0]) || []).find((x) => x.key === key);
-      const picks = picksFor(key);
-      (q?.proposal?.beads || []).forEach((_, i) => picks.set(i + 1, all.dataset.pickAll));
-      render();
-      return;
-    }
-
-    const sub = e.target.closest('[data-submit]');
-    if (sub) {
-      e.preventDefault();
-      submitProposal(sub.dataset.submit, sub);
-      return;
-    }
+    /*
+      Every tap a proposal can take — the fold, ✓/✎/✕ and the two bulk controls — is
+      public/proposal.js's since bc-yjekg.5, and it answers true when it took one. The
+      three branches this replaced (`data-pick`, `data-pick-all`, `data-submit`) were this
+      page's own near-copy of the inbox's, a row behind it in what they could do.
+    */
+    if (props.onClick(e)) return;
 
     const arc = e.target.closest('[data-archive]');
     if (arc) {
@@ -2858,6 +2839,22 @@
      the settings card is /config now, with its own copy of exactly the branches it used
      and none of the ones it never fired. */
   out.addEventListener('click', onClick);
+
+  /* Typing in a proposal's adjust editor (bc-yjekg.5) — kept in public/proposal.js's map
+     rather than in the DOM, so this page's poll cannot eat a half-typed title. `change`
+     as well as `input`, because the `<select>`s only fire the former. */
+  out.addEventListener('input', (e) => props.onInput(e));
+  out.addEventListener('change', (e) => props.onInput(e));
+  /* The caret has left the editor, so let the repaint a poll wanted meanwhile through. */
+  out.addEventListener('focusout', (e) => {
+    if (!e.target?.matches?.('[data-role="edit-field"]') || !state.repaintDeferred) return;
+    // Next tick: focus may be moving to the *next* field of the same editor, and a
+    // repaint between the two would take that one away as it arrived.
+    setTimeout(() => {
+      if (document.activeElement?.matches?.('[data-role="edit-field"]')) return;
+      if (state.repaintDeferred) render();
+    }, 0);
+  });
 
   /* The ⟳ is the page's, and this page has three panes — so it only means whichever one
      is up. Without the guard, pressing it on the board would sweep `bd` for every tracker

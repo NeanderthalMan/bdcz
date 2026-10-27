@@ -1,0 +1,361 @@
+#!/usr/bin/env node
+/**
+ * `b7e-exhibit` — put the draft, audit or image a card asks about on the card, with each
+ * path checked the way the phone will read it — or audit what a card already links, and
+ * write nothing.
+ *
+ *     b7e-exhibit -w delmar -b dv-abc --doc /Users/you/code/delmar/ai-context/audits/X.md
+ *     b7e-exhibit -w delmar -b dv-abc --doc /abs/X.md --label "the audit behind this card"
+ *     b7e-exhibit -w delmar -b dv-abc --image /abs/palette.png --link "PR #268"=https://github.com/…
+ *     b7e-exhibit -w delmar -b dv-abc --check              one card's exhibits, writes nothing
+ *     b7e-exhibit -w delmar --check                        every open card in the workspace
+ *     b7e-exhibit -w delmar -b dv-abc --doc /abs/X.md --dry-run --json
+ *
+ * `bc-dgx7.166`, from a session audit of four sessions — `dv-gr6.131`, `dv-gr6.36`,
+ * `dv-gr6.13`, `dv-5eu.70` — that each linked an exhibit on a card by hand, four different
+ * ways, with scratch scripts and a `bd update --body-file` round trip, and none of them
+ * ended green. `dv-gr6.131` answered "the path does not exist until the PR merges" by
+ * linking the unmerged path anyway; `dv-gr6.36` made the opposite call and named the audit
+ * in prose with no link at all. Both were reasoning about the same fact — a card can only
+ * show what the main checkout has — and neither had a way to be told which side of the
+ * merge a path was on. `lib/reachable.js` answers one coarse question (is this branch
+ * trunk?) and answers it only when a packet is filed; this answers it per path, about a
+ * card that already exists, and says what to do when the answer is "not yet".
+ *
+ * ## What it does
+ *
+ * For every `--doc` / `--image` it prints one line: the verdict, then the facts it was drawn
+ * from (servable extension, in the main checkout now, at this branch's HEAD, on the base
+ * ref, gitignored, an LFS pointer or a sidecar with no bytes, under an asset root). The
+ * verdicts are in `lib/exhibit.js`: `live` and `after-merge` may go on a card; `uncommitted`,
+ * `gitignored`, `stub`, `outside-roots` and `missing` cannot ever open on a phone and are
+ * refused. The path it writes is always the **main-checkout form** — a path under this
+ * branch's worktree is translated, so it is the path the card will still have once the
+ * worktree is retired.
+ *
+ * A card whose drawn block exists gets `docs:` / `images:` / `links:` entries added to it in
+ * place, as text surgery that leaves every other line of the block alone; a card with no
+ * block gets a `**Up for review**` list on its description, which is the one place a card
+ * with nowhere for keys still shows links. It reads the card back through the same parser
+ * the phone runs and refuses to call the write done unless every path is on it. Run twice
+ * with the same arguments it writes nothing the second time, so the card is byte-identical.
+ *
+ * `--check` reads what a card already carries and writes nothing: a URL or a beadcause route
+ * under `docs:`, a relative path, a `%`-escape, an unservable extension, a path into a
+ * worktree, a path that is not there, a markdown link whose path has a space in it, an
+ * approval labelled `needs-approval` that links nothing, and a card that names a file that is
+ * in the main checkout without linking it. Without `-b` it walks every open card (type
+ * `decision`, or labelled `human`) in the workspace.
+ *
+ * `--at <ref>` is the ref treated as the delivery base — the one a file must be on to count as
+ * landed. It defaults to the trunk `lib/reachable.js` resolves. `--dir <path>` is the checkout
+ * "this branch" means, where the cwd is not it.
+ *
+ * ## Exit codes
+ *
+ * `0` written, already there, or a `--check` with nothing wrong. `1` usage, an unconfigured
+ * workspace, or no such bead. `2` `--check` found something a phone cannot open. All of the
+ * following refuse **before anything is written**: `3` a URL (or a beadcause route) given to
+ * `--doc` / `--image`, `4` an extension `/api/asset` will not serve (a `.py`, or a `.md`
+ * under `--image`), `5` a relative path (or a bare `%`-escape), `6` a path that can never
+ * open on a phone — the verdict says which. `7` the writes went out and the readback
+ * disagreed. `8` the block cannot be edited in place (`docs:` written inline, or the block is
+ * not valid YAML) — nothing was written.
+ *
+ * Deliberately not on `DEFAULT_TOOL_LIST`: it rewrites a bead's description, and without
+ * `--check` it is a tracker write — `dispatch`, the one agent that list governs, answers one
+ * comment and exits.
+ *
+ * @grant excluded
+ */
+import path from 'node:path';
+import { loadConfig } from '../lib/config.js';
+import { Bd } from '../lib/bd.js';
+import { toQuestion } from '../lib/decision.js';
+import { auditCard, exhibitsOf, judgePath, makeContext, planExhibit, refusalFor, REFUSAL_EXIT, absoluteOf } from '../lib/exhibit.js';
+
+const USAGE = `usage: b7e-exhibit -w <workspace> -b <bead> (--doc <path> | --image <path> | --link <label>=<url>)... [flags]
+       b7e-exhibit -w <workspace> [-b <bead>] --check [flags]
+
+  -w, --workspace <n>  which tracker <bead> lives in (required)
+  -b, --bead <id>      the card (required to write; without it --check walks every open card)
+      --doc <path>     a document on this Mac, absolute — repeatable
+      --label <text>   the label for the --doc just before it (default: the file name)
+      --image <path>   an image on this Mac, absolute — drawn inline on the card; repeatable
+      --link <l>=<url> a URL, with its label — repeatable
+      --check          audit what the card already links; write nothing
+      --at <ref>       the ref that counts as landed (default: this repo's trunk)
+      --dir <path>     the checkout "this branch" means (default: the cwd)
+      --dry-run        print the verdicts and the write without performing it
+      --json           the machine-readable form`;
+
+const fail = (msg, code = 1) => {
+  console.error(`b7e-exhibit: ${msg}`);
+  process.exit(code);
+};
+
+/* --------------------------------------------------------------------------- argv */
+
+const argv = process.argv.slice(2);
+if (argv.includes('-h') || argv.includes('--help')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+
+let wsName = null;
+let beadId = null;
+let check = false;
+let dryRun = false;
+let asJson = false;
+let at = '';
+let dir = '';
+const docs = [];
+const images = [];
+const links = [];
+
+for (let i = 0; i < argv.length; i += 1) {
+  const a = argv[i];
+  const next = () => {
+    const v = argv[i + 1];
+    if (v === undefined) fail(`${a} needs a value\n${USAGE}`);
+    i += 1;
+    return v;
+  };
+  if (a === '-w' || a === '--workspace') wsName = next();
+  else if (a === '-b' || a === '--bead') beadId = next();
+  else if (a === '--doc') docs.push({ raw: next(), label: '' });
+  else if (a === '--label') {
+    const text = next();
+    if (!docs.length) fail(`--label ${JSON.stringify(text)} has no --doc before it to label\n${USAGE}`);
+    docs[docs.length - 1].label = text;
+  } else if (a === '--image') images.push({ raw: next() });
+  else if (a === '--link') {
+    const v = next();
+    const eq = v.indexOf('=');
+    if (eq < 1 || eq === v.length - 1) fail(`--link wants <label>=<url>, not ${JSON.stringify(v)}\n${USAGE}`);
+    links.push({ label: v.slice(0, eq).trim(), url: v.slice(eq + 1).trim() });
+  } else if (a === '--check') check = true;
+  else if (a === '--dry-run') dryRun = true;
+  else if (a === '--json') asJson = true;
+  else if (a === '--at') at = next();
+  else if (a === '--dir') dir = path.resolve(next());
+  else fail(`unrecognised argument: ${a}\n${USAGE}`);
+}
+
+if (!wsName) fail(`-w/--workspace is required\n${USAGE}`);
+const wanted = docs.length + images.length + links.length;
+if (check && wanted) fail(`--check writes nothing, so it takes no --doc/--image/--link\n${USAGE}`);
+if (!check) {
+  if (!beadId) fail(`-b/--bead is required to write an exhibit\n${USAGE}`);
+  if (!wanted) fail(`nothing to put on the card — give --doc, --image or --link, or --check\n${USAGE}`);
+}
+
+// The refusals that need nothing but the string, before the config or the tracker is
+// touched: a malformed path is the caller's to fix, and it earns its own exit code so a
+// session can tell "I typed it wrong" (3, 4, 5) from "it is not merged yet" (0 after-merge)
+// from "that can never open" (6).
+if (!check) {
+  const stringRefusals = [
+    ...docs.map((d) => ({ kind: 'docs', raw: d.raw })),
+    ...images.map((d) => ({ kind: 'images', raw: d.raw })),
+  ].flatMap((e) => {
+    const r = refusalFor(e.kind, e.raw);
+    return r ? [{ ...e, ...r }] : [];
+  });
+  for (const r of stringRefusals) console.error(`b7e-exhibit: refused ${r.raw} — ${r.why}`);
+  if (stringRefusals.length) {
+    const first = stringRefusals[0];
+    process.exit(REFUSAL_EXIT[first.code] ?? 1);
+  }
+}
+
+/* --------------------------------------------------------------- workspace + context */
+
+let cfg;
+try {
+  cfg = loadConfig();
+} catch (err) {
+  fail(`could not read the beadcause config (${err.message.split('\n')[0]})`);
+}
+const ws = (cfg.workspaces || []).find((w) => w.name === wsName);
+if (!ws) {
+  console.error(`b7e-exhibit: no such workspace "${wsName}"`);
+  console.error(`workspaces: ${(cfg.workspaces || []).map((w) => w.name).join(', ') || '(none configured)'}`);
+  process.exit(1);
+}
+const bd = new Bd({ bin: cfg.bdBin, actor: cfg.actor, sharedServer: cfg.sharedServer, me: cfg.me });
+const ctx = makeContext({ dir: dir || process.cwd(), at, assetRoots: cfg.assetRoots });
+
+const bold = (s) => `\x1b[1m${s}\x1b[0m`;
+const dim = (s) => `\x1b[2m${s}\x1b[0m`;
+const red = (s) => `\x1b[31m${s}\x1b[0m`;
+const green = (s) => `\x1b[32m${s}\x1b[0m`;
+const yellow = (s) => `\x1b[33m${s}\x1b[0m`;
+
+const yn = (b) => (b ? 'yes' : 'no');
+function factsLine(f) {
+  if (!f) return '';
+  const stub = f.pointer ? 'lfs-pointer' : f.sidecar ? 'sidecar-only' : 'none';
+  return dim(
+    `servable ${yn(f.servable)} · main checkout ${yn(f.inMain)} · branch HEAD ${yn(f.atHead)} · base ${yn(f.onBase)} · ignored ${yn(f.ignored)} · stub ${stub} · under an asset root ${yn(f.inRoots)}`
+  );
+}
+const paint = (row) => (row.ok ? (row.verdict === 'after-merge' ? yellow : green) : red)(row.verdict.padEnd(13));
+
+function printRow(row, prefix = '') {
+  console.log(`  ${prefix}${paint(row)} ${String(row.kind).padEnd(6)} ${row.canonical && row.canonical !== row.raw ? `${row.raw}  →  ${row.canonical}` : row.raw}`);
+  const f = factsLine(row.facts);
+  if (f) console.log(`      ${f}`);
+  if (!row.ok || row.verdict === 'after-merge') console.log(`      ${dim(row.why)}`);
+}
+
+/* ----------------------------------------------------------------------- --check */
+
+const tail = (err) => String(err?.message || err).split('\n')[0];
+
+if (check) {
+  let beads;
+  try {
+    if (beadId) {
+      const one = await bd.show(ws, beadId);
+      if (!one) fail(`${ws.name} has no bead ${beadId}`);
+      beads = [one];
+    } else {
+      const open = await bd.listStatus(ws, 'open');
+      const cards = open.filter((r) => r.issue_type === 'decision' || (r.labels || []).includes('human'));
+      beads = [];
+      // `bd list` rows carry neither `design` nor `notes`, so each card is read whole — in
+      // batches, because `bd show` takes a list and a spawn is what this tracker charges for.
+      for (let i = 0; i < cards.length; i += 25) {
+        beads.push(...((await bd.json(ws, ['show', ...cards.slice(i, i + 25).map((c) => c.id)])) || []));
+      }
+    }
+  } catch (err) {
+    fail(`could not read ${beadId || 'the open cards'} (${tail(err)})`);
+  }
+
+  const audits = beads.map((b) => auditCard(b, ctx));
+  const bad = audits.filter((a) => !a.ok);
+  if (asJson) {
+    console.log(JSON.stringify({ workspace: ws.name, base: ctx.base, main: ctx.main, cards: audits }, null, 2));
+  } else {
+    for (const a of audits) {
+      if (!a.rows.length && !a.warnings.length) continue;
+      console.log(`${bold(a.id)} ${dim(a.title.slice(0, 70))}`);
+      for (const r of a.rows) printRow(r);
+      for (const w of a.warnings) console.log(`  ${yellow('warning')} ${w}`);
+    }
+    const linked = audits.filter((a) => a.rows.some((r) => r.ok && r.kind !== 'card')).length;
+    console.log('');
+    console.log(`${audits.length} card${audits.length === 1 ? '' : 's'} · ${linked} carry an exhibit that opens · ${bad.length} with something a phone cannot open`);
+    console.log(bad.length ? red('FAILED') : green('PASS'));
+  }
+  process.exit(bad.length ? 2 : 0);
+}
+
+/* ---------------------------------------------------------------------- the write */
+
+const judged = [
+  ...docs.map((d) => ({ ...judgePath('docs', d.raw, ctx), label: d.label })),
+  ...images.map((d) => judgePath('images', d.raw, ctx)),
+];
+const refused = judged.filter((j) => !j.ok);
+
+if (!asJson) {
+  console.log(bold(`${ws.name}/${beadId}`) + dim(`  ·  base ${ctx.base || '(none)'}  ·  main checkout ${ctx.main || '(not a git checkout)'}`));
+  for (const j of judged) printRow(j);
+}
+
+if (refused.length) {
+  if (asJson) console.log(JSON.stringify({ written: false, paths: judged }, null, 2));
+  else {
+    console.error('');
+    console.error(`b7e-exhibit: ${refused.length} path${refused.length === 1 ? '' : 's'} can never open on a phone — nothing was written.`);
+  }
+  process.exit(6);
+}
+
+let bead;
+try {
+  bead = await bd.show(ws, beadId);
+} catch (err) {
+  fail(`could not read ${beadId} (${tail(err)})`);
+}
+if (!bead) fail(`${ws.name} has no bead ${beadId}`);
+
+const add = {
+  docs: judged
+    .filter((j) => j.kind === 'docs')
+    .map((j) => ({ label: j.label || path.basename(j.canonical), path: j.canonical })),
+  images: judged.filter((j) => j.kind === 'images').map((j) => j.canonical),
+  links,
+};
+
+let plan;
+try {
+  plan = planExhibit(bead, add);
+} catch (err) {
+  fail(`${beadId}: ${tail(err)} — nothing was written`, 8);
+}
+
+const summary = {
+  written: false,
+  bead: bead.id,
+  mode: plan?.mode || null,
+  field: plan?.field || null,
+  paths: judged.map((j) => ({ path: j.canonical, verdict: j.verdict })),
+};
+
+if (!plan) {
+  if (asJson) console.log(JSON.stringify({ ...summary, note: 'the card already carries every one of these' }, null, 2));
+  else console.log(dim('\nnothing to write — the card already carries every one of these'));
+  process.exit(0);
+}
+
+if (dryRun) {
+  if (asJson) console.log(JSON.stringify({ ...summary, dryRun: true }, null, 2));
+  else {
+    console.log('');
+    console.log(dim(`--dry-run: would add ${plan.count} entr${plan.count === 1 ? 'y' : 'ies'} to ${plan.field} (${plan.mode === 'block' ? 'in the drawn decision block' : 'under **Up for review**'}); nothing was written`));
+  }
+  process.exit(0);
+}
+
+try {
+  // `Bd.update` skips a falsy value and has no `design`, so the field write goes through
+  // `Bd.run` — the same route bin/b7e-recard takes, and for the same reason.
+  await bd.run(ws, ['update', bead.id, `--${plan.field}`, plan.after], { retries: 4 });
+} catch (err) {
+  fail(`writing ${plan.field} failed (${tail(err)}) — read ${bead.id} back before trying again`, 7);
+}
+
+/* ------------------------------------------------------------------- the readback */
+
+let live;
+try {
+  live = await bd.show(ws, bead.id);
+} catch (err) {
+  fail(`the write went out but ${bead.id} could not be read back (${tail(err)})`, 7);
+}
+
+const onCard = new Set(exhibitsOf(live).entries.map((e) => (e.kind === 'links' ? e.raw : absoluteOf(e.raw))));
+const missing = [...add.docs.map((d) => d.path), ...add.images, ...add.links.map((l) => l.url)].filter((p) => !onCard.has(p));
+const problems = missing.map((p) => `${p} is not on the card after the write`);
+for (const e of toQuestion(ws.name, live || {}).errors || []) problems.push(e);
+
+if (asJson) {
+  console.log(JSON.stringify({ ...summary, written: problems.length === 0, problems }, null, 2));
+} else if (problems.length) {
+  console.log(red('✗ the readback disagrees with what was written:'));
+  for (const p of problems) console.log(red(`  ${p}`));
+} else {
+  console.log('');
+  console.log(green(`✓ readback: ${plan.count} entr${plan.count === 1 ? 'y' : 'ies'} on ${bead.id}, in ${plan.field}${plan.mode === 'section' ? ' under **Up for review**' : ''}`));
+  if (judged.some((j) => j.verdict === 'after-merge')) {
+    console.log(
+      yellow('after-merge:') +
+        ' a workspace gate that requires the file to exist in the main checkout will say missing until this branch merges — that is this, not a mistake.'
+    );
+  }
+}
+process.exit(problems.length ? 7 : 0);

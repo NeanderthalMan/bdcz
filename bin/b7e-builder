@@ -1,0 +1,105 @@
+#!/usr/bin/env node
+/**
+ * Is a worktree still being written to, or is it safe to take over — one call instead of
+ * four independently hand-assembled recipes.
+ *
+ *   b7e-builder <worktree name or path>                   the report, printed
+ *   b7e-builder <worktree name or path> --since 30         widen the "recent write" window
+ *   b7e-builder <worktree name or path> --json             machine-readable
+ *
+ * bc-xl7n.158: four separate delmar worker windows each answered "is another session
+ * still writing in this worktree, or is it safe to take over" by hand, from `ps`,
+ * `git log`/`status` and file mtimes — and the fourth read the session record and
+ * transcript tail and reached the *opposite* verdict from the first three (idle vs.
+ * still-writing) because it used different evidence. See lib/builder.js for what decides
+ * the verdict and why; this file is only the argv parsing and the printing around it.
+ *
+ * Read-only: nothing here takes or releases the worktree's lock, or touches its tree.
+ *
+ * Exit codes: `0` idle or abandoned — safe to take over. `1` still-writing — leave it
+ * alone. `2` bad usage. `3` the argument names no worktree this repo's git knows about
+ * and no path that exists on disk.
+ *
+ * @grant read
+ */
+import { loadConfig } from '../lib/config.js';
+import { buildReport } from '../lib/builder.js';
+
+const argv = process.argv.slice(2);
+const has = (f) => argv.includes(f);
+const value = (name) => {
+  const at = argv.indexOf(name);
+  return at > -1 ? argv[at + 1] : undefined;
+};
+
+const USAGE = `usage: b7e-builder <worktree name or path> [--since <minutes>] [--json]
+
+Is a worktree still being written to, or is it safe to take over?
+
+  <worktree name or path>   a .claude/worktrees/<name> directory name, a branch name,
+                            or a path that exists on disk
+  --since <minutes>         how recent a file write has to be to count as "still
+                            writing" (default 15)
+  --json                    the machine-readable form instead of the printed report`;
+
+if (has('--help') || has('-h')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+
+const positional = argv.filter((a, i) => !a.startsWith('-') && argv[i - 1] !== '--since');
+const arg = positional[0];
+const JSON_MODE = has('--json');
+const sinceRaw = value('--since');
+const sinceMinutes = sinceRaw === undefined ? 15 : Number(sinceRaw);
+
+function fail(msg, code = 2) {
+  console.error(`b7e-builder: ${msg}`);
+  process.exit(code);
+}
+
+if (!arg) fail(`a worktree name or path is required\n${USAGE}`);
+if (!Number.isFinite(sinceMinutes) || sinceMinutes < 0) fail(`--since must be a non-negative number of minutes, got "${sinceRaw}"`);
+
+const cfg = loadConfig();
+const report = await buildReport(cfg, arg, { sinceMinutes });
+
+if (!report.found) {
+  fail(`"${arg}" names no worktree this repo's git knows about, and no path that exists on disk`, 3);
+}
+
+if (JSON_MODE) {
+  console.log(JSON.stringify(report, null, 2));
+} else {
+  const lines = [];
+  lines.push(`b7e-builder ${report.path}${report.branch ? `  (${report.branch})` : ''}`);
+  if (report.unregistered) lines.push(`  not a worktree git itself knows about — reported from the path alone`);
+  lines.push('');
+  lines.push(`verdict: ${report.verdict} — ${report.reason}`);
+  lines.push('');
+  if (report.lock.locked) {
+    const who = report.lock.pid === null ? 'no pid in the reason' : `pid ${report.lock.pid}${report.lock.pidAlive ? ' (alive)' : ' (not running)'}`;
+    lines.push(`lock: held — "${report.lock.reason}" — ${who}`);
+  } else {
+    lines.push('lock: not locked');
+  }
+  if (report.sessions.length) {
+    lines.push(`sessions (${report.sessions.length}):`);
+    for (const s of report.sessions) {
+      const age = s.ageMs === null ? 'no transcript found' : `last wrote ${Math.round(s.ageMs / 1000)}s ago`;
+      lines.push(`  pid ${s.pid}  status ${s.status || '(unknown)'}  ${age}`);
+    }
+  } else {
+    lines.push('sessions: none live');
+  }
+  lines.push(`ahead/behind ${report.branch || 'HEAD'} vs main: ${report.ahead ?? '?'} ahead, ${report.behind ?? '?'} behind`);
+  lines.push(`modified: ${report.modified ?? '?'}  untracked: ${report.untracked ?? '?'}`);
+  lines.push(
+    report.newest
+      ? `newest write: ${report.newest.path} (${Math.round((Date.now() - report.newest.mtimeMs) / 60000)}m ago)`
+      : 'newest write: none — tree has no files'
+  );
+  console.log(lines.join('\n'));
+}
+
+process.exit(report.verdict === 'still-writing' ? 1 : 0);

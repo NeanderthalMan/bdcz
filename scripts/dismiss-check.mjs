@@ -115,9 +115,66 @@ const LOOSE = {
   ].join('\n'),
 };
 
+/*
+  Two more, for the bulk half — bc-iaju1.5. Setting eleven cards aside at once is the
+  same act as the one above and goes to the same route one bead at a time, so it is
+  checked here rather than somewhere that would have to learn what a dismissal is.
+
+  Deliberately plain: no decision block and no bulleted prose, so neither card draws an
+  option or a suggestion chip. What is under test on these two is the tick, the bar and
+  the order, and a card with choices on it would put two more things in the way of the
+  finger. Their `created_at` are three months apart and the *newer one is first*, which
+  is what makes the oldest-first toggle a visible reordering rather than a no-op.
+*/
+const plain = (id, title, createdAt) => ({
+  id,
+  title,
+  issue_type: 'task',
+  status: 'open',
+  priority: 2,
+  created_at: createdAt,
+  updated_at: createdAt,
+  comment_count: 0,
+  dependent_count: 0,
+  description: 'Nothing on this one needs a decision block; it is here to be ticked.',
+});
+
+const NEWER = plain('dm-3', 'Which meter reads first?', '2026-09-01T09:00:00Z');
+const OLDER = plain('dm-4', 'What happened to the August export?', '2026-06-01T09:00:00Z');
+
+/*
+  And one bead held for endorsement, which is the other half of the Questions pill and
+  the reason it needed splitting. `held` is not a status — it is `awaitingEndorsement`
+  computed server-side — so the fixture carries an ordinary `open` beside it, exactly as
+  the sweep does. It is an *agent* row, so nothing on it can be set aside and no tick is
+  drawn on it; what it is here for is the count and the way out at the top of Held.
+*/
+const HELD = {
+  key: `${WS}/dm-held`,
+  workspace: WS,
+  id: 'dm-held',
+  title: 'Cache the meter reads per device',
+  question: null,
+  agent: true,
+  held: true,
+  status: 'open',
+  priority: 2,
+  type: 'task',
+  actor: null,
+  createdAt: '2026-08-02T09:00:00Z',
+  since: '2026-08-02T09:00:00Z',
+  dependentCount: 0,
+  commentCount: 0,
+  sections: [],
+  errors: [],
+};
+
 const QUESTIONS = [
   { ...toQuestion(WS, ISSUE), comments: [] },
   { ...toQuestion(WS, LOOSE), comments: [] },
+  { ...toQuestion(WS, NEWER), comments: [] },
+  { ...toQuestion(WS, OLDER), comments: [] },
+  HELD,
 ];
 const KEY = QUESTIONS[0].key;
 const ID = QUESTIONS[0].id;
@@ -499,6 +556,210 @@ try {
     ls ? JSON.stringify(ls.box) : ''
   );
   check('and no chip ever writes', write.calls.length === 0, `${write.calls.length} write(s)`);
+
+  /* ============================ 8. the same act, aimed at more than one card — bc-iaju1.5 */
+
+  // 58 questions with a median age of 26 days, one tap each, is a backlog nobody gets to
+  // the bottom of. The bulk set-aside is the same `/api/dismiss` the sections above pin,
+  // once per bead, behind one arm — so what is worth checking here is everything that
+  // makes it *safe*: that it is only offered where a single one is, that the first tap
+  // still does nothing, and that it still cannot reach the route that reads answers for
+  // markers.
+  console.log('\nand the whole of it, aimed at more than one card');
+
+  write.calls.length = 0;
+  // Out of the sheet the last section left open — an open card is full screen, and the
+  // list underneath it is not a thing a finger can reach.
+  await tap(s, `${LOOSE_CARD} [data-act="collapse"]`);
+  await sleep(150);
+
+  // Light the Questions pill. public/viewbar.js draws the row on ten pages and routes a
+  // tap through exactly this call, which is also what a `?kind=question` link boots with
+  // — so driving the control is driving the pill.
+  await evalJs(s, `window.beadcause.inboxFilter.pick('question'), true`);
+  const NEW_CARD = `#list .card[data-key="${WS}/dm-3"]`;
+  const OLD_CARD = `#list .card[data-key="${WS}/dm-4"]`;
+  const HELD_CARD = `#list .card[data-key="${WS}/dm-held"]`;
+  const ticksUp = await waitFor(s, `!!document.querySelector(${JSON.stringify(`${NEW_CARD} .eq-pick`)})`);
+  check('a question card on the Questions view can be ticked', ticksUp, ticksUp ? '' : 'no tick on the card');
+
+  const pillText = (id) =>
+    evalJs(s, `(document.querySelector('#filters .filter-one[data-group="${id}"] .filter-summary') || {}).textContent || ''`);
+  const asked = await pillText('asked');
+  check(
+    'and the pill says which half you are on, including the half nobody chose',
+    /Questions:\s*asked/i.test(asked),
+    JSON.stringify(asked)
+  );
+  const order = await pillText('qsort');
+  check(
+    'the order switch is on the row, and quiet while the list is in the order it came in',
+    /Order/.test(order) && !/Oldest/i.test(order),
+    JSON.stringify(order)
+  );
+
+  // The tap target, which is the whole reason this is a browser check and not a vm: a
+  // 34×44 button is what you can hit one-handed and a 30px square is what you miss.
+  const tickBox = await evalJs(
+    s,
+    `(() => {
+      const b = document.querySelector(${JSON.stringify(`${NEW_CARD} .eq-pick`)});
+      if (!b) return null;
+      const r = b.getBoundingClientRect();
+      return { w: Math.round(r.width), h: Math.round(r.height), left: Math.round(r.left) };
+    })()`
+  );
+  check(
+    'the tick is a real target, hard left of the card',
+    Boolean(tickBox) && tickBox.h >= 44 && tickBox.w >= 30 && tickBox.left < 40,
+    JSON.stringify(tickBox)
+  );
+
+  // Nothing on a held bead: the decision there is an endorsement, it is made on
+  // /endorse, and no card in this list offers a single set-aside for one — so a tick
+  // would be a bulk control reaching where no tap can.
+  const heldTick = await evalJs(s, `!!document.querySelector(${JSON.stringify(`${HELD_CARD} .eq-pick`)})`);
+  check('but a bead held for endorsement carries none', !heldTick, heldTick ? 'a held bead was tickable' : '');
+
+  /* ---------------------------------------------------- the order, before they go */
+
+  // A chip by the word on it rather than by `data-chip`: filtermenu.js writes that
+  // attribute through `dataset`, so the literal never appears in public/ and the
+  // selector audit in test/checks.mjs would rightly call it a control nothing draws.
+  const chipTap = (group, label) =>
+    evalJs(
+      s,
+      `(() => {
+        const chips = Array.from(document.querySelectorAll('#filters .filter-group .chip'));
+        const one = chips.find((c) => c.closest('.filter-group').dataset.group === ${JSON.stringify(group)}
+          && /${label}/i.test(c.textContent));
+        if (!one) return false;
+        one.click();
+        return true;
+      })()`
+    );
+
+  const ids = () =>
+    evalJs(s, `Array.from(document.querySelectorAll('#list .card[data-key]')).map((c) => c.dataset.key)`);
+  const asSent = await ids();
+  await evalJs(s, `window.beadcause.inboxFilter.setSub('question', ['asked']), true`);
+  check('the order chips are drawn on the pill', await chipTap('qsort', 'Oldest'), '');
+  await sleep(250);
+  const byAge = await ids();
+  check(
+    'oldest first actually reorders the list, and the toggle is remembered',
+    byAge.indexOf(`${WS}/dm-4`) < byAge.indexOf(`${WS}/dm-3`) &&
+      asSent.indexOf(`${WS}/dm-4`) > asSent.indexOf(`${WS}/dm-3`) &&
+      (await evalJs(s, `localStorage.getItem('beadcause.qsort')`)) === 'oldest',
+    `${asSent.join(' ')} → ${byAge.join(' ')}`
+  );
+  // Back, so the bulk section below is looking at the list it was written against.
+  await chipTap('qsort', 'Most urgent');
+  await sleep(200);
+
+  /* ------------------------------------------------- the held half, and the way out */
+
+  check('the two halves are drawn as chips on the pill', await chipTap('asked', 'Held'), '');
+  await sleep(250);
+  const heldRow = await evalJs(
+    s,
+    `(() => {
+      const a = document.querySelector('#list .triage-held');
+      const r = a && a.getBoundingClientRect();
+      return a ? { text: a.textContent.replace(/\\s+/g, ' ').trim(), href: a.getAttribute('href'), h: Math.round(r.height) } : null;
+    })()`
+  );
+  check(
+    'the held half opens with its count and one way out, to the page built for it',
+    heldRow && /1 held/.test(heldRow.text) && /review in bulk/i.test(heldRow.text) && heldRow.href === '/endorse' && heldRow.h >= 44,
+    JSON.stringify(heldRow)
+  );
+  const askedGone = await evalJs(s, `!document.querySelector(${JSON.stringify(NEW_CARD)})`);
+  check('and holds nothing but held beads', askedGone, askedGone ? '' : 'an asked question is in the held list');
+
+  await chipTap('asked', 'Asked');
+  await waitFor(s, `!!document.querySelector(${JSON.stringify(NEW_CARD)})`);
+
+  /* ------------------------------------------------------------- ticking, and acting */
+
+  await tap(s, `${NEW_CARD} .eq-pick`);
+  await tap(s, `${OLD_CARD} .eq-pick`);
+  await sleep(200);
+  const bar = await evalJs(
+    s,
+    `(() => {
+      const el = document.querySelector('#list .eq-bar');
+      if (!el) return null;
+      const btn = el.querySelector('[data-act="tick-aside"]');
+      return {
+        n: (el.querySelector('.eq-bar-n') || {}).textContent || '',
+        label: btn ? btn.textContent.trim() : '',
+        top: Math.round(el.getBoundingClientRect().top),
+        sticky: getComputedStyle(el).position,
+      };
+    })()`
+  );
+  check(
+    'two ticks put a bar over the list saying what it would act on',
+    bar && /2 cards selected/.test(bar.n) && /Set aside 2/.test(bar.label),
+    JSON.stringify(bar)
+  );
+  check('and it is sticky, because you tick the sixth row below the fifth', bar?.sticky === 'sticky', bar?.sticky);
+  await shot(s, 'ticked');
+
+  // The first tap must do nothing but arm — a bar with a live bulk button on it is the
+  // exact control a pocket presses.
+  await tap(s, `#list .eq-bar [data-act="tick-aside"]`);
+  await sleep(200);
+  const armedBar = await evalJs(
+    s,
+    `(() => {
+      const b = document.querySelector('#list .eq-bar [data-act="tick-aside"]');
+      const hint = document.querySelector('#list .eq-bar .board-hint');
+      return b ? { label: b.textContent.trim(), armed: b.classList.contains('armed'), hint: hint ? hint.textContent.trim() : '' } : null;
+    })()`
+  );
+  check(
+    'one tap arms it and writes nothing',
+    write.calls.length === 0 && armedBar?.armed && /sure\?/i.test(armedBar.label),
+    `${write.calls.length} write(s) · ${JSON.stringify(armedBar)}`
+  );
+  check(
+    'and says what it will and will not do before it does it',
+    /nothing is closed/i.test(armedBar?.hint || '') && /comes back/i.test(armedBar?.hint || ''),
+    JSON.stringify(armedBar?.hint || '')
+  );
+
+  await tap(s, `#list .eq-bar [data-act="tick-aside"]`);
+  const bulkGone = await waitFor(
+    s,
+    `!document.querySelector(${JSON.stringify(NEW_CARD)}) && !document.querySelector(${JSON.stringify(OLD_CARD)})`,
+    50,
+    150
+  );
+  await sleep(300);
+  check('the second tap takes both cards off the list', bulkGone, bulkGone ? '' : 'a card stayed');
+  check(
+    'one write per bead, every one of them to /api/dismiss',
+    write.calls.length === 2 && write.calls.every((c) => c.path === '/api/dismiss'),
+    JSON.stringify(write.calls.map((c) => `${c.path} ${c.body?.id}`))
+  );
+  check(
+    'each aimed at its own bead, and carrying nothing that could read as an answer',
+    write.calls.map((c) => c.body?.id).sort().join(',') === 'dm-3,dm-4' &&
+      write.calls.every((c) => c.body?.response === undefined),
+    JSON.stringify(write.calls.map((c) => c.body))
+  );
+  const outcome = await evalJs(
+    s,
+    `(document.querySelector('#list .eq-bar .board-said') || {}).textContent || ''`
+  );
+  check(
+    'and the bar says what happened, because every card it names has gone',
+    /set aside 2/i.test(outcome) && !/\bdone\b/i.test(outcome),
+    JSON.stringify(outcome)
+  );
+  await shot(s, 'bulk-done');
 } finally {
   close();
   server.close();

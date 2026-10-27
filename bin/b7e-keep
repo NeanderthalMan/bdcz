@@ -1,0 +1,134 @@
+#!/usr/bin/env node
+/**
+ * `b7e-keep` — put a generated file where a link to it still works tomorrow: out of the
+ * worktree that made it, into the vault, with a sidecar the caller can commit.
+ *
+ *   b7e-keep pipeline/renders/sequences/SEQ_A/SEQ_A.contact.png --as SEQ_A
+ *   b7e-keep out/*.png out/*.mp4 --as dv-b5d.63.1
+ *   b7e-keep sheet.png --no-vault --json
+ *   b7e-keep --where SEQ_A
+ *   b7e-keep --list SEQ_A
+ *
+ * bc-2pysw — see `lib/keep.js` for the fuller history (twenty delmar pull requests merged
+ * in one sitting and took four contact sheets' links with them four minutes later) and for
+ * why a keep makes three copies rather than one. This file is the argv parsing and the
+ * printing around `lib/keep.js`'s `keep`, the same split every other `b7e-*` command uses.
+ *
+ * Exit codes: `0` everything asked for was kept. `1` nothing was — no such file, no keep
+ * root, or every copy failed. `2` refused — bad usage.
+ *
+ * b7e-keep (bc-2pysw) is deliberately NOT on DEFAULT_TOOL_LIST, for the reason b7e-plate
+ * is: it writes bytes and uploads to a remote, which is a write however you count it, and it
+ * is pointless for `dispatch` besides — a keep's occasion is a worker session that has just
+ * rendered something and already holds the unrestricted CLI default. Nothing is ever kept in
+ * answer to a phone comment.
+ *
+ * @grant excluded
+ */
+import { keep, keepRoot, keeps, readLatest, vaultModule } from '../lib/keep.js';
+
+const USAGE = `usage: b7e-keep <path> [<path> ...] [--as <name>] [--no-vault] [--json]
+       b7e-keep --where [<name>]
+       b7e-keep --list <name>
+
+  <path>          a file to keep — repeatable, kept in the order given
+  --as <name>     group this keep under <name> (a sequence id, a bead id). Defaults to
+                  the first file's parent directory name
+  --no-vault      copy locally only; do not publish to the media vault or write a sidecar
+  --where [<name>]  print the keep root, or the newest keep under <name>
+  --list <name>   every stamped keep under <name>, oldest first
+  --json          the machine-readable form instead of the printed report
+
+A keep makes three things, and the third is the one that needs you:
+
+  the KEPT copy    under the main checkout, stamped, with 'latest' repointed. This is what
+                   a file:// link and a card's images: should point at — it outlives the
+                   worktree, which is the whole point
+  the VAULT copy   uploaded and sha-verified, when this repo has scripts/media_vault.py
+  the SIDECAR      written beside the SOURCE, and the only part of a keep that git tracks.
+                   COMMIT IT — without it nothing records where the bytes went`;
+
+const argv = process.argv.slice(2);
+if (argv.includes('--help') || argv.includes('-h')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+
+function fail(msg, code = 2) {
+  console.error(`b7e-keep: ${msg}`);
+  process.exit(code);
+}
+
+function value(flag, i) {
+  const v = argv[i + 1];
+  if (v === undefined) fail(`${flag} needs a value`);
+  return v;
+}
+
+let as = null;
+let vault = true;
+let json = false;
+let where = false;
+let list = null;
+const targets = [];
+
+for (let i = 0; i < argv.length; i += 1) {
+  const a = argv[i];
+  switch (a) {
+    case '--as': as = value(a, i); i += 1; break;
+    case '--no-vault': vault = false; break;
+    case '--json': json = true; break;
+    case '--list': list = value(a, i); i += 1; break;
+    case '--where':
+      where = true;
+      if (argv[i + 1] && !argv[i + 1].startsWith('--')) { as = argv[i + 1]; i += 1; }
+      break;
+    default:
+      if (a.startsWith('--')) fail(`unknown flag ${a}`);
+      targets.push(a);
+  }
+}
+
+if (where) {
+  const root = keepRoot();
+  if (!root) fail('no keep root: not a git checkout, and no BEADCAUSE_KEEP_ROOT', 1);
+  const answer = as ? readLatest(as) : root;
+  if (!answer) fail(`no keep named ${as}`, 1);
+  console.log(json ? JSON.stringify({ root, name: as || null, path: answer }, null, 2) : answer);
+  process.exit(0);
+}
+
+if (list) {
+  const rows = keeps(list);
+  if (json) console.log(JSON.stringify({ name: list, keeps: rows }, null, 2));
+  else if (!rows.length) console.log(`no keeps named ${list}`);
+  else rows.forEach((r) => console.log(r));
+  process.exit(rows.length ? 0 : 1);
+}
+
+if (!targets.length) fail('at least one path is required (or --where / --list)');
+
+const result = keep(targets, { as, vault });
+
+if (json) {
+  console.log(JSON.stringify(result, null, 2));
+  process.exit(result.ok ? 0 : 1);
+}
+
+for (const f of result.files) console.log(`  kept       ${f.kept}`);
+if (result.latest) console.log(`  latest     ${result.latest}`);
+for (const v of result.vault) {
+  if (v.ok) console.log(`  vaulted    ${v.remote}`);
+  else if (v.skipped) console.log(`  not vaulted  ${v.skipped}`);
+}
+const sidecars = result.vault.filter((v) => v.ok && v.sidecar).map((v) => v.sidecar);
+if (sidecars.length) {
+  console.log('\nCommit these — they are the only part of this keep that git tracks:');
+  for (const s of sidecars) console.log(`  ${s}`);
+} else if (vault && !vaultModule()) {
+  console.log(`\nNo ${'scripts/media_vault.py'} in this repo, so nothing was vaulted and there`);
+  console.log('is no sidecar. The kept copy above is local to this machine only.');
+}
+for (const e of result.errors) console.error(`b7e-keep: ${e}`);
+
+process.exit(result.ok ? 0 : 1);
