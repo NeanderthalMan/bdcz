@@ -367,9 +367,11 @@ check('and the card draws the count rather than leaving it in the payload', () =
   // fallback and the count are asserted apart. The count is the claim that matters: it
   // is `total`, which sums checkouts, and a panel that went back to `repos.length` would
   // understate an org workspace by the size of the org.
-  assert.match(js, /'What each repo resolves to'/, 'the panel lost the heading it falls back to');
+  // Since bc-qzng7.1 the fallback carries the count itself ("What each of 12 resolves
+  // to"), so the heading and the count are one claim: it must be `total`, not a length.
+  assert.match(js, /`What each of \$\{total\} resolves to`/, 'the panel lost the heading it falls back to');
   assert.match(js, /only \? `What \$\{only\} resolves to`/, 'a pinned repo is not named in the heading');
-  assert.match(js, /String\(total\),\n\s*repos\n/, 'the panel still counts one per row');
+  assert.match(js, /const total = shown\.reduce\(\(n, r\) => n \+ \(typeof r\.checkouts === 'number' \? r\.checkouts : 1\), 0\)/, 'the panel still counts one per row');
 });
 
 /* ================================================================ the wiring */
@@ -401,12 +403,13 @@ check('the shell carries the settings card, and it is a pane of its own', () => 
 });
 
 check('the row reaches it, or the card is a page with nothing pointing at it', () => {
-  // The pill is the only way to /config: nothing links to it from a card, a notification
-  // or another page's chrome, which is exactly what a standing view is. A pill without
-  // the alias serves nothing and an alias without the pill is unreachable, so both.
-  const bar = read('public/viewbar.js');
-  assert.match(bar, /id: 'config',[\s\S]{0,200}?href: '\/config'/, 'no Config pill on the row');
-  assert.match(read('lib/server.js'), /urlPath === '\/config'/, "/config is not served");
+  // Since bc-qzng7.1 the way in is the space picker's first row, "⚙ Settings", not a
+  // pill: it opens the shell's config pane, or loads /settings off the shell. A row
+  // without the alias serves nothing and an alias without the row is unreachable, so both.
+  const picker = read('public/spacebar.js');
+  assert.match(picker, /option\(SETTINGS, '⚙ Settings'/, 'no Settings row in the space picker');
+  assert.match(picker, /panes\.go\('config'\)[\s\S]{0,80}?location\.href = '\/settings'/, 'the Settings row goes nowhere');
+  assert.match(read('lib/server.js'), /urlPath === '\/config' \|\| urlPath === '\/settings'/, '/config and /settings are not served');
 });
 
 check('and the service worker version moved, or a cached phone has the pill and not the page', () => {

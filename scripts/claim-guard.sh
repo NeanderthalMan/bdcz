@@ -105,8 +105,8 @@ rel=${file#"$top"/}
 # than once per edit, and fills the field in behind this request — so the branch is all
 # that has to be on the wire.
 out=$(jq -Rn --arg s "$session" --arg repo "$main" --arg file "$rel" --arg dir "$top" \
-  --arg branch "$branch" --arg label "${main##*/}" \
-  '{session:$s, repo:$repo, file:$file, dir:$dir, branch:$branch, label:$label}' |
+  --arg branch "$branch" --arg lbl "${main##*/}" \
+  '{session:$s, repo:$repo, file:$file, dir:$dir, branch:$branch, "label":$lbl}' |
   post POST)
 
 [ -n "$out" ] || exit 0

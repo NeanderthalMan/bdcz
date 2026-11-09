@@ -286,6 +286,12 @@ function board({
       // bc-grut's collapsed summary, which `p0CardHtml` draws on every render.
       lift(APP, 'function p0Progress(card)'),
       lift(APP, 'function p0ProgressHtml(card)'),
+      // Work's pipeline strip on each card (bc-qzng7.3). `prRows` is the pull request
+      // board, which this suite does not serve, so it is an empty board here.
+      'const prRows = () => [];',
+      lift(APP, 'const SHIPPING_RUNGS = '),
+      lift(APP, 'function workPipeline(c)'),
+      lift(APP, 'function workStripHtml(c)'),
       lift(APP, 'const p0RowKey = ('),
       lift(APP, 'const p0Step = ('),
       lift(APP, 'function p0RelayHtml(relay)'),
@@ -453,10 +459,10 @@ check('nor does a bead an agent has, which is not a question anybody asked', () 
 });
 
 check('the tap is `expand` and nothing else — the inbox card is not rebuilt in the tree', () => {
-  const at = APP.indexOf("if (act === 'p0-answer') {");
+  const at = APP.indexOf('async function p0OpenQuestion(key) {');
   assert.notEqual(at, -1, 'the answer handler is gone');
-  const branch = APP.slice(at, at + 1600);
-  const body = branch.slice(0, branch.indexOf('\n    }'));
+  const branch = APP.slice(at, APP.indexOf('\n  }\n', at));
+  const body = branch;
   assert.match(body, /await expand\(key\)/);
   // No place-holding around it: `.card.open` covers the page, so where the page happens
   // to be scrolled to underneath it is not something anybody can see.
@@ -473,9 +479,9 @@ check('and bc-ka5y.14: the pending mark is set before the await and cleared in a
   // The same shape the list's own `toggle` uses — see test/cardpending.mjs — moved here
   // because this tap awaits the exact same `expand()` and used to have nothing to show
   // for the wait at all.
-  const at = APP.indexOf("if (act === 'p0-answer') {");
-  const branch = APP.slice(at, at + 1600);
-  const body = branch.slice(0, branch.indexOf('\n    }'));
+  const at = APP.indexOf('async function p0OpenQuestion(key) {');
+  const branch = APP.slice(at, APP.indexOf('\n  }\n', at));
+  const body = branch;
   const mark = body.indexOf('state.opening = key');
   const paint = body.indexOf('paintOpening()');
   const wait = body.indexOf('await expand(key)');
@@ -717,6 +723,51 @@ check('the expansion is indented off the same `--d` its row is', () => {
   assert.notEqual(at, -1, 'public/style.css has no .p0-bead');
   const rule = CSS.slice(at, CSS.indexOf('}', at));
   assert.match(rule, /margin-left: calc\(var\(--d, 0\) \* \d+px \+ \d+px\)/);
+});
+
+console.log('\nbc-s31p5 — an "asks you" row is its question card');
+
+const fnBody = (sig) => {
+  const at = APP.indexOf(sig);
+  assert.notEqual(at, -1, `${sig} is gone`);
+  return APP.slice(at, APP.indexOf('\n  }\n', at));
+};
+
+check('an "asks you" row carries the mark the tap reads, and an ordinary row does not', () => {
+  assert.match(APP, /\$\{row\.pending \? ' data-asks="1"' : ''\}/);
+});
+
+check('the row tap opens the card for a question it can open, before unfolding anything', () => {
+  const at = APP.indexOf("if (act === 'p0-bead') {");
+  const body = APP.slice(at, APP.indexOf('\n    }\n', at + 200));
+  const route = body.indexOf('await p0OpenQuestion(key)');
+  assert.ok(route !== -1, 'the row does not open the question card');
+  assert.ok(route < body.indexOf('state.p0beadopen'), 'the row unfolds its details before opening the card');
+  // Not for an agent's bead or a row with no card on this payload — those still unfold.
+  assert.match(body, /if \(q && !q\.agent\)/);
+});
+
+check('"Answer it" and the row go through the one opener, which starts the chain', () => {
+  const at = APP.indexOf("if (act === 'p0-answer') {");
+  assert.match(APP.slice(at, at + 200), /await p0OpenQuestion\(btn\.dataset\.key\)/);
+  assert.match(fnBody('async function p0OpenQuestion(key) {'), /state\.p0chain = key;/);
+});
+
+check('opening an effort preloads its first two questions; opening a card preloads the next', () => {
+  assert.match(APP, /if \(want\) p0Preload\(p0OpenCard\(\)\);/);
+  assert.match(fnBody('function p0Preload('), /n = 2/);
+  assert.match(fnBody('async function p0OpenQuestion(key) {'), /p0Preload\(card, \[[^\]]+\], 1\)/);
+  // A prefetch writes into the object `expand` reads, so the tap skips its own fetch.
+  assert.match(fnBody('async function p0Prefetch(key) {'), /\/api\/question\?/);
+});
+
+check('answering a card from the tree opens the next; a comment ends the chain', () => {
+  const sub = fnBody('function submit(key, text,');
+  assert.match(sub, /if \(state\.p0chain === key\) \{\s*if \(close\) p0Advance\(key\);\s*else state\.p0chain = null;/);
+  const adv = fnBody('function p0Advance(answered) {');
+  assert.match(adv, /p0OpenQuestion\(next\)/);
+  // Down the tree from the one answered, wrapping to the top.
+  assert.match(adv, /keys\.slice\(at \+ 1\), \.\.\.keys\.slice\(0, at\)/);
 });
 
 console.log('');

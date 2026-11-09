@@ -400,7 +400,7 @@
       <h2 class="accountpick-title">Which of ${esc(workspace)}’s efforts are yours?</h2>
       <p class="accountpick-lede">${lines.join('</p><p class="accountpick-lede">')}</p>
       <p class="addspace-note">Pick none, some or all. <strong>Mine</strong> marks you as the owner, so it is on
-        My Efforts. <strong>Advocate</strong> also opens an Effort Advocate on it now — an agent window that plans
+        Work. <strong>Advocate</strong> also opens an Effort Advocate on it now — an agent window that plans
         and supervises the effort — and makes it yours.</p>
       <ul class="addspace-roots">${roots.map(rowHtml).join('')}</ul>
       <div class="accountpick-actions">

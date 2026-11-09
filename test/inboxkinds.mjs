@@ -436,6 +436,8 @@ await check('AND THE FIELD SAYS WHICH CREATE, which is what public/app.js branch
     // obvious next thing; the epic create went with the board, one pill to the right.
     home: 'bead',
     epics: 'epic',
+    // Still `chat` in the table, but no screen draws it since bc-qzng7.3: a `session`
+    // selection lands on Work, whose ＋ panel starts a chat as its first row.
     session: 'chat',
     // `bead` said `chat` for as long as that is what ＋ did there, and became `bead` the
     // day bc-khoe.27.3 put a form behind it. Promising a create nobody wrote is the
@@ -446,7 +448,8 @@ await check('AND THE FIELD SAYS WHICH CREATE, which is what public/app.js branch
   filter.set([]);
   assert.equal(filter.creates(), 'bead', 'the screen you land on stopped naming its create');
   filter.set(['session']);
-  assert.equal(filter.creates(), 'chat');
+  assert.equal(filter.current(), 'epics', 'Chats did not land on Work');
+  assert.equal(filter.creates(), 'epic', 'Work\'s ＋ is not the panel that starts a chat or an effort');
   // And nothing at all where there is no button, rather than a word a caller could act on.
   filter.set(['question']);
   assert.equal(filter.creates(), '', 'a kind with no ＋ named a create anyway');
@@ -460,8 +463,10 @@ await check('＋ follows the lit pill, and the two queues have none', () => {
   assert.equal(filter.composes(), true, 'the default screen lost ＋');
   for (const id of SLICES) {
     filter.set([id]);
-    assert.equal(filter.current(), id, `${id} is not the lit pill after selecting it`);
-    assert.equal(filter.composes(), COMPOSE.includes(id), `＋ is wrong on ${id}`);
+    // `session` lands on Work since bc-qzng7.3 — see `set` in public/inboxfilter.js.
+    const lit = id === 'session' ? 'epics' : id;
+    assert.equal(filter.current(), lit, `${id} is not the lit pill after selecting it`);
+    assert.equal(filter.composes(), COMPOSE.includes(lit), `＋ is wrong on ${id}`);
   }
   // And back: a create that does not come back when you widen is a button you lose for
   // the rest of the session by having tapped Questions once.
@@ -481,7 +486,8 @@ await check('＋ and what it creates are one field, so they cannot disagree on a
   assert.equal(filter.creates(), 'bead', 'the screen you land on stopped naming its create');
   for (const id of SLICES) {
     filter.set([id]);
-    assert.equal(filter.creates(), WHAT[id] || '', `＋ creates the wrong thing on ${id}`);
+    const lit = id === 'session' ? 'epics' : id;
+    assert.equal(filter.creates(), WHAT[lit] || '', `＋ creates the wrong thing on ${id}`);
     assert.equal(filter.composes(), Boolean(filter.creates()), `＋ and its create disagree on ${id}`);
   }
 });
@@ -1062,17 +1068,21 @@ await check('the selected kind is not one of the row’s narrowings', () => {
   assert.ok(!pill('bead').classes().includes('on'), 'the row claims a narrowing it does not own');
 });
 
-await check('a pill per group the row still owns, and no kinds among them', () => {
+await check('a pill per group the row still owns, and the Kind filter among them', () => {
   const { root, chips } = mounted();
   const groups = root.children.map((b) => b.dataset.group);
-  assert.ok(!groups.includes('kind'), 'the kinds are still chips in the row');
+  // bc-qzng7.2: Questions and PRs left the view row and became one Kind filter on Inbox.
+  // Only those two: the other kinds are still places of their own.
+  const kinds = chips('kind').map((c) => c.dataset.chip);
+  assert.deepEqual(kinds, ['question', 'pr'], `the Kind filter offers ${kinds.join(', ')}`);
   // `bead` here is the fixture's stand-in for app.js's search box — see `mounted`. What
   // the check is about is that the page's group leads and the control's own two follow
   // it. Every pill exists at mount, whichever view is lit; which of them is *offered* is
   // that view's business and is checked further down.
   // `asked` is the Questions pill's own split (bc-iaju1.5) and leads the control's other
   // two because the table's order is the row's: question, then pr, then bead.
-  assert.deepEqual(groups, ['bead', 'asked', 'status', 'beadstatus'], `the row holds ${groups.join(', ')}`);
+  // `stage` is Work's (bc-qzng7.3): the PR board and Releases as one narrowing.
+  assert.deepEqual(groups, ['bead', 'kind', 'stage', 'asked', 'status', 'beadstatus'], `the row holds ${groups.join(', ')}`);
   // No count on a page group's chips here: the real box has none either, and a wrong
   // number beside the sub-filters' real ones is worse than none.
   assert.equal(chips('bead')[0].children.length, 1);
@@ -1309,10 +1319,10 @@ await check('tapping a status chip tells the page, and leaves the panel open', (
 
 await check('the pill names the narrowing — including the one nobody set', () => {
   const { filter, says, pill } = mounted({ kinds: PR_KINDS, counts: { question: 3, pr: 4 } });
-  // With pull requests on screen the standing `unmerged` default is a narrowing, so it is
-  // on the row at rest. Under `My Epics` the pill is not offered — the view does not use
-  // it — so the note is what says it, which is the one thing that must not go quiet.
-  assert.equal(says('status'), 'PR status: unmerged');
+  // On the unnarrowed Inbox the `unmerged` default is what Inbox *is* — waiting on you —
+  // so it is not confessed there since bc-qzng7.2. Narrowed to PRs, the pill is offered
+  // and says it, nobody having set it.
+  assert.equal(says('status'), '');
   filter.set(['pr']);
   assert.equal(says('status'), 'PR status: unmerged');
   assert.ok(pill('status').classes().includes('on'), 'a filter that is filtering does not look it');
@@ -1464,14 +1474,15 @@ await check('the pill names the narrowing nobody set, the way PR status does', (
   assert.equal(says('asked'), 'Questions: Held');
 });
 
-await check('and confesses itself as a note on a view whose pill it has left', () => {
-  // The same rule the `unmerged` default lives by: a narrowing that is still biting with
-  // its control off the row is the one thing this control must never do quietly. It bites
-  // on Home — `matches` applies `inSub` whatever is selected — so Home has to say so.
-  const { says, offered, note } = mounted({ counts: Q_COUNTS });
+await check('and is not confessed on Inbox, where the held row says it instead', () => {
+  // bc-qzng7.2. The held half is still off the unnarrowed list — `matches` applies
+  // `inSub` whatever is selected — but Inbox says so with its own row ("N beads are held
+  // for your endorsement, review", `heldDoorHtml` in public/app.js) rather than with a
+  // filter note, because the default is the definition of Inbox, not a filter you set.
+  const { says, offered } = mounted({ counts: Q_COUNTS });
   assert.equal(offered('asked'), false, 'the pill is on a view that does not own it');
-  assert.equal(says('asked'), 'Questions: asked', 'the held beads are off Home and nothing says why');
-  assert.equal(note('asked').hidden, false);
+  assert.equal(says('asked'), '', 'a default is confessed as though somebody set it');
+  assert.ok(APP.includes('function heldDoorHtml'), 'nothing on Inbox says beads are held');
 });
 
 await check('on a screen with no questions at all, it says nothing about them', () => {
@@ -1525,7 +1536,9 @@ await check('every view pill says which filters it can use', () => {
   // `qsort` is its Questions order switch (bc-iaju1.5). Both are `adopt`ed page groups,
   // and inboxfilter.js warns out loud about a page group no pill names — this is the
   // same check from the other end, that no *pill* names a group nothing draws.
-  const known = new Set(['bead', 'qsort']);
+  // `kind` is this file's own Kind filter (bc-qzng7.2), drawn beside the page's.
+  // `stage` is Work's Stage filter (bc-qzng7.3), also this file's own.
+  const known = new Set(['bead', 'qsort', 'kind', 'stage']);
   for (const k of list(model.KINDS)) if (k.sub) known.add(k.sub.id);
   for (const k of list(model.KINDS)) {
     assert.ok(Array.isArray(k.filters), `${k.id} does not say what the row may offer under it`);
@@ -1544,27 +1557,52 @@ await check('the bead search is offered under every view whose rows are beads', 
   }
 });
 
-await check('Chats can use none of them, so the row takes itself off the chrome', () => {
-  // A chat is in no tracker: it is under no bead and it has no status. What would be
-  // left is a strip of chrome with nothing on it, which is worse than no strip.
+await check('Work offers the Stage filter and not the bead search', () => {
+  // bc-qzng7.3. Work draws efforts and chats, not a list of beads, so a search box would
+  // narrow a list that is not there. What it offers is Stage — the PR board and Releases
+  // as one narrowing — so the row stays, holding that one pill.
   const { filter, root, offered } = mounted();
-  assert.equal(root.hidden, false);
-  filter.set(['session']);
-  assert.equal(offered('bead'), false, 'the search is offered over a list it can only empty');
-  assert.equal(root.hidden, true, 'a row of controls for a view that can use none of them');
+  filter.set(['epics']);
+  assert.equal(offered('bead'), false, 'the search is offered over a board it cannot narrow');
+  assert.equal(offered('stage'), true, 'Work lost its Stage filter');
+  assert.equal(root.hidden, false, 'the row went with the search');
   filter.set([]);
-  assert.equal(root.hidden, false, 'widening back left the control gone');
+  assert.equal(offered('stage'), false, 'Stage is offered on Inbox, which has no board to swap');
+});
+
+await check('a stage swaps Work for the pull requests at it, and a second tap takes it off', () => {
+  const { filter } = mounted();
+  filter.set(['epics']);
+  assert.equal(filter.stage(), '', 'Work arrived on a stage rather than the board');
+  filter.setStage('shipping');
+  assert.equal(filter.stage(), 'shipping');
+  // `of` is the PR ladder's rungs — merged, pushed and deployed are all "not live yet".
+  assert.equal(filter.stageOf({ pr: { stage: 'deployed' } }), 'shipping');
+  assert.equal(filter.stageOf({ pr: { stage: 'review' } }), 'pr');
+  assert.equal(filter.stageOf({ pr: { stage: 'live' } }), '', 'a live pull request is still shipping');
+  filter.setStage('shipping');
+  assert.equal(filter.stage(), 'shipping', 'setting the same stage twice took it off');
+  filter.setStage('');
+  assert.equal(filter.stage(), '');
+  // And off Work it is not a narrowing of anything.
+  filter.setStage('pr');
+  filter.set([]);
+  assert.equal(filter.stage(), '', 'a stage chosen on Work narrows Inbox');
 });
 
 await check('the row stays while a group is only a note, not gone', () => {
   // The other side of the same rule, and the one it would be easy to break: under
   // `My Epics` neither sub-filter is offered as a pill, and the row must not vanish
   // because of it — the search is still there and the standing `unmerged` default is
-  // still being said.
-  const { root, says, offered } = mounted({ kinds: PR_KINDS, counts: { pr: 4 } });
+  // still being said. Since bc-qzng7.2 the default is not said at rest, so a status you
+  // chose and then widened away from stands in for it.
+  const { root, filter, says, offered } = mounted({ kinds: PR_KINDS, counts: { pr: 4 } });
+  filter.set(['pr']);
+  filter.setSub('pr', ['live']);
+  filter.set([]);
   assert.equal(root.hidden, false);
   assert.equal(offered('status'), false);
-  assert.equal(says('status'), 'PR status: unmerged');
+  assert.equal(says('status'), 'PR status: Live');
 });
 
 await check('a status the newly-lit pill cannot reach is dropped, not left narrowing it', () => {
@@ -1586,6 +1624,7 @@ await check('and the row stops naming it, because there is nothing here for it t
   // and none of them is on screen. Saying `unmerged` there is this control's own failure
   // in the mirror: naming a filter that is not filtering anything.
   const { filter, says } = mounted({ kinds: PR_KINDS, counts: { pr: 4 } });
+  filter.set(['pr']);
   assert.equal(says('status'), 'PR status: unmerged');
   filter.set(['question']);
   assert.equal(says('status'), '');
@@ -1631,8 +1670,8 @@ await check('a page group with no clear of its own keeps what it had, rather tha
     groups: [{ id: 'bead', legend: 'Bead', all: 'Any bead', options: () => [{ id: 'x', label: 'x', on: true }], pick: () => {} }],
   });
   filter.survey({ kinds: ANY_KINDS });
-  filter.set(['session']);
-  assert.deepEqual(list(filter.selected()), ['session']);
+  filter.set(['epics']);
+  assert.deepEqual(list(filter.selected()), ['epics']);
 });
 
 await check('a group no pill names is loud, and never offered', () => {
@@ -1703,18 +1742,35 @@ const rowPills = () => {
  * says which pill took them in, as `kinds` and `views` on that pill.
  */
 const MERGED = ['history', 'bead'];
+/**
+ * The two kinds that are the Kind filter on Inbox since bc-qzng7.2, rather than pills.
+ * They stay kinds in the table, and the Inbox pill stays lit under either (`kinds`).
+ */
+const FILTERED = ['question', 'pr'];
+/**
+ * The kind that is Work's since bc-qzng7.3: chats are drawn under the board, so the Chats
+ * pill is gone and the Work pill stays lit under a `session` selection (`kinds`).
+ */
+const WORKED = ['session'];
 
 await check('the row draws the six kinds, in the table’s order — two of them as one Beads pill', () => {
   // The copy, checked. viewbar.js is loaded on ten pages and inboxfilter.js on one,
   // so the row cannot read the table at paint time — which makes this the only thing
   // standing between "one place that knows" and two lists that drift.
   const drawn = rowPills();
-  const own = PILLS.filter((id) => !MERGED.includes(id));
+  const own = PILLS.filter((id) => !MERGED.includes(id) && !FILTERED.includes(id) && !WORKED.includes(id));
   assert.deepEqual(drawn.slice(0, own.length + 1), [...own, 'beads'], `the row draws ${drawn.join(', ')}`);
   const at = VIEWBAR.indexOf("{ id: 'beads'");
   const row = VIEWBAR.slice(at, VIEWBAR.indexOf('\n', at));
   assert.ok(row.includes("views: ['history']"), 'the Beads pill is not lit on the ledger');
   assert.ok(row.includes("kinds: ['bead']"), 'the Beads pill is not lit on Home narrowed to beads');
+  const hat = VIEWBAR.indexOf("{ id: 'home'");
+  const home = VIEWBAR.slice(hat, VIEWBAR.indexOf('\n', hat));
+  assert.ok(home.includes("kinds: ['question', 'pr']"), 'Inbox is not lit under a Kind narrowing');
+  const wat = VIEWBAR.indexOf("{ id: 'epics'");
+  const workPill = VIEWBAR.slice(wat, VIEWBAR.indexOf('\n', wat));
+  assert.ok(workPill.includes("kinds: ['session']"), 'Work is not lit under an old Chats selection');
+  assert.ok(workPill.includes("views: ['advocates', 'releases']"), 'Work is not lit on its details panes');
 });
 
 /**
@@ -1728,7 +1784,10 @@ const rowList = () => {
   return vm.runInNewContext(`(${m[1]})`, Object.create(null), { timeout: 1000 });
 };
 
-await check('five of the pills carry a count, and three deliberately do not', () => {
+await check('one pill carries a count, and it is Inbox', () => {
+  // bc-qzng7.2: one badge in the app, so a number always means "waiting on you". The
+  // history below is why the others had one; Questions and PRs are a filter now, and
+  // My Efforts and Chats are on their way to Work (bc-qzng7.3).
   // bc-khoe.23. Which five is a property of the row's own list rather than of whatever
   // happens to be in the map pushed at it — a kind the row draws no badge for cannot
   // grow one by appearing in the numbers. The three without are three different reasons
@@ -1742,14 +1801,14 @@ await check('five of the pills carry a count, and three deliberately do not', ()
     .map((p) => p.id);
   assert.deepEqual(
     counted,
-    ['home', 'epics', 'question', 'pr', 'session'],
+    ['home'],
     `the row counts ${counted.join(', ') || '(nothing)'}`
   );
 });
 
 await check('and every kind’s label is the same word in both files', () => {
   for (const k of list(model.KINDS)) {
-    if (MERGED.includes(k.id)) continue;
+    if (MERGED.includes(k.id) || FILTERED.includes(k.id) || WORKED.includes(k.id)) continue;
     const at = VIEWBAR.indexOf(`id: '${k.id}', kind: '${k.id}'`);
     assert.notEqual(at, -1, `${k.id} is in the table and not on the row`);
     const row = VIEWBAR.slice(at, VIEWBAR.indexOf('\n', at));
@@ -1766,7 +1825,7 @@ await check('no kind with a pill of its own leaves Home', () => {
     const at = VIEWBAR.indexOf(`id: '${k.id}', kind: '${k.id}'`);
     // The ledger left with its pill (bc-yjekg.3): the Beads pill's Closed and All sides
     // are where it is now, and what they link to is `aim` in viewbar.js, not this table.
-    if (MERGED.includes(k.id)) continue;
+    if (MERGED.includes(k.id) || WORKED.includes(k.id)) continue;
     const row = VIEWBAR.slice(at, VIEWBAR.indexOf('\n', at));
     assert.ok(!row.includes('href:'), `${k.id} navigates away from Home`);
   }
@@ -1819,7 +1878,9 @@ await check('Home is counted here, because no row is ever of that kind', () => {
   // disagreeing about it.
   const { filter, counts } = load();
   filter.survey({ kinds: ANY_KINDS, counts: { question: 3, pr: 2, session: 1, bead: 6 } });
-  assert.equal(counts.at(-1).home, 12, 'Home is not the whole list');
+  // 11, not 12: the chat is Work's since bc-qzng7.3 (`work` on the session kind), so it
+  // is in neither Inbox's list nor its number.
+  assert.equal(counts.at(-1).home, 11, 'Home is not the whole list');
 });
 
 await check('and a home the caller passed is not counted into its own total', () => {
@@ -1853,7 +1914,7 @@ await check('My Epics counts the cards, and only ever the cards — bc-fwp2c', (
   assert.equal(counts.at(-1).epics, 4, 'My Epics counted something other than its cards');
   // And nothing else moved. The others are counted off the rows and each still opens
   // exactly its own slice, which is why this bead is about two badges and no lists.
-  assert.equal(counts.at(-1).home, 12);
+  assert.equal(counts.at(-1).home, 11);
   assert.equal(counts.at(-1).question, 3);
   assert.equal(counts.at(-1).pr, 2);
   assert.equal(counts.at(-1).session, 1);
@@ -1939,8 +2000,14 @@ await check('?kind= from a pill tapped on another page arrives narrowed', () => 
 
 await check('and it outranks what is on disk, which is the whole point of the link', () => {
   const store = new Map([['beadcause.kinds', JSON.stringify(['question'])]]);
-  const { filter } = load({ store, search: '?workspace=w&kind=session' });
-  assert.deepEqual(list(filter.selected()), ['session'], 'the link landed on the last thing looked at');
+  const { filter } = load({ store, search: '?workspace=w&kind=pr' });
+  assert.deepEqual(list(filter.selected()), ['pr'], 'the link landed on the last thing looked at');
+});
+
+await check('an old Chats link lands on Work, where the chats are', () => {
+  const store = new Map([['beadcause.kinds', JSON.stringify(['question'])]]);
+  const { filter } = load({ store, search: '?kind=session' });
+  assert.equal(filter.current(), 'epics', 'a Chats link landed on an Inbox narrowed to chats');
 });
 
 await check('?kind=home is an unnarrowed Home, not a selection of nothing-matches', () => {
@@ -2008,7 +2075,7 @@ await check('app.js filters the list through it, rather than only drawing it', (
   //
   // The open-card clause rides in front of it since bc-fwp2c (asserted whole further
   // down), so this asks only that every row still goes *through* `inKind` on the way in.
-  assert.ok(/inBoard\.filter\((inKind|\(q\) =>[^\n]*inKind\(q\))\)/.test(app), 'the list is not filtered by kind');
+  assert.ok(/inBoard\.filter\((inKind\)|\(q\) =>[^\n]*inKind\(q\))/.test(app), 'the list is not filtered by kind');
   // The board still narrows it — bc-rfnr.2 — but bc-0xil put one thing ahead of it: a bead
   // picked in the search box *replaces* the board's narrowing rather than stacking on it,
   // because half the beads worth searching for are under somebody else's P0 or under none,
@@ -2071,18 +2138,21 @@ await check('a view shows its own kind — the board on My Epics, the list on th
   // is removed by the pill the sheet was opened from, and `p0-answer` on a bead in a
   // board tree — the ordinary way to answer a question from the board — opens nothing.
   assert.ok(
-    /const visible = inBoard\.filter\(\(q\) => state\.open\.has\(q\.key\) \|\| inKind\(q\)\);/.test(app),
+    // Since bc-qzng7.3 the kind clause also keeps chats off Inbox — they are Work's.
+    /const visible = inBoard\.filter\(\(q\) => state\.open\.has\(q\.key\) \|\| \(inKind\(q\) && !\(view === 'home' && q\.session\)\)\);/.test(app),
     'an open card is filtered away by the pill it was opened from'
   );
   // And the screen that clause used to protect is drawn on purpose instead of by fallback.
   assert.ok(app.includes('function epicsEmptyHtml()'), 'an empty board is a blank page again');
   assert.ok(
-    /if \(!roots\) chunks\.push\(\{ key: '@empty', html: epicsEmptyHtml\(\) \}\);/.test(app),
+    // `!stage`: a Stage picked on Work (bc-qzng7.3) swaps the board for a list of pull
+    // requests, which has an empty state of its own.
+    /if \(!roots && !stage\) chunks\.push\(\{ key: '@empty', html: epicsEmptyHtml\(\) \}\);/.test(app),
     'the empty board draws nothing at all'
   );
   // And the gate is spent where the chunks are pushed. The board is `''` under a kind
   // pill rather than collapsed to its heading: the bead's word is *gone*, not folded.
-  assert.ok(/const roots = boardHere \? p0SectionHtml\(\) : ''/.test(app), 'the board is drawn on every pill');
+  assert.ok(/const roots = boardHere && !stage \? p0SectionHtml\(\) : ''/.test(app), 'the board is drawn on every pill');
   assert.ok(/if \(!listHere\) \{/.test(app), 'the list is drawn on every pill');
   // `home` is what `current()` answers for the empty selection, and `epics` is a slice you
   // select — so the two files agree on the ids this gate turns on without app.js having to

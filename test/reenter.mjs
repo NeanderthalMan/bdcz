@@ -65,6 +65,8 @@ const {
   workerHolds,
   reentryFor,
   supervised,
+  boardStarted,
+  BOARD_STARTED_LABEL,
   waitingOnMerge,
   waitingOnMergeCard,
   REENTER_DEFAULTS,
@@ -434,10 +436,9 @@ await check('a child epic with an advocate of its own is not a stall — bc-xl7n
   assert.deepEqual(twoSweeps(supervisedKid).record.stalls, {}, 'and it is not on the clock either');
 
   // Free off the same row the sweep already holds, exactly like `handedBack`: one label,
-  // no read. The label is what every route stamps — the board start, the sweep's own
-  // launch and `POST /api/bead/advocate` all leave it behind — which is why the wider
-  // class (any supervised sub-epic, however it got there) is the one excluded rather than
-  // "is it on the board", a fact the tracker records nowhere but the status.
+  // no read. The sweep's own launch and `POST /api/bead/advocate` both leave it behind. A
+  // board start does NOT — that was this check's old claim and it was false (bc-xl7n.220);
+  // the next check is the exclusion for that route.
   assert.equal(supervised({ labels: [ADVOCATE_LABEL] }), true);
   assert.equal(supervised({ labels: [OWNER] }), false);
   assert.equal(supervised({}), false);
@@ -447,6 +448,36 @@ await check('a child epic with an advocate of its own is not a stall — bc-xl7n
   const unassigned = () =>
     subtree({ 'x-1.2': { status: 'in_progress', issue_type: 'epic', labels: [OWNER] } });
   assert.match(twoSweeps(unassigned).reason, /`x-1\.2` has been in progress for over 1h/);
+});
+
+await check('a child epic started from the board, with no advocate, is not a stall — bc-xl7n.220', () => {
+  // bc-xl7n.118's exclusion asked `advocate-assigned` on the belief that every board start
+  // stamps it. `boardMove` stamps nothing but this label, and opens no advocate. Measured
+  // 2026-11-07: of five epics Adam started from the board, one carried `advocate-assigned`,
+  // and bc-xl7n.76 — a finished container, nothing working it — was reported as a stall in
+  // bc-xl7n's brief at 17:43:54Z, which tells the advocate to undo the board start.
+  const started = () =>
+    subtree({ 'x-1.2': { status: 'in_progress', issue_type: 'epic', labels: [OWNER, BOARD_STARTED_LABEL] } });
+  assert.equal(twoSweeps(started).reason, null, 'the board is not a dead window');
+  assert.deepEqual(twoSweeps(started).record.stalls, {}, 'and it is not on the clock either');
+
+  // A board start leaves the assignee alone, so a started epic can still carry an old one
+  // (bc-w156 did) — the label is what decides, not the absence of a claim.
+  const startedWithAssignee = () =>
+    subtree({
+      'x-1.2': { status: 'in_progress', issue_type: 'epic', assignee: 'someone', labels: [OWNER, BOARD_STARTED_LABEL] },
+    });
+  assert.equal(twoSweeps(startedWithAssignee).reason, null);
+
+  assert.equal(boardStarted({ labels: [BOARD_STARTED_LABEL] }), true);
+  assert.equal(boardStarted({ labels: [OWNER, ADVOCATE_LABEL] }), false);
+  assert.equal(boardStarted({}), false);
+
+  // THE OTHER HALF OF THE ACCEPTANCE: a worker's dead claim on an ordinary child is still a
+  // stall. Same shape as above, minus the label, and claimed the way a worker claims.
+  const deadClaim = () =>
+    subtree({ 'x-1.2': { status: 'in_progress', issue_type: 'task', assignee: 'someone', labels: [OWNER] } });
+  assert.match(twoSweeps(deadClaim).reason, /`x-1\.2` has been in progress for over 1h/);
 });
 
 await check('a dead window with no pull request and no question is still reported', () => {

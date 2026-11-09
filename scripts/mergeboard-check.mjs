@@ -210,10 +210,16 @@ try {
   );
   ok((await evalJs(`document.getElementById('prs-queue-count').textContent`)) === '3', 'the subtab carries the count');
 
-  console.log('\nremembered');
+  // In the shell the switch is hidden (bc-qzng7.9) and the address picks the list rather
+  // than this device's memory: `sub=queue` is the queue, and `/prs` — every old link and
+  // notification about the board — is Open PRs.
+  console.log('\nthe address picks the list');
+  await s.send('Page.navigate', { url: `${BASE}/#advocates?tab=prs&sub=queue` });
+  await sleep(1500);
+  ok((await evalJs(SHOWN)) === 'prs-queue', 'the merge queue link lands on the queue');
   await s.send('Page.navigate', { url: `${BASE}/prs` });
   await sleep(1500);
-  ok((await evalJs(SHOWN)) === 'prs-queue', 'a reload comes back to the queue');
+  ok((await evalJs(SHOWN)) === 'prs-open', 'and /prs lands on Open PRs, whatever was up last');
 
   const queuesBefore = asked.get('/api/queues') || 0;
   await tap('open');

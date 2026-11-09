@@ -39,6 +39,14 @@
  * 4. **Sourcing it still works.** A file that fits but does not run is not a fix.
  */
 import assert from 'node:assert';
+
+// Platform-skip (bc-obucr.7): the 1024-byte MAX_CANON limit this proves is macOS's. A Linux
+// tty line discipline holds 4096, so the "stops at 1024" premise is false there and the
+// suite cannot pose its case. The command-length half is covered by suites that do run.
+if (process.platform !== 'darwin') {
+  console.log('skipped: canonical-mode tty limit is 1024 bytes on macOS only (4096 on Linux)');
+  process.exit(0);
+}
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';

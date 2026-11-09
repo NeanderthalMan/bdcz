@@ -100,3 +100,7 @@ design-shots
 # design-shots/ — shots.mjs clears that whole directory on every render (bc-ka5y.24),
 # and per-machine either way, since it is a claim about the machine's own fonts.
 design-baseline.json
+
+# The iTerm2 Python API for Consolidate (bc-4olsx.3, scripts/iterm-consolidate.py) — a
+# per-machine venv, see docs/install.md. Never committed.
+.venv-iterm

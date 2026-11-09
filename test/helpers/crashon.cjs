@@ -24,6 +24,11 @@
  * reads `test/` non-recursively for `.mjs`, so a helper in a subdirectory is never run as
  * a suite, and a `.cjs` would not be picked up in any case.
  */
-process.on('SIGUSR2', () => {
-  throw new Error('a deliberate crash, from test/helpers/crashon.cjs');
-});
+// SIGWINCH too, for Linux: there SIGUSR2 is 12, below SIGTERM's 15, so the kernel delivers
+// it first and the crash lands before the shutdown the test needs it to interrupt. SIGWINCH
+// is 28 on Linux, above 15, which restores the order macOS gets from SIGUSR2 being 31.
+for (const sig of ['SIGUSR2', 'SIGWINCH']) {
+  process.on(sig, () => {
+    throw new Error('a deliberate crash, from test/helpers/crashon.cjs');
+  });
+}

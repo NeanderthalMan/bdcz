@@ -515,5 +515,10 @@ await check('GitHub stops counting as an answer when it cannot give one', () => 
   assert.equal(githubStillAnswering(null), '');
 });
 
+await check('an observing daemon never starts a base gate (bc-xl7n.215)', () => {
+  const src = fs.readFileSync(new URL('../lib/server.js', import.meta.url), 'utf8');
+  assert.match(src, /enabled: gatesBaseLocally\(cfg, ws\.name\) && !OBSERVING,/);
+});
+
 console.log(failures ? `\n${failures} failed` : '\nall passed');
 process.exit(failures ? 1 : 0);

@@ -53,6 +53,12 @@
  * `npm test`.
  */
 import assert from 'node:assert/strict';
+
+// bc-obucr.11: this suite used to be skipped whole off a Mac (bc-obucr.7) because bin/open-handoff
+// prints a paste-it instruction instead of opening iTerm there. Only the checks that need the
+// iTerm branch are Darwin-gated now. bin/open-handoff picks its branch with `uname -s`, found on
+// PATH, so the dry-run checks put a `uname` stub first and run either branch on either OS. The
+// one live check that goes on to osascript/lsappinfo is the only one that needs a real Mac.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -145,7 +151,9 @@ check('the handoff brief is not the discuss-a-question brief', () => {
 check('read it, claim it, continue from Next action', () => {
   const brief = handoffPromptFor('beadcause', 'bc-hb7j');
   assert.match(brief, /bd show bc-hb7j --json \| jq -r '\.\[0\]\.description'/, 'the byte-exact read');
-  assert.match(brief, /bd update bc-hb7j --claim/, 'the successor claims the handoff it was opened for');
+  assert.match(brief, /node \S+\/bin\/claim\.js bc-hb7j/, 'the successor claims the handoff for its own session (bc-3jzrd)');
+  assert.ok(!/bd update bc-hb7j --claim/.test(brief), 'never the actor-keyed claim two sessions can both win');
+  assert.match(brief, /exits 3[\s\S]*\*\*stop\*\*/, 'and a refused claim stops the session');
   assert.match(brief, /## Next action/, 'and continues from the one section that says what to do');
   assert.match(brief, /UNVERIFIED/, 'a claim the handoff marked unverified is verified before it is relied on');
   assert.match(brief, /beadcause\/bc-hb7j/, 'the workspace is named, so `bd` in the window is unambiguous');
@@ -158,7 +166,9 @@ check("the fallback's words are the daemon's: bin/open-handoff says the same loa
   const prompt = src.slice(src.indexOf('PROMPT="'), src.indexOf('<it>."') + '<it>."'.length);
   assert.ok(prompt.length > 20, 'the PROMPT block moved — find it again rather than pass vacuously');
   assert.match(prompt, /bd show \$\{ID\} --json \| jq -r '\.\[0\]\.description'/, 'the byte-exact read');
-  assert.match(prompt, /bd update \$\{ID\} --claim/, 'the claim');
+  assert.match(prompt, /node \$\{CLAIM_BIN\} \$\{ID\}/, 'the session-keyed claim (bc-3jzrd)');
+  assert.ok(!/bd update \$\{ID\} --claim/.test(prompt), 'not the actor-keyed one');
+  assert.match(prompt, /exits 3, another live session/, 'and the stop on a refusal');
   assert.match(prompt, /Next action/, 'the section to continue from');
   assert.match(prompt, /UNVERIFIED/, 'verify before relying');
   assert.ok(!/bd close/.test(prompt), 'and never the discuss-and-close brief');
@@ -197,7 +207,7 @@ check('a multi-repo workspace tells the window which checkout it is', () => {
   assert.ok(!/checkout/.test(plain), 'a single-repo workspace says nothing about repos');
   const scoped = handoffPromptFor('architecture', 'cl-4o4', { name: 'atrium-service', token: 'atrium-service' });
   assert.match(scoped, /atrium-service/, 'and a scoped one names it');
-  assert.match(scoped, /bd update cl-4o4 --claim/, 'without displacing the instructions');
+  assert.match(scoped, /bin\/claim\.js cl-4o4/, 'without displacing the instructions');
 });
 
 /* ------------------------------------------------------------------ the wiring */
@@ -247,6 +257,31 @@ check('never two successors on one handoff', () => {
   assert.match(door, /advocateSession\(liveSessions\(cfg\), id/);
   assert.match(door, /rememberAdvocateOpened\(/, 'a launch that worked has to be remembered');
   assert.match(door, /already\.opening/, 'and the minute before it names itself is a state, not a free second window');
+});
+
+check('a handoff is marked opening before the slow part, not after it (bc-t5inx)', () => {
+  const src = read('lib', 'server.js');
+  const route = src.slice(src.indexOf("if (p === '/api/handoff'"));
+  const door = route.slice(0, route.indexOf('/api/terminals'));
+  // 2026-10-31, dv-q52fe: the POST took 44 s, the client gave up at 20 and opened iTerm,
+  // and the daemon opened its own window 24 s later — two successors on one handoff. The
+  // mark used to land after the launch, so a second ask during those 44 s found nothing.
+  const guard = door.indexOf('advocateSession(liveSessions(cfg), id, { openedAt');
+  const mark = door.indexOf('rememberAdvocateOpened(key)');
+  const endorse = door.indexOf('await endorse(bd, ws, issue)');
+  const launch = door.indexOf('await openHandoffSession(');
+  assert.ok(guard > 0 && mark > guard && endorse > mark, 'guard, then mark, then the first await');
+  const between = door
+    .slice(guard + 1, mark)
+    .split('\n')
+    .filter((l) => !/^\s*\/\//.test(l))
+    .join('\n');
+  assert.ok(!/\bawait\b/.test(between), 'nothing awaited between the check and the mark');
+  // A window opened by hand while the endorse ran is registered by then and must win.
+  const recheck = door.indexOf('advocateSession(liveSessions(cfg), id)', mark);
+  assert.ok(recheck > endorse && recheck < launch, 'the live sessions are looked at again just before launching');
+  assert.match(door, /catch \(err\) \{\s*forgetAdvocateOpening\(key\)/, 'a launch that threw takes its mark back');
+  assert.match(door, /already: true/, 'the "somebody has it" 409s say so, for bin/open-handoff');
 });
 
 check('it endorses, like the door beside it', () => {
@@ -379,7 +414,16 @@ if (!haveTools) {
 
   const env = { ...process.env };
   delete env.ZDOTDIR; // would point the fresh shell at a real startup file
-  const opener = (args, cwd) => {
+  // `bin/open-handoff` asks `uname -s` which fallback to take. A stub earlier on PATH answers
+  // for it, so the iTerm branch (--dry-run stops before osascript) runs on Linux too.
+  const unameStub = (name) => {
+    const dir = path.join(home, 'uname-' + name);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'uname'), '#!/bin/sh\necho ' + name + '\n', { mode: 0o755 });
+    return dir;
+  };
+  const fakeOs = { Darwin: unameStub('Darwin'), Linux: unameStub('Linux') };
+  const opener = (args, cwd, os = 'Darwin') => {
     const r = spawnSync('bash', [OPENER, 'bc-hb7j', '--dry-run', ...args], {
       encoding: 'utf8',
       timeout: 60000,
@@ -391,7 +435,7 @@ if (!haveTools) {
         // The caller's graph, which is never the answer for -d: the script has to ask
         // with this unset or every directory resolves to it.
         BEADS_DIR: path.join(home, 'callers-graph', '.beads'),
-        PATH: `${stub}:${process.env.PATH}`,
+        PATH: `${fakeOs[os]}:${stub}:${process.env.PATH}`,
       },
     });
     return { code: r.status, out: r.stdout || '', err: r.stderr || '', all: `${r.stdout || ''}${r.stderr || ''}` };
@@ -447,6 +491,16 @@ if (!haveTools) {
     assert.match(r.out, cdLine(stray), r.all);
   });
 
+  check('off a Mac the fallback hands over a paste-it instruction instead of opening anything', () => {
+    // The other branch of open_iterm, the one a Linux host takes: no cd line, no window,
+    // exit 4, and the kickoff printed so it can be pasted. Run on either OS via the uname stub.
+    const r = opener(['--no-daemon', '-d', main], undefined, 'Linux');
+    assert.equal(r.code, 4, r.all);
+    assert.match(r.err, /this host is not macOS/, r.all);
+    assert.match(r.err, /node \/\S+\/bin\/claim\.js bc-hb7j/, 'the kickoff is printed, with the claim by absolute path');
+    assert.ok(!/^cd /m.test(r.out), `it planned a window on a host with no terminal:\n${r.all}`);
+  });
+
   check('-w still decides when given', () => {
     const r = opener(['-d', stray, '-w', 'wsrepo']);
     const m = r.all.match(/POST \/api\/handoff\s+(\{.*\})/);
@@ -455,6 +509,117 @@ if (!haveTools) {
   });
 
   daemon.kill();
+
+  /* ---------------------------------- a slow daemon is not a refusal (bc-t5inx) */
+  //
+  // The script for real, no --dry-run, against a stand-in that answers /api/handoff the
+  // way the daemon can: slowly, with a 409 `already`, with an ordinary 409, or not at all.
+  // `osascript` is stubbed to write a line to a file, so "would it have opened iTerm" is
+  // read off that file rather than off the script's own account of itself.
+  console.log('bin/open-handoff — a slow daemon gives one successor, not two');
+
+  const modeFile = path.join(home, 'mode');
+  const postsFile = path.join(home, 'posts');
+  const itermFile = path.join(home, 'iterm');
+  fs.writeFileSync(
+    path.join(stub, 'osascript'),
+    `#!/bin/sh\ncat >/dev/null\necho opened >> ${JSON.stringify(itermFile)}\n`,
+    { mode: 0o755 }
+  );
+  const port2File = path.join(home, 'slow-port');
+  const slow = spawn(
+    process.execPath,
+    [
+      '-e',
+      "const http=require('http'),fs=require('fs');const [pf,mf,cf]=process.argv.slice(1);" +
+        "const send=(r,c,b)=>{r.writeHead(c,{'content-type':'application/json'});r.end(JSON.stringify(b))};" +
+        "const s=http.createServer((q,r)=>{if(q.url==='/api/health')return send(r,200,{ok:true,workspaces:['wsrepo']});" +
+        "q.resume();q.on('end',()=>{fs.appendFileSync(cf,'x');const n=fs.readFileSync(cf,'utf8').length;" +
+        "const m=fs.readFileSync(mf,'utf8').trim();" +
+        "const taken={error:'already has a session opening',already:true,opening:true};" +
+        "if(m==='slow'){if(n===1)return setTimeout(()=>send(r,200,{ok:true,dir:'/x'}),3000);return send(r,409,taken)}" +
+        "if(m==='taken')return send(r,409,taken);" +
+        "if(m==='nothandoff')return send(r,409,{error:'not a handoff'});" +
+        "if(m==='hang')return setTimeout(()=>send(r,200,{ok:true}),6000);" +
+        "send(r,200,{ok:true,dir:'/x'})})});" +
+        "s.listen(0,'127.0.0.1',()=>fs.writeFileSync(pf,String(s.address().port)))",
+      port2File,
+      modeFile,
+      postsFile,
+    ],
+    { stdio: 'ignore' }
+  );
+  let port2 = '';
+  for (let i = 0; i < 200 && !port2; i += 1) {
+    try {
+      port2 = fs.readFileSync(port2File, 'utf8').trim();
+    } catch {
+      spawnSync('sleep', ['0.05']);
+    }
+  }
+  fs.writeFileSync(
+    path.join(home, '.config', 'beadcause', 'config.json'),
+    JSON.stringify({ port: Number(port2), token: 'test-token', workspaces: [{ name: 'wsrepo', dir: path.join(main, '.beads') }] })
+  );
+
+  const live = (mode) => {
+    fs.writeFileSync(modeFile, mode);
+    fs.writeFileSync(postsFile, '');
+    fs.rmSync(itermFile, { force: true });
+    const r = spawnSync('bash', [OPENER, 'bc-hb7j', '-d', main], {
+      encoding: 'utf8',
+      timeout: 60000,
+      env: {
+        ...env,
+        HOME: home,
+        BEADCAUSE_CONFIG_DIR: path.join(home, '.config', 'beadcause'),
+        BEADS_DIR: path.join(home, 'callers-graph', '.beads'),
+        PATH: `${stub}:${process.env.PATH}`,
+        OPEN_HANDOFF_TIMEOUT: '1',
+      },
+    });
+    return {
+      code: r.status,
+      err: r.stderr || '',
+      all: `${r.stdout || ''}${r.stderr || ''}`,
+      posts: fs.readFileSync(postsFile, 'utf8').length,
+      iterm: fs.existsSync(itermFile),
+    };
+  };
+
+  check('a POST that times out is asked again, and the daemon having it opens nothing more', () => {
+    // dv-q52fe exactly: the daemon is still launching when the client gives up.
+    const r = live('slow');
+    assert.equal(r.iterm, false, `it opened iTerm on a timeout — the second successor:\n${r.all}`);
+    assert.equal(r.code, 0, r.all);
+    assert.equal(r.posts, 2, `one ask, one re-ask:\n${r.all}`);
+    assert.match(r.err, /asking again/, r.all);
+    assert.match(r.err, /already has/, r.all);
+  });
+
+  check('a 409 that says somebody has it is the guard working, not a refusal', () => {
+    const r = live('taken');
+    assert.equal(r.iterm, false, r.all);
+    assert.equal(r.code, 0, r.all);
+    assert.equal(r.posts, 1, r.all);
+  });
+
+  // Needs the real Darwin branch end to end (lsappinfo, osascript), so a Mac only.
+  if (process.platform === 'darwin') check('any other 409 still falls through to iTerm, so a handoff never opens nothing', () => {
+    const r = live('nothandoff');
+    assert.equal(r.iterm, true, `an ordinary refusal must still open the fallback:\n${r.all}`);
+    assert.match(r.err, /refused \(409/, r.all);
+  });
+
+  check('a daemon that never answers opens nothing, exits 4, and prints the kickoff', () => {
+    const r = live('hang');
+    assert.equal(r.iterm, false, r.all);
+    assert.equal(r.code, 4, r.all);
+    assert.equal(r.posts, 2, r.all);
+    assert.match(r.err, /node \/\S+\/bin\/claim\.js bc-hb7j/, 'the kickoff is printed for pasting, with the claim by absolute path');
+  });
+
+  slow.kill();
 }
 
 /* ------------------------------------------------------------------------ done */

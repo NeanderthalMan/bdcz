@@ -24,14 +24,14 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { mergeJsonText } from '../lib/jsonmerge.js';
+import { driverState, installDriver, mainCheckoutScript } from '../lib/jsonmergedriver.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2);
 const has = (n) => argv.includes(n);
-const git = (args) => execFileSync('git', args, { encoding: 'utf8' }).trim();
 
 if (has('--help') || has('-h')) {
   console.log(fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split('*/')[0].replace(/^#!.*\n/, ''));
@@ -39,49 +39,28 @@ if (has('--help') || has('-h')) {
 }
 
 /**
- * The copy of this script the installed driver should run: the main checkout's, never a
- * worktree's — for the reason `conflict-check.mjs` gives (bc-xl7n.125). A worktree is
- * retired eventually, and a driver pointing into it would fail every merge after that.
+ * The install itself lives in lib/jsonmergedriver.js (bc-xl7n.207), because the daemon
+ * runs the same thing at every startup. Pointed at the main checkout's copy of this
+ * script, never a worktree's (bc-xl7n.125); outside a clone that has one — a scratch
+ * repo, a test — at this copy.
  */
-function mainCheckoutScript() {
-  const commonDir = path.resolve(process.cwd(), git(['rev-parse', '--git-common-dir']));
-  const candidate = path.basename(commonDir) === '.git' ? path.dirname(commonDir) : null;
-  const root =
-    candidate && fs.existsSync(path.join(candidate, 'scripts', 'jsonmerge.mjs')) ? candidate : ROOT;
-  return path.join(root, 'scripts', 'jsonmerge.mjs');
-}
-
-/** The driver command line git should run. `process.execPath` so it is the same node. */
-function driverCommand(script = mainCheckoutScript()) {
-  const q = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
-  return `${q(process.execPath)} ${q(script)} %O %A %B %P`;
-}
-
 if (has('--install')) {
-  const command = driverCommand();
-  git(['config', '--local', 'merge.jsonmerge.name', 'JSON merged by structure (beadcause scripts/jsonmerge.mjs)']);
-  git(['config', '--local', 'merge.jsonmerge.driver', command]);
+  const command = installDriver(process.cwd(), mainCheckoutScript(process.cwd()) || path.join(ROOT, 'scripts', 'jsonmerge.mjs'));
   console.log(`installed merge.jsonmerge.driver = ${command}`);
   process.exit(0);
 }
 
 if (has('--check')) {
-  let command = '';
-  try {
-    command = git(['config', '--get', 'merge.jsonmerge.driver']);
-  } catch {
-    /* unset */
-  }
-  if (!command) {
-    console.error('merge.jsonmerge.driver is not set — run: node scripts/jsonmerge.mjs --install');
+  const now = driverState(process.cwd());
+  if (!now.command) {
+    console.error('merge.jsonmerge.driver is not set — run: node scripts/jsonmerge.mjs --install (the daemon also installs it at startup)');
     process.exit(1);
   }
-  const script = /'([^']*jsonmerge\.mjs)'/.exec(command)?.[1];
-  if (!script || !fs.existsSync(script)) {
-    console.error(`merge.jsonmerge.driver points at a script that is not there: ${command}`);
+  if (!now.ok) {
+    console.error(`merge.jsonmerge.driver points at a script that is not there: ${now.command}`);
     process.exit(1);
   }
-  console.log(`merge.jsonmerge.driver = ${command}`);
+  console.log(`merge.jsonmerge.driver = ${now.command}`);
   process.exit(0);
 }
 

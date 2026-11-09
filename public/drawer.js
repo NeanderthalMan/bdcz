@@ -311,6 +311,9 @@
       open = true;
       clearTimeout(sweep);
       wrap.hidden = false;
+      // On a wide screen the drawer is a pane beside the list (bc-qzng7.4), and the page
+      // makes room for it while it is open — see `html.drawer-docked` in style.css.
+      document.documentElement.classList.add('drawer-docked');
       // Two frames: `hidden` off, then the class. Asked for in one, the panel is
       // already home by the time the transition starts and it snaps into place.
       requestAnimationFrame(() => requestAnimationFrame(() => wrap.classList.add('open')));
@@ -321,6 +324,7 @@
       if (!open) return;
       open = false;
       wrap.classList.remove('open');
+      document.documentElement.classList.remove('drawer-docked');
       // Let it slide out before the iframe goes; dropping the iframe first would
       // leave a bare panel sliding away. Gone rather than hidden, so a graph left
       // open is not still polling behind the tab you went back to.

@@ -59,7 +59,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, reconcileBaseUrl } from '../lib/config.js';
 import { buildStamp, EMPTY_STAMP, routerStamp } from '../lib/build.js';
-import { hotSwapProblem, LABEL, LOADED_ENV } from '../lib/service.js';
+import { hotSwapProblem, LOADED_ENV, restartCommand } from '../lib/service.js';
 import {
   certificate,
   certificateLine,
@@ -1969,7 +1969,7 @@ const routerBuildAtStart = routerStamp();
  * `-k` because the job is running: kickstart without it is a no-op against a live
  * label, which is the failure mode of a fix line that looks right and does nothing.
  */
-const RESTART_COMMAND = `launchctl kickstart -k gui/${process.getuid()}/${LABEL}`;
+const RESTART_COMMAND = restartCommand({ uid: process.getuid() });
 
 /**
  * Put the port down and stop the backends, once.

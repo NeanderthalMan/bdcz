@@ -391,7 +391,8 @@ try {
    * than killing the process outright.
    */
   restarting.child.kill('SIGTERM');
-  restarting.child.kill('SIGUSR2');
+  // Whichever signal sorts above SIGTERM on this kernel: SIGUSR2 is 31 on macOS, 12 on Linux.
+  restarting.child.kill(process.platform === 'linux' ? 'SIGWINCH' : 'SIGUSR2');
   const secondExit = await Promise.race([restarting.exited, sleep(30000).then(() => null)]);
 
   check(

@@ -119,7 +119,7 @@ check('a count it could not get is omitted rather than invented', () => {
   assert.ok(!/are `ship` beads/.test(text), 'a failed ship read is reported as a number anyway');
   // And the label bullet still stands on its own — the numbers are an addition to it,
   // not the thing it is made of.
-  assert.match(text, /Five labels never reach my queue/);
+  assert.match(text, /Six labels never reach my queue/);
   // One present and one missing is the realistic failure, and it must not produce a
   // dangling "and".
   const half = brief({}, { heldForEndorsement: 3 });

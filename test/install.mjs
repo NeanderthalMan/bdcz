@@ -44,6 +44,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -90,6 +91,10 @@ case "$*" in
   *onboard.mjs*) exit "\${BEADCAUSE_TEST_ONBOARD_EXIT:-0}" ;;
   *phone-host*)  printf '%s' "\${BEADCAUSE_TEST_PHONE:-noip}"; exit 0 ;;
   *bind-host*)   printf '%s' "\${BEADCAUSE_TEST_HOST:-127.0.0.1}"; exit 0 ;;
+  # The systemd unit is rendered by the real lib/service.js, so this one call is real node.
+  *service-unit.mjs*) exec "$BEADCAUSE_TEST_REAL_NODE" "$@" ;;
+  # So are the Claude Code allow rules (bc-eg9tj): they land in the fake HOME.
+  *claude-permissions.mjs*) exec "$BEADCAUSE_TEST_REAL_NODE" "$@" ;;
 esac
 case "$1" in
   -p) echo "\${BEADCAUSE_TEST_NODE_MAJOR:-22}" ;;
@@ -131,6 +136,33 @@ esac
 exit 0
 `;
 
+/**
+ * `systemctl` and `loginctl`, for the Linux half (bc-obucr.3) run on a Mac.
+ *
+ * BEADCAUSE_TEST_NO_USER_MANAGER — `systemctl --user` cannot reach a user manager, which
+ * is what an `su` shell gets. BEADCAUSE_TEST_ENABLE_FAIL — `enable` refuses the unit.
+ * BEADCAUSE_TEST_LINGER — what `loginctl show-user` reports (default no);
+ * BEADCAUSE_TEST_LINGER_FAIL makes `enable-linger` fail, as it does without polkit.
+ */
+const SYSTEMCTL_SHIM = `#!/bin/bash
+printf '%s\\n' "$*" >> "$BEADCAUSE_TEST_LOGDIR/systemctl.log"
+[ -n "\${BEADCAUSE_TEST_NO_USER_MANAGER:-}" ] && { echo "Failed to connect to bus: No medium found" >&2; exit 1; }
+case "$2" in
+  enable) [ -n "\${BEADCAUSE_TEST_ENABLE_FAIL:-}" ] && { echo "Failed to enable unit: Unit file is masked." >&2; exit 1; } ;;
+  show)   printf 'ExecStart={ path=/usr/bin/node ; argv[]=/usr/bin/node %s ; ignore_errors=no }\\n' "\${BEADCAUSE_TEST_LOADED:-}" ;;
+esac
+exit 0
+`;
+
+const LOGINCTL_SHIM = `#!/bin/bash
+printf '%s\\n' "$*" >> "$BEADCAUSE_TEST_LOGDIR/loginctl.log"
+case "$1" in
+  show-user)     echo "Linger=\${BEADCAUSE_TEST_LINGER:-no}" ;;
+  enable-linger) [ -n "\${BEADCAUSE_TEST_LINGER_FAIL:-}" ] && exit 1 ;;
+esac
+exit 0
+`;
+
 const CURL_SHIM = `#!/bin/bash
 printf '%s\\n' "$*" >> "$BEADCAUSE_TEST_LOGDIR/curl.log"
 [ -n "\${BEADCAUSE_TEST_CURL_FAIL:-}" ] && exit 7
@@ -167,13 +199,62 @@ exit 0
 `;
 
 /**
+ * The apt half (bc-obucr.4), run on a Mac through BEADCAUSE_SERVICE_MANAGER=systemd.
+ * `apt-get` logs its argv and makes what it installs appear beside itself; `apt-cache`
+ * reports BEADCAUSE_TEST_NODE_CANDIDATE as nodejs's candidate; `sudo` accepts -n and runs
+ * the rest, or refuses when BEADCAUSE_TEST_NO_SUDO is set, as a box with no passwordless
+ * sudo does. `id -u` is the real user's, so a Mac run always goes through the sudo shim.
+ */
+const APT_GET_SHIM = `#!/bin/bash
+printf '%s\\n' "$*" >> "$BEADCAUSE_TEST_LOGDIR/apt.log"
+[ -n "\${BEADCAUSE_TEST_APT_FAIL:-}" ] && exit 100
+bin="$(dirname "$0")"
+for p in "$@"; do
+  case "$p" in
+    nodejs) printf '#!/bin/bash\\nexec "$BEADCAUSE_TEST_REAL_NODE" "$@"\\n' > "$bin/node"; chmod +x "$bin/node" ;;
+    gh|jq|tmux|git|curl|expect|npm) printf '#!/bin/bash\\nexit 0\\n' > "$bin/$p"; chmod +x "$bin/$p" ;;
+  esac
+done
+exit 0
+`;
+const APT_CACHE_SHIM = `#!/bin/bash
+printf 'nodejs:\\n  Installed: (none)\\n  Candidate: %s.19.1-1\\n' "\${BEADCAUSE_TEST_NODE_CANDIDATE:-18}"
+`;
+const SUDO_SHIM = `#!/bin/bash
+printf '%s\\n' "$*" >> "$BEADCAUSE_TEST_LOGDIR/sudo.log"
+[ -n "\${BEADCAUSE_TEST_NO_SUDO:-}" ] && exit 1
+[ "$1" = -n ] && shift
+exec "$@"
+`;
+const APT = { 'apt-get': APT_GET_SHIM, 'apt-cache': APT_CACHE_SHIM, sudo: SUDO_SHIM };
+
+/**
  * A run of the installer: its own HOME, its own shim log, nothing shared.
  *
  * `brew: true` puts the brew shim on PATH. `shims` overrides a default shim's body, or
  * removes it with null — which is how a dependency is made missing. `apps` is what the
  * fake Applications folder holds.
  */
-function run(name, { args = [], env = {}, previousPlist = null, brew = false, shims = {}, apps = ['iTerm.app'] } = {}) {
+// A system PATH with no tmux on it. A host with a real /usr/bin/tmux (every Linux CI runner)
+// cannot pose "tmux is not installed" by leaving a shim out, so this is a directory of
+// symlinks to everything in /usr/bin and /bin except tmux. Built once, on first use.
+let TMUXLESS = null;
+function tmuxlessSystem() {
+  if (TMUXLESS) return TMUXLESS;
+  const dir = path.join(tmp, 'system-without-tmux');
+  fs.mkdirSync(dir, { recursive: true });
+  for (const src of ['/usr/bin', '/bin']) {
+    let names = [];
+    try { names = fs.readdirSync(src); } catch { continue; }
+    for (const n of names) {
+      if (n === 'tmux') continue;
+      try { fs.symlinkSync(path.join(src, n), path.join(dir, n)); } catch { /* first one wins */ }
+    }
+  }
+  return (TMUXLESS = dir);
+}
+
+function run(name, { args = [], env = {}, previousPlist = null, previousUnit = null, brew = false, shims = {}, apps = ['iTerm.app'], claudeSettings = null, hideTmux = false } = {}) {
   const dir = path.join(tmp, name);
   const home = path.join(dir, 'home');
   const bin = path.join(dir, 'bin');
@@ -185,6 +266,8 @@ function run(name, { args = [], env = {}, previousPlist = null, brew = false, sh
   const bodies = {
     node: NODE_SHIM,
     launchctl: LAUNCHCTL_SHIM,
+    systemctl: SYSTEMCTL_SHIM,
+    loginctl: LOGINCTL_SHIM,
     curl: CURL_SHIM,
     npm: NOOP_SHIM,
     bd: NOOP_SHIM,
@@ -203,6 +286,17 @@ function run(name, { args = [], env = {}, previousPlist = null, brew = false, sh
 
   const plist = path.join(home, 'Library', 'LaunchAgents', `${LABEL}.plist`);
   if (previousPlist) fs.writeFileSync(plist, previousPlist);
+  const unit = path.join(home, '.config', 'systemd', 'user', 'beadcause.service');
+  if (previousUnit) {
+    fs.mkdirSync(path.dirname(unit), { recursive: true });
+    fs.writeFileSync(unit, previousUnit);
+  }
+
+  const claudeSettingsPath = path.join(home, '.claude', 'settings.json');
+  if (claudeSettings !== null) {
+    fs.mkdirSync(path.dirname(claudeSettingsPath), { recursive: true });
+    fs.writeFileSync(claudeSettingsPath, claudeSettings);
+  }
 
   let status;
   // spawnSync rather than execFileSync, for one reason: `execFileSync` hands back stdout
@@ -220,15 +314,19 @@ function run(name, { args = [], env = {}, previousPlist = null, brew = false, sh
       // the decision under test reads, and this suite runs in both.
       HOME: home,
       TMPDIR: dir,
-      PATH: `${bin}:/usr/bin:/bin`,
+      PATH: hideTmux ? `${bin}:${tmuxlessSystem()}` : `${bin}:/usr/bin:/bin`,
       BEADCAUSE_TEST_LOGDIR: logs,
       BEADCAUSE_TEST_LOADED: path.join(ROOT, 'bin', 'router.js'),
+      BEADCAUSE_TEST_REAL_NODE: process.execPath,
       // Every place the installer would otherwise look on the real Mac: Homebrew off PATH,
       // /Applications, and the absolute Tailscale paths. Without these a run here could
       // find — or install into — the machine it is running on.
       BEADCAUSE_BREW_SEARCH: '',
       BEADCAUSE_APP_DIRS: appsDir,
       BEADCAUSE_TAILSCALE: path.join(bin, 'tailscale'),
+      // The launchd path is the default under test, so pin it: off a Mac the installer
+      // would otherwise pick systemd from `uname`. A case that wants systemd passes it.
+      BEADCAUSE_SERVICE_MANAGER: 'launchd',
       ...env,
     },
   });
@@ -243,7 +341,18 @@ function run(name, { args = [], env = {}, previousPlist = null, brew = false, sh
     rejectedText: fs.existsSync(`${plist}.rejected`) ? fs.readFileSync(`${plist}.rejected`, 'utf8') : null,
     node: read('node.log'),
     launchctl: read('launchctl.log').trim().split('\n').filter(Boolean),
+    systemctl: read('systemctl.log').trim().split('\n').filter(Boolean),
+    loginctl: read('loginctl.log').trim().split('\n').filter(Boolean),
+    unit,
+    unitText: fs.existsSync(unit) ? fs.readFileSync(unit, 'utf8') : null,
+    unitRejectedText: fs.existsSync(`${unit}.rejected`) ? fs.readFileSync(`${unit}.rejected`, 'utf8') : null,
     brew: read('brew.log').trim().split('\n').filter(Boolean),
+    apt: read('apt.log').trim().split('\n').filter(Boolean),
+    sudo: read('sudo.log').trim().split('\n').filter(Boolean),
+    curl: read('curl.log').trim().split('\n').filter(Boolean),
+    home,
+    claudeSettingsPath,
+    claudeSettingsText: fs.existsSync(claudeSettingsPath) ? fs.readFileSync(claudeSettingsPath, 'utf8') : null,
   };
 }
 
@@ -341,6 +450,34 @@ console.log("\nthe team's tracker");
   check('a step that may work next time only warns', r.status === 0, `exit ${r.status}\n${r.out}`);
   check('and says so, with the code', /not set up yet.*exit 2/.test(r.out), r.out);
   check('the daemon is still installed', r.launchctl.some((l) => l.includes(`${LABEL}.plist`)), r.launchctl.join('\n'));
+}
+
+/* ------------------------------------- 1b'. Claude Code allow rules for bd (bc-eg9tj) */
+
+console.log('\nClaude Code allow rules');
+
+{
+  const mine = { statusLine: { type: 'command', command: 'x.sh' }, permissions: { allow: ['Bash(ls)'] } };
+  const r = run('claude-perms', { args: ['-n'], claudeSettings: JSON.stringify(mine) });
+  const merged = r.claudeSettingsText ? JSON.parse(r.claudeSettingsText) : {};
+  check('the install finishes', r.status === 0, `exit ${r.status}\n${r.out}`);
+  check(
+    'bd create and bd comments add are allowed in ~/.claude/settings.json',
+    ['Bash(bd create:*)', 'Bash(bd comments add:*)'].every((x) => merged.permissions?.allow?.includes(x)),
+    r.claudeSettingsText ?? '(no file)'
+  );
+  check(
+    'and what was there already is kept',
+    merged.statusLine?.command === 'x.sh' && merged.permissions?.allow?.[0] === 'Bash(ls)',
+    r.claudeSettingsText ?? '(no file)'
+  );
+}
+
+{
+  const r = run('claude-perms-broken', { args: ['-n'], claudeSettings: '{ broken' });
+  check('a broken settings.json only warns', r.status === 0, `exit ${r.status}\n${r.out}`);
+  check('and says so', /allow rules for bd were not all written/.test(r.out), r.out);
+  check('and is left as it was', r.claudeSettingsText === '{ broken', r.claudeSettingsText ?? '(gone)');
 }
 
 /* ------------------------------------------------- 1c. installing what is missing */
@@ -500,6 +637,141 @@ console.log('\nloading the service');
   check('says there is nothing to fall back to', /nothing to fall back to/.test(r.out), r.out);
   check('does not claim a recovery it did not do', !/back in place and loaded again/.test(r.out), r.out);
   check('and still keeps the rejected plist', r.rejectedText !== null);
+}
+
+/* ------------------------------------------- 3. Linux: the systemd user unit */
+
+console.log('\nthe systemd user unit');
+
+const SYSTEMD = { BEADCAUSE_SERVICE_MANAGER: 'systemd' };
+
+{
+  const r = run('sd-load', { args: ['-n'], env: SYSTEMD });
+  const idx = (pred) => r.systemctl.findIndex(pred);
+  const probe = idx((l) => l === '--user show-environment');
+  const reload = idx((l) => l === '--user daemon-reload');
+  const enable = idx((l) => l === '--user enable beadcause.service');
+  const restart = idx((l) => l === '--user restart beadcause.service');
+  check('it installs and exits 0', r.status === 0, `exit ${r.status}\n${r.out}`);
+  check('it asks for the user manager before anything else', probe === 0, r.systemctl.join('\n'));
+  check('then reloads, enables and restarts, in that order', reload > probe && enable > reload && restart > enable, r.systemctl.join('\n'));
+  check('the unit names bin/router.js in this checkout', r.unitText?.includes(`${ROOT}/bin/router.js`), String(r.unitText).slice(0, 300));
+  check('and logs under ~/.local/state, not ~/Library', /StandardOutput=append:.*\/\.local\/state\/beadcause\/beadcause\.log/.test(r.unitText || ''), r.unitText);
+  check('lingering is turned on, so it survives a reboot', r.loginctl.some((l) => l.startsWith('enable-linger')), r.loginctl.join('\n'));
+  check('launchctl is never run', r.launchctl.length === 0, r.launchctl.join('\n'));
+  check('no plist is written', r.plistText === null);
+  check('what systemd loaded is read back from systemd', /systemd is running bin\/router\.js/.test(r.out), r.out);
+  check('the restart hint is systemctl', /systemctl --user restart beadcause\.service/.test(r.out), r.out);
+}
+
+{
+  const r = run('sd-linger-on', { args: ['-n'], env: { ...SYSTEMD, BEADCAUSE_TEST_LINGER: 'yes' } });
+  check('lingering already on is left alone', !r.loginctl.some((l) => l.startsWith('enable-linger')) && /already on/.test(r.out), r.out);
+}
+
+{
+  const r = run('sd-linger-fail', { args: ['-n'], env: { ...SYSTEMD, BEADCAUSE_TEST_LINGER_FAIL: '1' } });
+  check('lingering refused only warns', r.status === 0, `exit ${r.status}\n${r.out}`);
+  check('and names the one root command', /sudo loginctl enable-linger/.test(r.out), r.out);
+}
+
+{
+  const r = run('sd-nomanager', { args: ['-n'], env: { ...SYSTEMD, BEADCAUSE_TEST_NO_USER_MANAGER: '1' }, previousUnit: '[Service]\nExecStart=/old\n' });
+  check('no user manager is a failure', r.status === 1, `exit ${r.status}\n${r.out}`);
+  check('and nothing was stopped, enabled or rewritten', r.systemctl.length === 1 && r.unitText === '[Service]\nExecStart=/old\n', `${r.systemctl.join('\n')}\n${r.unitText}`);
+  check('it says a direct login is what is needed', /ssh works, su does not/.test(r.out), r.out);
+}
+
+{
+  const old = '[Service]\nExecStart=/usr/bin/node /old/bin/router.js\n';
+  const r = run('sd-rejected', { args: ['-n'], env: { ...SYSTEMD, BEADCAUSE_TEST_ENABLE_FAIL: '1' }, previousUnit: old });
+  check('a refused unit is a failure', r.status === 1, `exit ${r.status}\n${r.out}`);
+  check('the previous unit is back on disk', r.unitText === old, String(r.unitText));
+  check('the rejected one is kept for comparison', r.unitRejectedText?.includes(`${ROOT}/bin/router.js`), String(r.unitRejectedText).slice(0, 200));
+  check('and it is never restarted', !r.systemctl.includes('--user restart beadcause.service'), r.systemctl.join('\n'));
+}
+
+{
+  const r = run('sd-monitor', { args: ['-n'], env: { ...SYSTEMD, BEADCAUSE_TEST_MONITOR: '1' } });
+  check('the console-at-login agent is macOS-only, and says so', /macOS-only/.test(r.out) && r.launchctl.length === 0, r.out);
+}
+
+/* ------------------------------------------------- Linux without Homebrew (bc-obucr.4) */
+
+console.log('apt');
+
+// The four cases below that pose "tmux is not installed" pass hideTmux, so a host tmux
+// (every Linux CI runner) is off their PATH instead of making them skip.
+
+{
+  const r = run('apt-fresh', { args: ['-n'], env: { ...SYSTEMD, BEADCAUSE_TEST_NODE_CANDIDATE: '22' }, shims: { ...APT, gh: null }, hideTmux: true });
+  check('apt installs what is missing', r.apt.includes('install -y gh'), r.apt.join('\n'));
+  check('tmux is required in place of iTerm2', r.apt.includes('install -y tmux') && !/iTerm/.test(r.out) && r.brew.length === 0, `${r.apt.join('\n')}\n${r.out}`);
+  check('through sudo -n, not a prompt', r.sudo.some((l) => l.startsWith('-n ')), r.sudo.join('\n'));
+  check('and the run finishes', r.status === 0, `exit ${r.status}\n${r.out}`);
+}
+
+{
+  const r = run('apt-present', { args: ['-n'], env: SYSTEMD, shims: { ...APT, gh: NOOP_SHIM, jq: NOOP_SHIM, tmux: NOOP_SHIM, git: NOOP_SHIM, curl: CURL_SHIM, expect: NOOP_SHIM } });
+  check('nothing already there is installed', r.apt.length === 0, r.apt.join('\n'));
+}
+
+{
+  const r = run('apt-nosudo', { args: ['-n'], env: { ...SYSTEMD, BEADCAUSE_TEST_NO_SUDO: '1' }, shims: { ...APT, tmux: null }, hideTmux: true });
+  check('without passwordless sudo it warns and goes on', r.status === 0 && r.apt.length === 0, `exit ${r.status}\n${r.out}`);
+  check('and names the command to run', /sudo apt-get install -y tmux/.test(r.out), r.out);
+}
+
+{
+  const r = run('apt-fails', { args: ['-n'], env: { ...SYSTEMD, BEADCAUSE_TEST_APT_FAIL: '1' }, shims: { ...APT, tmux: null }, hideTmux: true });
+  check('a failed apt-get is a warning, never fatal', r.status === 0 && /apt-get install -y tmux failed/.test(r.out), `exit ${r.status}\n${r.out}`);
+}
+
+{
+  const r = run('apt-off', { args: ['-n', '--no-deps'], env: SYSTEMD, shims: { ...APT, tmux: null, gh: null }, hideTmux: true });
+  check('--no-deps never runs apt', r.apt.length === 0 && r.sudo.length === 0, r.apt.join('\n'));
+  check('but still names what is missing', /tmux not found/.test(r.out), r.out);
+}
+
+{
+  const r = run('apt-node-old', { args: ['-n'], env: { ...SYSTEMD, BEADCAUSE_TEST_NODE_CANDIDATE: '18' }, shims: { ...APT, node: null } });
+  check('a node apt cannot supply at 20+ is fatal', r.status === 1 && !r.apt.includes('install -y nodejs npm'), `exit ${r.status}\n${r.apt.join('\n')}`);
+  check('and it names NodeSource', /NodeSource/.test(r.out), r.out);
+}
+
+{
+  const r = run('apt-node-new', { args: ['-n'], env: { ...SYSTEMD, BEADCAUSE_TEST_NODE_CANDIDATE: '22' }, shims: { ...APT, node: null } });
+  check('a node apt can supply at 20+ is installed', r.apt.includes('install -y nodejs npm'), r.apt.join('\n'));
+}
+
+{
+  // bd comes from the release tarball: fixtures stand in for GitHub.
+  const fx = path.join(tmp, 'bd-fixtures');
+  fs.mkdirSync(fx, { recursive: true });
+  fs.writeFileSync(path.join(fx, 'bd'), '#!/bin/bash\necho "bd version 9.9.9"\n');
+  fs.chmodSync(path.join(fx, 'bd'), 0o755);
+  const arch = process.arch === 'arm64' ? 'arm64' : 'amd64';
+  const asset = `beads_9.9.9_linux_${arch}.tar.gz`;
+  spawnSync('tar', ['-czf', path.join(fx, asset), '-C', fx, 'bd']);
+  const sum = createHash('sha256').update(fs.readFileSync(path.join(fx, asset))).digest('hex');
+  fs.writeFileSync(path.join(fx, 'checksums.txt'), `${sum}  ${asset}\n`);
+  const curl = `#!/bin/bash
+printf '%s\\n' "$*" >> "$BEADCAUSE_TEST_LOGDIR/curl.log"
+out=""; prev=""
+for a in "$@"; do [ "$prev" = -o ] && out="$a"; prev="$a"; url="$a"; done
+if [ -n "$out" ]; then cp "$BEADCAUSE_TEST_FIXTURES/$(basename "$url")" "$out" 2>/dev/null || exit 22; exit 0; fi
+case "$url" in *releases/latest) echo '{"tag_name": "v9.9.9"}' ;; *) echo '{"ok":true,"workspaces":["beadcause"]}' ;; esac
+`;
+  const uname = '#!/bin/bash\n[ "$1" = -m ] && echo "$BEADCAUSE_TEST_ARCH" || exec /usr/bin/uname "$@"\n';
+  const env = { ...SYSTEMD, BEADCAUSE_TEST_FIXTURES: fx, BEADCAUSE_TEST_ARCH: arch === 'arm64' ? 'aarch64' : 'x86_64' };
+  const r = run('apt-bd', { args: ['-n'], env, shims: { ...APT, bd: null, curl, uname } });
+  check('bd is downloaded from the release, not through a piped script', r.curl.some((l) => l.includes(`/v9.9.9/${asset}`)), r.curl.join('\n'));
+  check('and installed under ~/.local/bin', fs.existsSync(path.join(r.home, '.local', 'bin', 'bd')), r.out);
+  check('the run finishes with it', r.status === 0, `exit ${r.status}\n${r.out}`);
+
+  fs.writeFileSync(path.join(fx, 'checksums.txt'), `${'0'.repeat(64)}  ${asset}\n`);
+  const bad = run('apt-bd-badsum', { args: ['-n'], env, shims: { ...APT, bd: null, curl, uname } });
+  check('a checksum that does not match installs nothing', bad.status === 1 && !fs.existsSync(path.join(bad.home, '.local', 'bin', 'bd')) && /checksum/.test(bad.out), `exit ${bad.status}\n${bad.out}`);
 }
 
 console.log(failures ? `\n${failures} failed` : '\nall good');

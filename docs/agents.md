@@ -1795,9 +1795,11 @@ and an agent is spawned only at its two ends.
     node scripts/flowchart.mjs            # write docs/flowchart.html and say where
     node scripts/flowchart.mjs --list     # the flows, the agents and the counts, in the terminal
     node scripts/flowchart.mjs --check    # is the map still true of the tree?
+    node scripts/flowchart.mjs --workspace <ws> --out <file>   # the built flows, for one workspace
     open /flow                            # the same map on the phone, live
 
-Eleven flows, a hundred and twenty-odd steps, and every step is one of six kinds:
+Eleven hand-written flows, two [built ones](#two-flows-nobody-writes--a-beads-life-and-a-workspaces-own),
+a hundred and sixty-odd steps, and every step is one of six kinds:
 
 | | | |
 |---|---|---|
@@ -1845,6 +1847,49 @@ regenerate-and-resolve on every branch that touched lib/foundation.js for its ow
 reasons — and a checked-in copy has no way to say it has gone stale. `docs/architecture.html`
 is the cautionary case: it is hand-written, it is good, and it still describes four agent
 kinds.
+
+### Two flows nobody writes — a bead's life, and a workspace's own
+
+Every flow above answers one question in depth. What none of them answers is the question
+you have when deciding what to switch on: **across the whole life of a bead, where am I
+asked?** And the honest answer to that differs per workspace. Turn on `autoShip` and the
+Ship tap is gone; declare an approval pipeline and a gate appears that only a person may
+close. A hand-drawn answer is right for one workspace on one day.
+
+So two flows are *built* on every render rather than written down (bc-c0c3u), from the same
+functions the daemon asks when it decides:
+
+| what is drawn | asked of |
+|---|---|
+| endorse — a tap, or code | `workspaceAnswer(cfg, ws, 'autoEndorse')` |
+| every delivery to a card, or only held ones | `workspaceAnswer(…, 'autoMerge')` |
+| the reviewer's verdict, or nothing | `workspaceAnswer(…, 'reviewRequired')` |
+| Ship it and promotion — taps, or unattended | `workspaceAnswer(…, 'autoShip')` |
+| the ready filter's markers, the queue's attempts | `UNENDORSED`, `SHIP_LABEL`, `CONTAINER`, `HUMAN_LABEL`, `MAX_ATTEMPTS` |
+| a gate only a person closes, with its labels | `approvalPipeline(cfg, ws)` |
+| each department's chain, and the packet's labels | `chainIn` over the checkout's `.beadcause/relays.yaml`, `packetFor` |
+
+**A bead's life** (`lifecycleFlow`) runs filing → endorse → the ready filter → dispatch →
+the worker and its gate → delivery → the merge queue → ship → promotion, with every
+question, card and hand-back on it, and its summary counts the places a person is asked.
+**The workspace's own flow** (`relayFlows`) is one flow per relay it declares, each
+department drawn as the chain a bead assigned to its lead would run — so a checker added
+to a department appears in the drawing with no edit here, and an agent is never drawn
+checking its own draft because `chainIn` never makes it.
+
+**Nothing in lib/flowchart.js names a workspace**, and the suite fails if one does.
+`docs/flowchart.html` draws the shipped defaults and a made-up studio, `atelier`
+(`EXAMPLE_CONFIG`), fed through the same `chainIn` a launch uses. `/flow` draws the
+workspace you are in, from this Mac's config and that checkout. A workspace that wants the
+picture in its own docs renders it from here:
+
+    node scripts/flowchart.mjs --workspace <ws> --out <its checkout>/docs/flow.html
+
+and gitignores the file, for the reason the next paragraph gives.
+
+`problems` checks the built flows in more than their default shape: the lifecycle with
+every switch flipped and a pipeline declared, and the example relay. A node that only
+exists when a switch is on would otherwise only fail on the Mac where it is.
 
 ### What stops it going stale, and what does not
 

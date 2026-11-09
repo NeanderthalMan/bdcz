@@ -271,6 +271,16 @@ try {
     assert.equal(out.kept[0].verdict.gate, 'pass');
   });
 
+  await check('trying it again re-records the main it was tried against, and is no longer behind (bc-sj8k.3)', async () => {
+    const [before] = await listCandidates(checkout);
+    assert.equal(before.behind, true);
+    const again = await prepareCandidate(checkout, { number: 7, key: 'beadcause', view });
+    assert.equal(again.reused, true, 'the same tree — main is not in it, so nothing to rebuild');
+    assert.notEqual(before.baseSha, again.candidate.baseSha);
+    assert.equal(again.candidate.baseSha, g(checkout, 'rev-parse', 'origin/main'));
+    assert.ok(!again.candidate.behind, 'Approve compares against this, so the flag goes with it');
+  });
+
   await check('an outage is not a merge — the candidate is kept untouched', async () => {
     github.down = true;
     const out = await sweepCandidates(checkout, { view });

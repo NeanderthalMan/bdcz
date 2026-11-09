@@ -396,9 +396,15 @@ await check('index.html loads it, after the panel and before app.js', () => {
   assert.ok(mine < html.indexOf('<script src="/app.js">'), 'app.js runs before the file it mounts');
 });
 
-await check('app.js hands it the scope, and the panel no longer gets it', () => {
+await check('the scope is on neither the row nor the panel, and Inbox is always human', () => {
+  // bc-qzng7.2: Inbox is "waiting on you" by definition, so the Human / Both / Agent
+  // switch is gone from the chrome rather than moved. The Beads pill still widens the
+  // sweep for its own load; nothing else sets the scope.
   const app = read('public/app.js');
-  assert.match(app, /filterPills\?\.mount\?\.\(filtersEl, \{ groups: \[scopeGroup\] \}\)/, 'the scope is not on the row');
+  assert.doesNotMatch(app, /filterPills\?\.mount\?\.\(filtersEl, \{ groups: \[scopeGroup\] \}\)/, 'the scope switch is back on the row');
+  const boot = app.slice(app.indexOf('function bootScope()'), app.indexOf('function narrowBack()'));
+  assert.match(boot, /state\.scope = 'human';/, 'Inbox boots on a scope it did not choose');
+  assert.doesNotMatch(boot, /localStorage\.getItem\('beadcause\.scope'\)/, 'a stored scope can still open Inbox on agent rows');
   assert.doesNotMatch(app, /groups: \[scopeGroup, beadGroup\]/, 'the scope is still a group inside the panel');
   // The panel's own groups are the *page's* — the bead box, and since bc-iaju1.5 the
   // Questions order switch beside it. What this pins is that the scope is not among

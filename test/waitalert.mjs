@@ -121,5 +121,20 @@ await check('the advocate rings before the park switch, injectably', () => {
   assert.ok(at > 0 && sw > at, 'turning parking off must not silence the ring');
 });
 
+await check('off macOS the desktop notification is a quiet false, not an osascript spawn', async () => {
+  const { notifyMac } = await import(LIB('waitalert.js'));
+  assert.equal(await notifyMac({ title: 't', message: 'm' }, { platform: 'linux' }), false);
+  const src = read('lib', 'waitalert.js');
+  assert.match(src, /platform !== 'darwin'\) \{\s*\/\/ One stated reason/, 'ringMac states one reason and stops');
+  // Two literal execFile calls, not a ternary for the command: lib/suppliers.js only sees a
+  // literal first argument, and the ternary hid both names from it (bc-tdes6).
+  assert.match(
+    read('lib', 'top.js'),
+    /platform === 'darwin'\) execFile\('open',[^\n]*\n\s*else execFile\('xdg-open',/,
+    'the browser door has a Linux name'
+  );
+  assert.match(read('bin', 'open-handoff'), /uname -s\)" != Darwin/, 'open-handoff does not reach osascript off a Mac');
+});
+
 console.log(failures ? `\n\x1b[31m${failures} of ${ran} failed\x1b[0m` : `\n\x1b[32m${ran} passed\x1b[0m`);
 process.exit(failures ? 1 : 0);

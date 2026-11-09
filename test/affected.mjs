@@ -856,9 +856,17 @@ check('public/spacebar.js: exactly the suites that read its source text, matchin
   // importing it and builds its paths in segments rather than as a literal. bc-khoe.40's
   // own acceptance case was missing its most obvious suite for as long as this list said
   // four. That is the whole argument for matching on the naming convention.
+  //
+  // Three more readers since the bc-qzng7 redesign moved Settings behind the picker
+  // (bc-qzng7.1): test/settingsscreen.mjs and test/spacedetails.mjs read the picker's
+  // source to assert its ⚙ Settings row is the door to the Settings screen, and
+  // test/hashgrammar.mjs reads it as the one door to `config`, the only view with no pill.
   const { results } = affected.findAffected(affected.REPO_ROOT, [rel('public', 'spacebar.js')]);
   const by = (reason) => results[0].matches.filter((m) => m.reasons.includes(reason)).map((m) => m.suite);
-  assert.deepEqual(by('reads its source text'), ['test/addspace.mjs', 'test/editfreeze.mjs', 'test/spacepaths.mjs', 'test/sweepfail.mjs']);
+  assert.deepEqual(by('reads its source text'), [
+    'test/addspace.mjs', 'test/editfreeze.mjs', 'test/hashgrammar.mjs', 'test/settingsscreen.mjs',
+    'test/spacedetails.mjs', 'test/spacepaths.mjs', 'test/sweepfail.mjs',
+  ]);
   assert.deepEqual(by('shares its name'), [rel('test', 'spacebar.mjs')]);
   // Everything else on the list walks public/ — the convention checks, which cover this
   // file the way they cover every other entry in that directory and name none of them.

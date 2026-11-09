@@ -74,7 +74,13 @@ check(
 // was a fifth destination rather than a door. Losing a witness weakens the guard, so
 // the refresh button stands in for it: it is the last control in the row, which is
 // exactly the position a deletion that took the row with it would empty first.
-check('foundations is still in the header', index.includes('href="/foundations"'));
+// Foundations left the header with bc-qzng7.1 — it is a row on Settings → This machine
+// now — so the witness for it is that row, and the refresh button below is the header's.
+check(
+  'foundations is reachable from Settings, not the header',
+  !index.includes('href="/foundations"') &&
+    fs.readFileSync(path.join(ROOT, 'public/config.js'), 'utf8').includes("row('/foundations'")
+);
 check('the refresh button is still in the header', index.includes('id="refresh"'));
 
 // And the icon really is gone, rather than merely moved — this is the assertion the two

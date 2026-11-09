@@ -1,0 +1,90 @@
+#!/usr/bin/env node
+/**
+ * `b7e-linux` — run these suites on Linux, here, in one call (bc-dgx7.203).
+ *
+ *     b7e-linux test/install.mjs test/handoffdoor.mjs     a verdict per suite
+ *     b7e-linux --all                                     every test/*.mjs bar browse
+ *     b7e-linux --dir <checkout>                          a checkout other than the cwd
+ *     b7e-linux --keep ...                                leave the container up (prints its name)
+ *     b7e-linux --image node:22-bookworm                  override the image
+ *     b7e-linux --tail 40 --timeout 600                   failure tail lines / seconds per suite
+ *
+ * One line per suite — `pass`, `fail` or `skipped` (with the suite's own `skipped:` reason)
+ * — then the tail of each failing suite's output with ANSI stripped, then a last line naming
+ * the image, jq version and package set. Four sessions built this by hand, each differently
+ * (see docs/b7e/b7e-linux.md); `lib/linux.js` is the one recipe.
+ *
+ * Exit codes: `0` every suite green (skips count as green), `1` at least one red, `2`
+ * refused — no docker runtime or the daemon is down, said in those words, followed by what
+ * the latest hosted `test-linux` run says (including "refused, 0 steps"). `64` bad usage.
+ *
+ * b7e-linux is deliberately NOT on DEFAULT_TOOL_LIST: it starts a container, installs
+ * packages from the network and runs arbitrary suite code for minutes, which is not a read
+ * and not something dispatch should do on a worker's behalf unprompted.
+ *
+ * @grant excluded
+ */
+import fs from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import {
+  parseArgs, dockerState, setupScript, prepareScript, runArgs, execArgs, verdict,
+  allSuites, hostedState, PACKAGES, stripAnsi,
+} from '../lib/linux.js';
+
+const docker = process.env.B7E_LINUX_DOCKER || 'docker';
+const run = (cmd, args, opts = {}) => spawnSync(cmd, args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, ...opts });
+
+const o = parseArgs(process.argv.slice(2));
+if (o.error || o.help) {
+  const out = o.error ? console.error : console.log;
+  if (o.error) out(`b7e-linux: ${o.error}`);
+  out('usage: b7e-linux <test/x.mjs ...> | --all  [--dir D] [--keep] [--image I] [--tail N] [--timeout S]');
+  process.exit(o.error ? 64 : 0);
+}
+
+const state = dockerState(run, docker);
+if (!state.ok) {
+  console.error(`b7e-linux: refused — ${state.reason}`);
+  console.error(`b7e-linux: ${hostedState(run)}`);
+  process.exit(2);
+}
+
+let suites = o.suites;
+if (o.all) {
+  suites = allSuites(fs.readdirSync(`${o.dir}/test`).map((f) => `test/${f}`));
+}
+for (const s of suites) {
+  if (!fs.existsSync(`${o.dir}/${s}`)) {
+    console.error(`b7e-linux: no such suite in ${o.dir}: ${s}`);
+    process.exit(64);
+  }
+}
+
+const name = `b7e-linux-${process.pid}`;
+const must = (what, r) => {
+  if (r.status !== 0) {
+    console.error(`b7e-linux: ${what} failed (exit ${r.status})\n${stripAnsi(r.stderr || r.stdout).split('\n').slice(-15).join('\n')}`);
+    run(docker, ['rm', '-f', name]);
+    process.exit(2);
+  }
+};
+must('docker run', run(docker, runArgs(name, o.image, o.dir)));
+must('container setup', run(docker, ['exec', '-u', 'root', name, 'sh', '-c', setupScript()], { timeout: 600000 }));
+must('npm ci in the container', run(docker, ['exec', '-u', 'node', '-w', '/work', '-e', 'HOME=/home/node', name, 'sh', '-c', prepareScript()], { timeout: 900000 }));
+
+const results = [];
+for (const s of suites) {
+  const v = verdict(s, run(docker, execArgs(name, s), { timeout: o.timeout * 1000 }), o.tail);
+  results.push(v);
+  console.log(`${v.status.padEnd(7)} ${s}${v.detail ? `  (${v.detail})` : ''}`);
+}
+for (const v of results.filter((r) => r.status === 'fail')) {
+  console.log(`\n── ${v.suite} ──\n${v.tail}`);
+}
+
+const jq = stripAnsi(run(docker, ['exec', name, 'jq', '--version']).stdout).trim() || 'jq unknown';
+console.log(`\nimage ${o.image} · ${jq} · packages ${PACKAGES.join(' ')} · non-root user node`);
+if (o.keep) console.log(`container kept: ${name} (docker exec -u node -w /work ${name} node test/x.mjs; docker rm -f ${name})`);
+else run(docker, ['rm', '-f', name]);
+
+process.exit(results.some((r) => r.status === 'fail') ? 1 : 0);

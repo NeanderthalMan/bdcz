@@ -106,7 +106,7 @@ const base = (pid, extra) => ({
   pid,
   sessionId: 'aaaabbbb-cccc-dddd-eeee-ffff00001111',
   name: `Demo - sc-1 session ${pid}`,
-  cwd: '/Users/demo/projects/demo/.claude/worktrees/a-thing-4e7',
+  cwd: '/srv/demo/projects/demo/.claude/worktrees/a-thing-4e7',
   where: 'a-thing-4e7',
   workspace: 'demo',
   kind: 'claude',

@@ -6,6 +6,9 @@
  *   node scripts/flowchart.mjs --open          …and open it
  *   node scripts/flowchart.mjs --inline        embed mermaid, so the file travels alone
  *   node scripts/flowchart.mjs --out <path>    somewhere else
+ *   node scripts/flowchart.mjs --workspace <ws> --out <path>
+ *                                              the built flows drawn for one workspace,
+ *                                              from this Mac's config and its .beadcause/
  *   node scripts/flowchart.mjs --json          the model, for anything else to read
  *   node scripts/flowchart.mjs --mermaid [id]  one flow's diagram source, or all of them
  *   node scripts/flowchart.mjs --list          the flows, the agents, the counts
@@ -45,10 +48,32 @@ const value = (flag, fallback = null) => {
   return i === -1 || i === argv.length - 1 ? fallback : argv[i + 1];
 };
 
+/**
+ * `--workspace <name>`: the workspace whose settings and `.beadcause/` the built flows are
+ * drawn from. Imported lazily, because the plain render must not need a config at all.
+ */
+const target = await (async () => {
+  const name = value('--workspace');
+  if (!name) return null;
+  const { loadConfig } = await import('../lib/config.js');
+  const { resolveSessionDir } = await import('../lib/session.js');
+  const cfg = loadConfig();
+  const ws = (cfg.workspaces || []).find((w) => w.name === name);
+  if (!ws) {
+    console.error(`no workspace called ${name}. One of: ${(cfg.workspaces || []).map((w) => w.name).join(', ')}`);
+    process.exit(1);
+  }
+  return { name, cfg, dir: resolveSessionDir(cfg, ws) };
+})();
+
 /** The model, plus the mermaid source per flow so no reader has to re-derive it. */
 function model() {
-  const m = flowchart();
-  for (const flow of m.flows) flow.mermaid = mermaidFor(flow.id);
+  // Without --workspace this is the document about the repo: the built flows at the
+  // shipped defaults and the made-up studio. With it, they are drawn from this Mac's
+  // config and that workspace's checkout — a page about one workspace, for its own docs.
+  const m = target ? flowchart({ cfg: target.cfg, workspace: target.name, dir: target.dir }) : flowchart({ example: true });
+  for (const flow of m.flows) flow.mermaid = mermaidFor(flow);
+  if (target) m.workspace = target.name;
   m.effective = false; // the baselines: see lib/flowchart.js's `agents`
   m.generatedFrom = 'lib/flowchart.js';
   return m;

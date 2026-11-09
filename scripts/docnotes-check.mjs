@@ -46,7 +46,7 @@ if (!fs.existsSync(path.join(PUBLIC, 'vendor', 'purify.js'))) {
 
 /* ---------------------------------------------------------------- fixtures */
 
-const FILE = '/Users/a/loremia/drafts/CHAPTER_25.md';
+const FILE = '/srv/a/loremia/drafts/CHAPTER_25.md';
 const SOURCE = [
   '# Chapter 25',
   '',

@@ -2,13 +2,24 @@
 
 ## Install
 
-macOS only — it runs as a launchd agent and drives iTerm2.
+It runs on **macOS** (a launchd agent that drives iTerm2) and on **Ubuntu/Debian Linux**
+(a systemd user unit that drives tmux — see [On Linux](#on-linux--a-server-with-tmux-for-a-terminal)).
+The rest of this section is written for the Mac; the Linux differences are collected in
+that one place.
 
 **You need:** [Homebrew](https://brew.sh). The installer uses it to install whatever else
 is missing — Node 20+, the [`bd`](https://github.com/steveyegge/beads) CLI (upgraded if
 older than **1.2.1**), `gh`, `jq`, iTerm2 and Claude Code; `--no-deps` makes it only
 check. Sign `claude` in once in a terminal. Workspaces are read from `~/beads/<name>/.beads`
 or wherever [`workspaceRoots`](config.md#where-trackers-live--workspaceroots-and-the-two-shapes-a-root-can-have) points.
+
+**On Ubuntu/Debian** there is no Homebrew step: the installer uses `apt-get` (through
+`sudo -n`, so with no passwordless sudo it prints the command instead of prompting) for `gh`,
+`jq`, `tmux`, `git`, `curl` and `expect`; downloads `bd` from its GitHub release (checksum
+verified) into `~/.local/bin`; and installs Claude Code with npm into `~/.local`. tmux
+replaces iTerm2. Node comes from apt only if apt's is 20+ — Ubuntu 24.04's is 18, so use
+[NodeSource](https://github.com/nodesource/distributions) or nvm first. Tailscale is
+named, not installed.
 
 **Phone support is off by default** — beadcause answers on `http://127.0.0.1:4318`, on this
 Mac only. Turn it on later with `npm run install-service -- --phone`: that installs
@@ -27,6 +38,17 @@ generates a launchd plist for *your* home directory and node binary, starts the 
 waits for it to answer, and — with `--phone` — prints the pairing QR. It's re-runnable — run it again after
 pulling. Joining a tracker somebody else already has needs one file and no questions at
 all: [installing against a team's tracker](#installing-against-a-teams-tracker).
+
+**Simple or customized.** Every setting has a default, so setup opens by showing all of
+them and offering two ways through: **1 — simple installation**, which saves those
+defaults as they are, or **2 — customized installation**, which walks through each
+question below. The defaults shown are the conservative choice on a first install and
+what is already configured on a re-run, so choosing simple again never undoes an earlier
+answer. Skip the choice with `npm run install-service -- --simple` (or
+`npm run configure -- --simple`, which needs no terminal), or go straight to the
+questions with `npm run configure -- --custom`. A machine where no tracker is found goes
+straight to the first question, because where your workspaces live is the one thing a
+default cannot know there.
 
 The questions, all with a safe default on Enter: **where your workspaces live** (the
 directories discovery reads, `~/beads` unless you say otherwise), **what the agents should call you**
@@ -92,6 +114,106 @@ machine, because `node` alone moves between `/opt/homebrew/bin`, `/usr/local/bin
 and any number of nvm paths. Kill any hand-started instance before installing — a
 second one can't bind the port, and it exits 1 rather than lingering, because
 otherwise its poller would keep firing notifications with no listener behind them.
+
+### On Linux — a server with tmux for a terminal
+
+Written for Ubuntu 24.04; any Debian-family distribution with systemd and `apt-get` is the
+same. The installer is the same command, and it picks the Linux half by itself
+(`uname -s`); `BEADCAUSE_SERVICE_MANAGER=systemd` forces it, which is how the suite runs it on a Mac.
+
+**Before you start.** Node 20+ is the one thing apt cannot give you on 24.04 (its `nodejs`
+is 18): install it from [NodeSource](https://github.com/nodesource/distributions) or nvm
+first, or the installer stops with *node not found*. Log in over **ssh** (or at the console)
+as the user that will own the service — `su` and a bare cron job have no systemd user
+manager, and the installer checks for one before it changes anything and says so if
+there isn't one. Passwordless `sudo` lets the installer run `apt-get` itself; without it
+the installer prints the `sudo apt-get install -y …` line for each package instead of
+prompting. Sign `claude` in once in a terminal, as on a Mac.
+
+```bash
+git clone <this repo> beadcause && cd beadcause
+npm run install-service
+```
+
+What that does differently from the Mac:
+
+- **Packages.** `gh`, `jq`, `tmux`, `git`, `curl` and `expect` from apt; `bd` from its GitHub
+  release into `~/.local/bin` (checksum verified); Claude Code with npm into `~/.local`.
+  Make sure `~/.local/bin` is on your `PATH`. `--no-deps` only checks.
+- **The service is a systemd user unit**, `~/.config/systemd/user/beadcause.service`,
+  generated for your home directory and node binary (never committed, for the reason the
+  plist isn't). It runs `bin/router.js`, so [editing `lib/` still needs no restart](operations.md#the-router--why-you-never-restart-it).
+  It is enabled and restarted for you, and the log is `~/.local/state/beadcause/beadcause.log`
+  (or under `$XDG_STATE_HOME`) rather than `~/Library/Logs`.
+- **Lingering, so it survives a reboot with nobody logged in.** The installer runs
+  `loginctl enable-linger` for you. If polkit refuses, it prints
+  `sudo loginctl enable-linger <you>` — run that once, because without it the service stops
+  when your last ssh session closes. `uninstall-service` leaves lingering as it found it.
+- **No "console at login" window.** That is a macOS LaunchAgent; open
+  `http://127.0.0.1:4318/monitor` yourself.
+
+```bash
+systemctl --user status beadcause.service     # is it up?
+systemctl --user restart beadcause.service    # only for bin/router.js itself
+tail -f ~/.local/state/beadcause/beadcause.log
+npm run uninstall-service                     # disables and removes the unit; keeps config
+```
+
+**tmux replaces iTerm2, and nothing needs configuring for it.** With no `terminalBackend`
+set, Linux selects `tmux` and a Mac selects `iterm`; set `terminalBackend` to `"tmux"` or
+`"iterm"` in `~/.config/beadcause/config.json` to override (any other value is refused
+with the list of backends). The shape:
+
+- **One tmux session per workspace**, named `bc-<workspace>` (anything outside
+  `A-Za-z0-9_-` becomes `_`, since tmux reserves `.` and `:`), and **one tmux window per
+  agent**, titled with its bead id — that title is how the reaper knows a window is still
+  working a bead, so it is pinned against renaming.
+- **It uses the default tmux server**, so `tmux attach` on the box shows the agents, and a
+  `claude` you started in your own tmux is visible to beadcause. To give beadcause a server
+  of its own, set `tmuxSocket` in config.json (or `BEADCAUSE_TMUX_SOCKET` in the environment,
+  which wins): a bare name is `tmux -L <name>`, a value containing `/` is `tmux -S <path>`.
+  Then add the same `-L` / `-S` to the commands below.
+- **There is no focus, layout or empty-window sweep** — no screen to raise a window on, and
+  a tmux window ends with its last pane. Windows whose command exits at once close with
+  nothing left to read.
+
+**Watching the agents from your Mac: `tmux -CC`.** tmux's control mode makes iTerm2 draw the
+remote tmux windows as its own native tabs and splits, so the server's agents look like the
+agents on your Mac did:
+
+```bash
+ssh -t <box> tmux -CC attach -t bc-<workspace>      # e.g. bc-beadcause
+```
+
+iTerm2 only (Terminal.app and other emulators print the control protocol as text). Each
+agent window becomes a tab named for its bead. Closing the iTerm2 window detaches; the
+agents keep running on the box. `tmux -CC new -A -s bc-<workspace>` also works but would
+*create* the session if the daemon has not opened it yet — use `attach`, and list what
+exists with `ssh <box> tmux ls`. A new session only exists once an agent has opened a
+window in that workspace. Without iTerm2, plain `ssh -t <box> tmux attach -t bc-<workspace>`
+works anywhere (switch windows with `Ctrl-b n` / `Ctrl-b w`).
+
+**Phone from a server.** Same two parts as the Mac, with these differences:
+
+1. **Install and sign in Tailscale yourself.** The installer never installs it on Linux
+   (its installer is a script to pipe into a shell); it names
+   [tailscale.com/download/linux](https://tailscale.com/download/linux). Then
+   `sudo tailscale up`, and sign the phone in as the same user. Check `tailscale status`.
+2. **Make the daemon able to find it.** It looks for the binary in `/usr/local/bin`,
+   `/opt/homebrew/bin` and the macOS app, and Tailscale's Linux package installs
+   `/usr/bin/tailscale`, so for now:
+   `sudo ln -s /usr/bin/tailscale /usr/local/bin/tailscale` (tracked as bc-obucr.10; this
+   goes away when that lands). Without it `--phone` says it needs Tailscale up when it is.
+3. `npm run install-service -- --phone`, then `npm run qr` (or `node bin/beadcause.js --url`
+   for the link as text, which is easier to copy out of an ssh session than a QR is to scan
+   from one — the QR renders in any terminal wide enough for it). Pair as under
+   [Pairing a phone](#pairing-a-phone).
+4. **Push needs ntfy, and a server has no browser to subscribe in.** Either use the
+   Android app, which needs nothing else, or install the ntfy app on the phone, subscribe it
+   to the topic in `ntfy.topic` of `~/.config/beadcause/config.json`, and set
+   `"ntfy": { "enabled": true }` there. A topic on the public `ntfy.sh` is readable by
+   anyone who guesses it — see [what leaves the machine](config.md) for `minimalWorkspaces`,
+   or point `ntfy.server` at one you host.
 
 ### Installing against a team's tracker
 
@@ -253,6 +375,30 @@ solo install behaves exactly as it always did.
 4. **Push:** the Android app posts its own notifications over the tailnet and needs
    nothing else. For the PWA, install [ntfy](https://ntfy.sh) and subscribe to the
    topic printed at startup, then set `ntfy.enabled: true` in the config.
+
+### Optional: iTerm2's Python API, for Consolidate that moves tabs live
+
+The advocates view's **Consolidate** button (bc-4olsx.3) moves a workspace's tabs into
+its home window. Without this setup it still works, by closing each idle tab and
+resuming it with `claude --resume` — which loses the tab's scrollback and skips busy
+sessions. With it, the tabs are moved as they are, busy ones included:
+
+1. **iTerm2 → Settings → General → Magic → Enable Python API** (check with
+   `defaults read com.googlecode.iterm2 EnableAPIServer` — `1` is on).
+2. **The `iterm2` package, in a venv inside the checkout** — never installed globally:
+
+   ```sh
+   cd <beadcause checkout>
+   python3 -m venv .venv-iterm
+   .venv-iterm/bin/pip install iterm2
+   ```
+
+   `.venv-iterm` is gitignored. The daemon uses `.venv-iterm/bin/python3` when it
+   exists and plain `python3` otherwise, and detects a missing package itself — the
+   press then answers `method: "park-resume"` with the reason.
+3. Nothing else: the daemon asks iTerm for an API cookie over AppleScript (`request
+   cookie and key for app named "beadcause"`), using the Automation permission it
+   already has for opening tabs.
 
 ### Worth knowing before you rely on it
 

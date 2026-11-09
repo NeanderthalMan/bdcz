@@ -214,6 +214,15 @@
     /** What the last Ship said, pinned to the card it was pressed on. */
     shipSaid: null, // { key, text, bad }
     shipping: false,
+    /* The per-workspace tab buttons (bc-4olsx). `armedTabs` is the workspace whose
+       Close all has had its first tap — the in-page confirm, Ship's pattern, never a
+       browser dialog — and it disarms itself after a few seconds. `tabsBusy` is the
+       workspace with a press in flight, and `tabsSaid` what the last press there
+       answered, kept in state because the poll repaints the card under it. */
+    armedTabs: null,
+    armedTabsTimer: null,
+    tabsBusy: null,
+    tabsSaid: new Map(), // workspace → { text, bad, skipped: [{ name, why }] }
   };
 
   function readOpen() {
@@ -1632,6 +1641,108 @@
       .join('');
   }
 
+  /**
+   * The three iTerm-tab buttons for one workspace — Consolidate, Close all, Reopen
+   * (bc-4olsx, lib/tabpark.js).
+   *
+   * Consolidate and Close count the workspace's live Claude sessions, which is every
+   * session the daemon can see there — started by the advocate or by hand, the same list
+   * "Other work in this repo" draws. Not every one of them will be closed: a busy one never
+   * is, and one with no iTerm tab cannot be, and the answer says which were skipped and
+   * why. Reopen counts what is parked (`parkedTabs` on /api/work) and is disabled at
+   * zero. Close all takes two taps, the first arming it and saying how many, because it
+   * is the one press here that takes windows away.
+   *
+   * Drawn only when there is something to press or an answer to show: a repo with no
+   * sessions and nothing parked would otherwise carry three dead buttons on every card.
+   */
+  function tabsStrip(w) {
+    const key = w?.name;
+    if (!key) return '';
+    const live = (w.sessions || []).length;
+    const parked = Number(w.parkedTabs) || 0;
+    const said = state.tabsSaid.get(key);
+    if (!live && !parked && !said) return '';
+    const busy = state.tabsBusy === key;
+    const armed = state.armedTabs === key;
+    const off = (n) => (busy || !n ? ' disabled' : '');
+    const skippedList = said?.skipped?.length
+      ? `<ul class="tab-skipped">${said.skipped
+          .map(
+            (x) =>
+              `<li><strong>${esc(x.name || (x.sessionId || '').slice(0, 8) || 'session')}</strong> — ${esc(x.why || '')}</li>`
+          )
+          .join('')}</ul>`
+      : '';
+    return `<div class="tab-ctl" data-ws="${esc(key)}">
+      <span class="tab-ctl-label">iTerm tabs</span>
+      <button class="adv-btn" data-tabs="consolidate" data-ws="${esc(key)}"${off(live)} title="Gather this workspace's Claude tabs into its one home window. Moved live through iTerm's Python API when it is set up (busy sessions too); otherwise each idle tab outside it is closed and resumed there.">Consolidate (${live})</button>
+      <button class="adv-btn${armed ? ' armed' : ''}" data-tabs="close" data-ws="${esc(key)}"${off(live)} title="Close every idle Claude tab of this workspace, remembering each so Reopen can bring it back. Busy sessions are never closed.">${
+        armed ? `Close ${live} — sure?` : `Close all (${live})`
+      }</button>
+      <button class="adv-btn" data-tabs="reopen" data-ws="${esc(key)}"${off(parked)} title="Resume every session Close all parked here, in this workspace's home window.">Reopen (${parked})</button>
+      ${busy ? '<span class="tab-ctl-said">Working…</span>' : ''}
+      ${said && !busy ? `<div class="board-said tab-ctl-said${said.bad ? ' bad' : ''}">${esc(said.text)}</div>${skippedList}` : ''}
+    </div>`;
+  }
+
+  /** One sentence for what a tab press did — what the answer counted, said plainly. */
+  function tabsSentence(act, out) {
+    const done = (out.done || []).length;
+    const skipped = out.skipped || [];
+    const busyN = skipped.filter((x) => x.reason === 'busy').length;
+    const verb = act === 'close' ? 'Closed' : act === 'reopen' ? 'Reopened' : 'Moved';
+    const parts = [out.message && !done && !skipped.length ? out.message : `${verb} ${done}`];
+    if (act === 'consolidate' && (out.stayed || []).length) parts.push(`${out.stayed.length} already home`);
+    if (skipped.length) {
+      const rest = skipped.length - busyN;
+      parts.push(`skipped ${skipped.length}${busyN ? ` (${busyN} busy${rest ? `, ${rest} other` : ''})` : ''}`);
+    }
+    if (act !== 'reopen' || out.parked) parts.push(`${out.parked || 0} parked`);
+    // Consolidate says how it moved them: for real (iTerm's Python API), or by closing
+    // and resuming because that was not available — and then why, since the second one
+    // skips busy sessions and the first does not.
+    if (act === 'consolidate' && out.method === 'move' && done) parts.push('moved live, scrollback kept');
+    if (act === 'consolidate' && out.method === 'park-resume') {
+      parts.push(`closed and resumed${out.fallbackWhy ? ` — ${out.fallbackWhy}` : ''}`);
+    }
+    return parts.join(' · ');
+  }
+
+  async function tabsAction(ws, act) {
+    if (!ws || state.tabsBusy) return;
+    if (act === 'close' && state.armedTabs !== ws) {
+      state.armedTabs = ws;
+      clearTimeout(state.armedTabsTimer);
+      state.armedTabsTimer = setTimeout(() => {
+        state.armedTabs = null;
+        render();
+      }, 6000);
+      return render();
+    }
+    state.armedTabs = null;
+    clearTimeout(state.armedTabsTimer);
+    state.tabsBusy = ws;
+    state.tabsSaid.delete(ws);
+    render();
+    try {
+      const out = await api(`/api/tabs/${act}`, { method: 'POST', body: JSON.stringify({ workspace: ws }) });
+      state.tabsSaid.set(ws, {
+        text: tabsSentence(act, out),
+        bad: false,
+        skipped: (out.skipped || []).map((x) => ({ name: x.name, sessionId: x.sessionId, why: x.why })),
+      });
+    } catch (err) {
+      state.tabsSaid.set(ws, { text: err.message, bad: true, skipped: [] });
+    } finally {
+      state.tabsBusy = null;
+      render();
+      // The counts on the buttons are /api/work's; ask again so they agree with what
+      // just happened rather than with the poll before it.
+      load();
+    }
+  }
+
   /* -------------------------------------------------------------------- cards */
 
   function advocateCard(w, a, proposals, r) {
@@ -1886,6 +1997,7 @@
         // queue that stays unshipped. Empty draws nothing at all.
         shipStrip(key)
       }
+      ${tabsStrip(w)}
       ${note ? `<div class="adv-note">${esc(note)}</div>` : ''}
       ${
         // A limit the global cap will not honour. Said here rather than left to the
@@ -1944,6 +2056,7 @@
         <span class="adv-actions">${advocateSwitch(r, false)}</span>
       </div>
       ${domainHtml(w, null)}
+      ${tabsStrip(w)}
       ${w.error ? `<div class="adv-note bad">⚠ ${esc(w.error)}</div>` : ''}
       ${(w.working || [])
         .map(
@@ -2755,6 +2868,15 @@
     if (shipBtn) {
       e.preventDefault();
       ship(shipBtn.dataset.ship);
+      return;
+    }
+
+    // The tab buttons (bc-4olsx). Before `[data-adv]` and carrying no `data-adv` of their
+    // own, for the reason the epic controls are: they read `data-ws` too.
+    const tabs = e.target.closest('[data-tabs]');
+    if (tabs) {
+      e.preventDefault();
+      tabsAction(tabs.dataset.ws, tabs.dataset.tabs);
       return;
     }
 

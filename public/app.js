@@ -211,6 +211,19 @@
      */
     p0open: new Set(),
     /**
+     * The question card opened from an effort's tree, while it is open — bc-s31p5. Set by
+     * `p0OpenQuestion`, and what `submit` reads to know that answering this card should
+     * open the next "asks you" in the same effort rather than drop back to the tree.
+     * Null whenever the card on screen was not reached that way, so the inbox's own
+     * cards answer exactly as they always did.
+     */
+    p0chain: null,
+    /**
+     * Question keys whose `/api/question` fetch has been started ahead of the tap, so a
+     * second preload over the same card does not fire a second `bd` spawn. bc-s31p5.
+     */
+    p0prefetch: new Set(),
+    /**
      * Which beads *inside* those trees are showing their own details, by bead key
      * (`workspace/id`). bc-rfnr.9.4.
      *
@@ -1124,9 +1137,28 @@
    * answer is the one fact here that changes which card you open first. P0 and P1 keep
    * the warn colour their pill had, for the same reason.
    */
+  /**
+   * What kind of thing a row is, as a tag at the head of its meta line (bc-qzng7.2).
+   *
+   * Inbox holds questions, merges, proposals and tickets in one list now that the
+   * Questions and PRs pills are gone, so each row says which it is. The tag is a button:
+   * tapping it narrows Inbox to that kind, the same as picking it in the Kind filter,
+   * and the Kind filter is where the narrowing shows and comes off.
+   */
+  function kindTagHtml(q) {
+    const f = window.beadcause?.inboxFilter;
+    const kind = f?.kindOf?.(q);
+    if (kind !== 'question' && kind !== 'pr') return '';
+    const word = q.delivery || kind === 'pr' ? 'merge' : q.held ? 'endorse' : q.jira ? 'ticket' : q.proposal ? 'proposal' : 'ask';
+    return `<button type="button" class="kind-tag kind-${word}" data-act="kind-tag" data-kind="${kind}" aria-label="Show only ${esc(
+      kind === 'pr' ? 'pull requests' : 'questions'
+    )}">${word}</button>`;
+  }
+
   function metaLineHtml(q, draft) {
     const age = relTime(q.createdAt);
     const facts = [
+      kindTagHtml(q),
       `<span>${esc(q.workspace)}</span>`,
       `<span class="id">${esc(q.id)}</span>`,
       q.priority != null ? `<span class="pri p${esc(q.priority)}">P${esc(q.priority)}</span>` : '',
@@ -1892,6 +1924,185 @@
   const spaceForWorkspace = (ws) =>
     state.spaces.find((s) => (s.workspaces || []).includes(ws))?.name || 'Other';
 
+  /* ------------------------------------------------- held for endorsement */
+
+  /**
+   * Beads held for endorsement, as one row at the top of Inbox (bc-qzng7.2).
+   *
+   * Before bc-qzng7.2 a held bead was reachable only by tapping Questions, then Held, and
+   * then only under a scope that fetched agent-side rows. With the Questions pill and
+   * the scope switch both gone, Inbox has to say on its own that beads are waiting for
+   * your endorsement, and it says it as a count and a door: /endorse already does the
+   * deciding (group-select, Endorse all), and the inbox does not copy those buttons.
+   * See `heldRowHtml` for why the copy would be the dangerous kind.
+   *
+   * The count comes from `/api/unendorsed`, the same endpoint /endorse reads, because
+   * Inbox's own sweep is the human one and never fetches held beads. It is asked for at
+   * most once a minute, rides along with `load`, and a failure leaves the last number
+   * up rather than blanking it.
+   */
+  const HELD_MS = 60000;
+  const held = { beads: [], at: 0, inFlight: false };
+
+  async function loadHeld() {
+    if (held.inFlight || Date.now() - held.at < HELD_MS) return;
+    held.inFlight = true;
+    try {
+      const data = await api('/api/unendorsed');
+      held.beads = Array.isArray(data?.beads) ? data.beads : [];
+      held.at = Date.now();
+      render(true);
+    } catch {
+      // Keep the last count. The next load asks again.
+    } finally {
+      held.inFlight = false;
+    }
+  }
+
+  const heldInSpace = () =>
+    state.space === 'all' ? held.beads.length : held.beads.filter((b) => spaceForWorkspace(b.workspace) === state.space).length;
+
+  /** The row itself, on the unnarrowed Inbox only — a Kind narrowing is a list of one kind. */
+  function heldDoorHtml() {
+    const f = window.beadcause?.inboxFilter;
+    if (f && f.current() !== 'home') return '';
+    const n = heldInSpace();
+    if (!n) return '';
+    return `<a class="triage-held inbox-held" href="/endorse">
+      <span class="triage-held-n">${n} ${n === 1 ? 'bead is' : 'beads are'} held for your endorsement</span>
+      <span class="triage-held-go">review →</span>
+    </a>`;
+  }
+
+  /* ------------------------------------------------------------------ Work */
+
+  /**
+   * Work's one line of advocate health (bc-qzng7.3).
+   *
+   * The advocate console opened on eleven status chips, launchd and build lines and a
+   * card per advocate, and almost all of it is plumbing that only matters when it is
+   * wrong. What Work needs from it is one sentence: how many sessions are running and
+   * how much is ready or blocked behind them. The console is still there, one tap away,
+   * as this line's "details" — and the plumbing lines surface here on their own only
+   * when launchd or the router say something is wrong.
+   *
+   * Read from `/api/work`, the console's own payload, at most every thirty seconds and
+   * only while Work is on screen. A failure keeps the last line up.
+   */
+  const WORK_MS = 30000;
+  const work = { data: null, at: 0, inFlight: false };
+
+  async function loadWork() {
+    if (window.beadcause?.inboxFilter?.current?.() !== 'epics') return;
+    if (work.inFlight || Date.now() - work.at < WORK_MS) return;
+    work.inFlight = true;
+    try {
+      work.data = await api('/api/work');
+      work.at = Date.now();
+      render(true);
+    } catch {
+      // Keep the last line. The next render asks again.
+    } finally {
+      work.inFlight = false;
+    }
+  }
+
+  /** The health line's three numbers, for the space on screen. Null before the first answer. */
+  function workHealth() {
+    const rows = Array.isArray(work.data?.workspaces) ? work.data.workspaces : null;
+    if (!rows) return null;
+    const mine = rows.filter(
+      (w) =>
+        (state.space === 'all' || spaceForWorkspace(w.name) === state.space) &&
+        (state.workspace === 'all' || w.name === state.workspace)
+    );
+    const n = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+    return {
+      running: mine.reduce((t, w) => t + (Array.isArray(w.sessions) ? w.sessions.length : 0), 0),
+      ready: mine.reduce((t, w) => t + n(w.counts?.ready), 0),
+      blocked: mine.reduce((t, w) => t + n(w.counts?.blocked), 0),
+    };
+  }
+
+  /** What is wrong with the plumbing, in one clause each — empty when nothing is. */
+  function workTrouble() {
+    const out = [];
+    const svc = work.data?.service;
+    if (svc && !svc.ok) out.push(`hot-swap is not live (${svc.code || 'launchd'})`);
+    const r = work.data?.router;
+    if (r && !r.ok) out.push(r.summary || `the router reports ${r.code || 'a problem'}`);
+    return out;
+  }
+
+  function workHealthHtml() {
+    const h = workHealth();
+    const trouble = workTrouble();
+    const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+    const line = h
+      ? `${plural(h.running, 'session', 'sessions')} running · ${h.ready} ready · ${h.blocked} blocked`
+      : 'Asking the advocates…';
+    return `<div class="work-health${trouble.length ? ' bad' : ''}">
+      <span class="work-health-line">${esc(line)}</span>
+      <a class="work-health-go" href="#advocates">details ›</a>
+      <a class="work-health-go" href="#releases">releases ›</a>
+      <a class="work-health-go" href="#advocates?tab=mirror">mirror ›</a>
+      ${trouble.map((t) => `<span class="work-health-trouble">⚠ ${esc(t)}</span>`).join('')}
+    </div>`;
+  }
+
+  /** The PR ladder's rungs that mean merged but not live yet. lib/prstage.js. */
+  const SHIPPING_RUNGS = ['merged', 'pushed', 'deployed'];
+
+  /**
+   * Where one effort's work has got to: ready → in a session → in review → merged → shipped.
+   *
+   * Read off the card's own tree (statuses and live sessions, both already on it — see
+   * `rootCard` in lib/server.js) and the pull request board's rows, matched to the tree
+   * by the beads each pull request names. `shipped` is the closed beads no
+   * merged-but-not-live pull request is still carrying, so a bead does not count as
+   * shipped while the code that closed it is waiting on a deploy.
+   */
+  function workPipeline(c) {
+    const tree = c.tree || [];
+    const ids = new Set([c.id, ...tree.map((r) => r.id)]);
+    const status = (r) => String(r.status || 'open');
+    const moving = (r) => Boolean(r.session) || status(r) === 'in_progress';
+    const live = tree.filter((r) => status(r) !== 'closed');
+    const prs = prRows().filter(
+      (q) => q.pr && q.workspace === c.workspace && (q.pr.beads || []).some((b) => ids.has(b?.id || b))
+    );
+    const review = prs.filter((q) => q.pr.stage === 'review');
+    const merged = prs.filter((q) => SHIPPING_RUNGS.includes(q.pr.stage));
+    const carried = new Set(merged.flatMap((q) => (q.pr.beads || []).map((b) => b?.id || b)));
+    return {
+      ready: live.filter((r) => !moving(r) && status(r) === 'open').length,
+      session: live.filter(moving).length,
+      review,
+      merged,
+      shipped: tree.filter((r) => status(r) === 'closed' && !carried.has(r.id)).length,
+    };
+  }
+
+  /** The strip itself. Pull requests are named by number, so the strip says *which*. */
+  function workStripHtml(c) {
+    const p = workPipeline(c);
+    const prs = (list) =>
+      list.length > 2
+        ? `${list.length}`
+        : list
+            .map((q) => `<a href="${esc(q.pr.url || '#')}" target="_blank" rel="noopener">#${esc(q.pr.number)}</a>`)
+            .join(' ');
+    const step = (cls, n, text) => `<span class="work-step ${cls}${n ? '' : ' none'}" role="listitem">${text}</span>`;
+    const arrow = '<span class="work-arrow" aria-hidden="true">→</span>';
+    return `<div class="work-strip" role="list" aria-label="Where the work under ${esc(c.id)} has got to">${[
+      step('ready', p.ready, `${p.ready} ready`),
+      step('session', p.session, `${p.session} in session`),
+      step('review', p.review.length, p.review.length ? `${prs(p.review)} in review` : '0 in review'),
+      step('merged', p.merged.length, p.merged.length ? `${prs(p.merged)} merged, not shipped` : '0 merged'),
+      step('shipped', p.shipped, `${p.shipped} shipped`),
+    ].join(arrow)}</div>`;
+  }
+
   /**
    * The board, as rows this list can carry.
    *
@@ -2450,8 +2661,12 @@
    *
    * The set and not a count of the tree: folding the bead up stops the sweep on the next
    * tick, which is the right lifetime for a reason that is "somebody is looking at this".
+   *
+   * **Work is the third** (bc-qzng7.3): every effort card draws a pipeline strip whose
+   * review and merged steps are this board's rows, and the Stage filter lists them.
    */
-  const boardWanted = () => prsWanted() || state.p0beadopen.size > 0;
+  const boardWanted = () =>
+    prsWanted() || state.p0beadopen.size > 0 || window.beadcause?.inboxFilter?.current?.() === 'epics';
 
   /** When the board was last *asked for* — not when it last answered. See loadBoard. */
   let boardAt = 0;
@@ -3967,8 +4182,10 @@
    * broken app, because a space could be showing 0 while fifty-four beads were open
    * in it. So when the scope is the narrow one, the empty state names the way out.
    */
+  // Points at the Beads pill since bc-qzng7.2 took the Both switch away: that is where
+  // the work agents are on lives now.
   const widenNudge = () =>
-    state.scope === 'human' ? ' Tap <b>Both</b> above to include the work agents are on.' : '';
+    state.scope === 'human' ? ' The work agents are on is under <b>Beads</b>.' : '';
 
   /**
    * The other way to empty the list: the kind, which since bc-khoe.2 is a lit pill in
@@ -3980,7 +4197,7 @@
   const kindNudge = () => {
     const f = window.beadcause?.inboxFilter;
     if (!f || !f.selected().length) return widenNudge();
-    return ` The row above is showing only <b>${esc(f.label())}</b>.`;
+    return ` The Kind filter above is showing only <b>${esc(f.label())}</b>.`;
   };
 
   /**
@@ -4017,7 +4234,7 @@
     // The one empty state that is also the app at rest, so it is the one that says
     // what the button in the corner is for. ＋ is the only control on this screen with
     // nothing else naming it, and an empty inbox is exactly when you would want it.
-    return `<div class="empty"><strong>Nothing to decide</strong>No open questions labelled <code>human</code>.${widenNudge()}${boardTrouble()} ＋ starts a conversation about what to file next.</div>`;
+    return `<div class="empty"><strong>Nothing is waiting on you</strong>No questions, merges or requests.${heldDoorHtml()}${widenNudge()}${boardTrouble()} ＋ starts a conversation about what to file next.</div>`;
   }
 
   /**
@@ -5082,6 +5299,22 @@
   }
 
   /**
+   * What the box hands over, read for `is:` tokens first (bc-qzng7.11). `is:closed` and
+   * `is:all` are the ledger — another pane — so the words beside the token go with you
+   * and this box empties behind you; `is:open` is this list, so only the token is
+   * dropped. public/viewbar.js owns the tokens, and without it the box searches what
+   * was typed, as it always did.
+   */
+  function typeBeadQuery(v) {
+    const t = window.beadcause?.beads?.typed?.(v);
+    if (!t || !t.side) return setBeadQuery(v);
+    setBeadQuery(t.moved && t.side !== 'open' ? '' : t.rest);
+  }
+  window.beadcause = window.beadcause || {};
+  /** Home's bead box, for public/viewbar.js to carry words into when `is:open` lands here. */
+  window.beadcause.beadSearch = { set: (v) => setBeadQuery(v) };
+
+  /**
    * A suggestion clicked: the bead becomes a pill, and its tree is fetched.
    *
    * The pill goes up *before* the tree lands, deliberately. A tap must show that it
@@ -5218,9 +5451,9 @@
     legend: 'Bead',
     text: true,
     all: 'Any bead',
-    placeholder: 'bc-0xil, or a title word',
+    placeholder: 'bc-0xil, a title word, or is:closed',
     value: () => state.bead.query,
-    set: (v) => setBeadQuery(v),
+    set: (v) => typeBeadQuery(v),
     suggestions: () =>
       state.bead.suggestions.map((b) => ({
         id: b.key,
@@ -6466,7 +6699,7 @@
       on ? ' on' : ''
     }${openingCardClass({ key })}" style="--d:${p0Step(row)}" data-act="p0-bead" data-p0bead="${esc(key)}" data-ws="${esc(
       card.workspace
-    )}" data-bead="${esc(row.id)}" aria-expanded="${on}"${on ? ` aria-controls="p0bead-${cardId(key)}"` : ''}>
+    )}" data-bead="${esc(row.id)}"${row.pending ? ' data-asks="1"' : ''} aria-expanded="${on}"${on ? ` aria-controls="p0bead-${cardId(key)}"` : ''}>
       <span class="p0-row-caret" aria-hidden="true">${on ? '▾' : '▸'}</span>
       <span class="p0-row-id">${esc(row.id)}</span>
       ${row.pending ? '<span class="pill p0-asks">asks you</span>' : ''}
@@ -7324,7 +7557,7 @@
                 ? ''
                 : `<button type="button" class="p0-off" data-act="p0-unstart" data-ws="${esc(
                     c.workspace
-                  )}" data-bead="${esc(c.id)}">↩ Take it off My Efforts</button>`
+                  )}" data-bead="${esc(c.id)}">↩ Take it off Work</button>`
             }
           </div>`;
   }
@@ -7357,6 +7590,7 @@
             ${p0FaceHtml(c, asks, '<span class="p0-caret" aria-hidden="true">›</span>')}
             ${p0ProgressHtml(c)}
           </button>
+          ${workStripHtml(c)}
           ${p0ActsHtml(c)}
         </div>`;
   }
@@ -7725,7 +7959,7 @@
           (state.me || [])[0] || 'you@example.com'
         )}</code> on an effort puts it in this list.</div>`;
       }
-      return `<div class="p0-none">Nothing to start — every P0 you own is either on My Efforts already or not open.</div>`;
+      return `<div class="p0-none">Nothing to start — every P0 you own is either on Work already or not open.</div>`;
     }
     return `${rows
       .map(
@@ -7781,7 +8015,7 @@
       // also takes the row this tap is on off the screen, which is why nothing below
       // touches `btn` again on the way out.
       if (on) hideComposePick();
-      toast(on ? `${bead} is on My Efforts` : `${bead} is off My Efforts — ＋ puts it back`);
+      toast(on ? `${bead} is on Work` : `${bead} is off Work — ＋ puts it back`);
       await load();
     } catch (err) {
       btn.disabled = false;
@@ -8089,7 +8323,9 @@
       three filters rather than a fourth rule: a card you have opened is on the screen you
       opened it from, whatever the pill above it says its list is made of.
     */
-    const visible = inBoard.filter((q) => state.open.has(q.key) || inKind(q));
+    // Chats are Work's since bc-qzng7.3 (`work` on the session kind): out of the Inbox
+    // list unless one is open, because Work draws them under the board.
+    const visible = inBoard.filter((q) => state.open.has(q.key) || (inKind(q) && !(view === 'home' && q.session)));
     // A tick whose card has left the list goes with it — bc-iaju1.5. public/endorse.js
     // does the same on every payload, and for the same reason: a selection that outlived
     // its row would be a bulk button counting beads that are not on the screen, and the
@@ -8115,6 +8351,10 @@
     const chunks = [];
     const reqs = requestsHtml();
     if (reqs) chunks.push({ key: '@requests', html: reqs });
+    // Beads waiting for your endorsement, as a count and a door (bc-qzng7.2). Not when
+    // the list is empty: the empty state carries the same row itself.
+    const heldDoor = visible.length ? heldDoorHtml() : '';
+    if (heldDoor) chunks.push({ key: '@held', html: heldDoor });
     // Under the foundation pane and above everything the sweep produced, including the
     // empty state — see `troubleHtml`. Below the requests because a request is a
     // decision somebody is waiting on and this is a caveat about the list; above the
@@ -8127,8 +8367,54 @@
     // "what the board would be" — `loadBoard` still sweeps for it under a kind pill,
     // because the counts on the pill row and in the monitor are about what you are
     // answerable for and not about which view happens to be up.
-    const roots = boardHere ? p0SectionHtml() : '';
+    // Work (bc-qzng7.3): the health line over the board, a Stage narrowing that swaps
+    // the board for the pull requests at one stage, and the chats under the board. All
+    // three are Work's alone; the board is still drawn by `p0SectionHtml`.
+    const stage = boardOnly ? window.beadcause?.inboxFilter?.stage?.() || '' : '';
+    const stageOf = window.beadcause?.inboxFilter?.stageOf;
+    if (boardOnly) {
+      if (stageOf) {
+        const counts = { pr: 0, shipping: 0 };
+        for (const q of forPills) if (q.pr && counts[stageOf(q)] !== undefined) counts[stageOf(q)] += 1;
+        window.beadcause.inboxFilter.stageCounts?.(counts);
+      }
+      chunks.push({ key: '@work-health', html: workHealthHtml() });
+      loadWork();
+    }
+    const roots = boardHere && !stage ? p0SectionHtml() : '';
     if (roots) chunks.push({ key: '@p0', html: roots });
+    if (boardOnly && stage && stageOf) {
+      const at = forPills
+        .filter((q) => q.pr && stageOf(q) === stage)
+        .sort(
+          (a, b) => prRank(a) - prRank(b) || String(b.pr.updatedAt || '').localeCompare(String(a.pr.updatedAt || ''))
+        );
+      // The order the queue will try them in is the console's merge queue section — one
+      // link, above the list it is the order of (bc-qzng7.9).
+      if (stage === 'pr') {
+        chunks.push({ key: '@work-queue', html: '<div class="work-queue"><a href="#advocates?tab=prs&sub=queue">merge queue ›</a></div>' });
+      }
+      for (const q of at) chunks.push({ key: q.key, html: prCardHtml(q) });
+      if (!at.length) {
+        chunks.push({
+          key: '@empty',
+          html: `<div class="empty">${stage === 'pr' ? 'No pull requests in review.' : 'Nothing merged and waiting to ship.'}${
+            stage === 'shipping' ? ' <a href="#releases">Releases ›</a>' : ''
+          }</div>`,
+        });
+      }
+    } else if (boardOnly) {
+      const chats = forPills
+        .filter((q) => q.session)
+        .sort((a, b) => String(b.session.updatedAt).localeCompare(String(a.session.updatedAt)));
+      if (chats.length) {
+        chunks.push({
+          key: '@work-chats',
+          html: `<h2 class="p0-kind work-chats">Chats <span class="p0-kind-n">${chats.length}</span></h2>`,
+        });
+        for (const q of chats) chunks.push({ key: q.key, html: chatRowHtml(q) });
+      }
+    }
     const missed = troubleHtml();
     if (missed) chunks.push({ key: '@trouble', html: missed });
     // Directly beneath it, in the same place and for the same reason. Second of the two
@@ -8167,7 +8453,7 @@
       // (`p0SectionHtml` returns `''`), and since bc-fwp2c that no longer falls through
       // to the flat list — Home is where the list lives. So the one screen that would
       // otherwise be blank says why, and names the control that ends the state.
-      if (!roots) chunks.push({ key: '@empty', html: epicsEmptyHtml() });
+      if (!roots && !stage) chunks.push({ key: '@empty', html: epicsEmptyHtml() });
     } else if (!rows.length) {
       chunks.push({ key: '@empty', html: emptyHtml() });
     } else if (!visible.length) {
@@ -8619,6 +8905,14 @@
     // Forced: for a comment the answered card's textarea is still in the DOM holding
     // text, so a deferred render would never fire and the card would linger open.
     render(true);
+    // Reached from an effort's tree: the next question in that effort opens in its place
+    // (bc-s31p5). On the tap, like everything above — the write is queued, and waiting
+    // on it would be the thumb serialised with `bd` again. A comment keeps the bead open
+    // and is not an answer, so it ends the chain without moving on.
+    if (state.p0chain === key) {
+      if (close) p0Advance(key);
+      else state.p0chain = null;
+    }
 
     const restoreCard = () => {
       state.inFlight.delete(key);
@@ -8972,6 +9266,128 @@
   }
 
   /**
+   * The effort open in the details tab, as its board card — or null. bc-s31p5.
+   *
+   * Looked up from the board rather than held, because the board is replaced whole on
+   * every poll and a card captured at tap time would be answering from a stale tree.
+   */
+  function p0OpenCard() {
+    const k = [...state.p0open][0];
+    if (!k) return null;
+    return (state.rootboard?.roots || []).find((c) => (c.key || `${c.workspace}/${c.id}`) === k) || null;
+  }
+
+  /**
+   * Every "asks you" in an effort, in the order the tree draws them — the order you would
+   * work down it by hand. Rows with no card to open (an agent's, or one not on this page's
+   * payload) and rows whose answer is already on its way are left out, so what comes back
+   * is exactly the cards that can be opened next.
+   */
+  function p0AskKeys(card, keepKey = null) {
+    if (!card) return [];
+    return p0Visible(card.tree || [])
+      .filter((r) => r.pending)
+      .map((r) => p0RowKey(card, r))
+      .filter((k) => {
+        if (k === keepKey) return true;
+        const q = byKey(k);
+        return q && !q.agent && !state.inFlight.has(k);
+      });
+  }
+
+  /**
+   * Fetch a question card's full record ahead of the tap, so opening it is instant.
+   *
+   * The same `/api/question` `expand()` makes, written into the same object — `expand`
+   * skips its own fetch once `q.comments` is there, and a poll merges into the object
+   * rather than replacing it (`adopt`), so the fetched half survives the next refresh.
+   * A failure forgets the attempt, leaving `expand()` to try again on the tap.
+   */
+  async function p0Prefetch(key) {
+    const q = byKey(key);
+    if (!q || q.agent || q.comments || state.p0prefetch.has(key)) return;
+    state.p0prefetch.add(key);
+    try {
+      const full = await api(
+        `/api/question?workspace=${encodeURIComponent(q.workspace)}&id=${encodeURIComponent(q.id)}`
+      );
+      if (!q.comments) Object.assign(q, full);
+    } catch {
+      state.p0prefetch.delete(key);
+    }
+  }
+
+  /**
+   * Preload the first `n` question cards of the open effort that are not fetched yet.
+   * bc-s31p5: two when the effort opens, and one more each time a card is answered, so
+   * the card that opens next has always been fetched already.
+   */
+  function p0Preload(card, keys = p0AskKeys(card), n = 2) {
+    for (const k of keys.slice(0, n)) p0Prefetch(k);
+  }
+
+  /**
+   * Open a question card from an effort's tree — the "Answer it" button and, since
+   * bc-s31p5, the "asks you" row itself.
+   *
+   * `expand` and nothing else for the card — the same call the list's own toggle makes,
+   * so the card is the inbox card with every one of its controls (bc-rfnr.9.7). What this
+   * adds is `state.p0chain`: the card was reached from an effort, so answering it opens
+   * the next question in that effort rather than dropping back to the tree (see `submit`).
+   *
+   * The pending mark is set here exactly as the list's `toggle` sets it (bc-ka5y.14), and
+   * the advocate sheet is cleared first: it is `z-index: 41` over `.card.open`'s 40, so a
+   * card opened under it would look like a tap that did nothing (bc-r2b5.2).
+   */
+  async function p0OpenQuestion(key) {
+    if (!key) return;
+    state.p0adv = null;
+    state.p0chain = key;
+    state.opening = key;
+    paintOpening();
+    try {
+      await expand(key);
+    } finally {
+      // Same guard as the list's `toggle`: a second tap can have moved the mark to
+      // another row while this fetch was in the air, and clearing it blind would strip
+      // a mark whose fetch is still going. The ordinary path never reaches this line at
+      // all — `expand()` clears the mark itself, before it opens the card — this is only
+      // for the throw `expand()` does not swallow.
+      if (state.opening === key) {
+        state.opening = null;
+        paintOpening();
+      }
+    }
+    // The card after this one, so it is in hand by the time this one is answered.
+    const card = p0OpenCard();
+    const keys = p0AskKeys(card, key);
+    const at = keys.indexOf(key);
+    p0Preload(card, [...keys.slice(at + 1), ...keys.slice(0, Math.max(0, at))], 1);
+  }
+
+  /**
+   * The card just answered was opened from an effort: open the next "asks you" in it.
+   * bc-s31p5.
+   *
+   * "Next" is the next one down the tree after the card you answered, wrapping round to
+   * the top, so working through an effort reads in the order it is drawn. When nothing is
+   * left the chain ends and you are back on the tree, which is the true answer: this
+   * effort is not asking you anything else. The one after the next is preloaded, keeping
+   * one card always fetched ahead.
+   */
+  function p0Advance(answered) {
+    state.p0chain = null;
+    const card = p0OpenCard();
+    if (!card) return;
+    const keys = p0AskKeys(card, answered);
+    const at = keys.indexOf(answered);
+    const order = at < 0 ? keys : [...keys.slice(at + 1), ...keys.slice(0, at)];
+    const next = order.find((k) => k !== answered);
+    if (!next) return;
+    p0OpenQuestion(next);
+  }
+
+  /**
    * Expand one card and collapse whatever was expanded before it — the accordion.
    *
    * `state.open` stays a Set because the rest of the file reads it with .has() and
@@ -9127,6 +9543,14 @@
     const key = btn.dataset.key;
     const act = btn.dataset.act;
 
+    // A row's kind tag narrows Inbox to that kind (bc-qzng7.2, `kindTagHtml`). Stops
+    // here so the tap does not also open the card it sits on.
+    if (act === 'kind-tag') {
+      ev.stopPropagation();
+      window.beadcause?.inboxFilter?.pick?.(btn.dataset.kind);
+      return;
+    }
+
     // Fold or unfold one epic's questions (bc-yjekg, `epicChunks`). A plain render: the
     // heading carries no key, so nothing below this has anything to act on.
     if (act === 'epic-fold' || act === 'epic-fold-all') {
@@ -9259,7 +9683,11 @@
       const want = act === 'p0' && btn.dataset.p0 !== wasKey ? btn.dataset.p0 : null;
       state.p0open.clear();
       if (want) state.p0open.add(want);
+      state.p0chain = null;
       render(true);
+      // The first two questions of the effort just opened, fetched before they are
+      // tapped, so the row opens its card with no wait. bc-s31p5.
+      if (want) p0Preload(p0OpenCard());
       const land = want
         ? listEl.querySelector('.p0-full .p0-back')
         : wasKey && listEl.querySelector(`.p0-card[data-key="${CSS.escape(wasKey)}"] .p0-tap`);
@@ -9291,6 +9719,17 @@
       const key = btn.dataset.p0bead;
       closeMenu();
       closeAgentMenu();
+      // An "asks you" row goes straight to its question card — the card "Answer it" used
+      // to be one more tap away (bc-s31p5). Only where there is a card to open: a row whose
+      // question is not on this page's payload, or that an agent has, still unfolds its
+      // details as before, which is the honest fallback `p0AnswerHtml` already draws.
+      if (btn.dataset.asks) {
+        const q = byKey(key);
+        if (q && !q.agent) {
+          await p0OpenQuestion(key);
+          return;
+        }
+      }
       const opening = !state.p0beadopen.has(key);
       if (opening) state.p0beadopen.add(key);
       else state.p0beadopen.delete(key);
@@ -9357,27 +9796,7 @@
     if (act === 'p0-answer') {
       closeMenu();
       closeAgentMenu();
-      // The advocate sheet is `z-index: 41` and `.card.open` is 40, so a close offered from
-      // inside that sheet would open the card *underneath* it and look like a tap that did
-      // nothing. bc-r2b5.2. Cleared for the offer on the board card too, which costs
-      // nothing there — the sheet is not up — and means one rule rather than two.
-      state.p0adv = null;
-      const key = btn.dataset.key;
-      state.opening = key;
-      paintOpening();
-      try {
-        await expand(key);
-      } finally {
-        // Same guard as the list's `toggle`: a second tap can have moved the mark to
-        // another row while this fetch was in the air, and clearing it blind would strip
-        // a mark whose fetch is still going. The ordinary path never reaches this line at
-        // all — `expand()` clears the mark itself, before it opens the card — this is only
-        // for the throw `expand()` does not swallow.
-        if (state.opening === key) {
-          state.opening = null;
-          paintOpening();
-        }
-      }
+      await p0OpenQuestion(btn.dataset.key);
       return;
     }
 
@@ -11000,6 +11419,7 @@
       return;
     }
     loading = true;
+    loadHeld();
     try {
       const asked = state.scope;
       const data = await api(questionsPath(asked));
@@ -11548,7 +11968,7 @@
       controls: 'compose-pick',
     },
     epic: {
-      label: 'Start an effort — put one of the beads you own on My Efforts',
+      label: 'Start something on Work — a chat session, or one of your efforts',
       controls: 'compose-epics',
     },
   };
@@ -11593,7 +12013,11 @@
   function showEpicPick() {
     if (!composeEpicsEl) return;
     const row = $('#compose-epics-row');
-    row.innerHTML = p0CandsHtml(p0Cards(state.rootboard?.startable));
+    // Chats moved onto Work with bc-qzng7.3, and their create came with them: the first
+    // row of this panel starts one, above the efforts you could put on the board.
+    row.innerHTML =
+      '<button type="button" class="p0-cand compose-chat" data-act="compose-chat">💬 Start a chat session</button>' +
+      p0CandsHtml(p0Cards(state.rootboard?.startable));
     composeEpicsEl.hidden = false;
     composeEl.setAttribute('aria-expanded', 'true');
     row.querySelector('.p0-cand')?.focus();
@@ -11675,6 +12099,13 @@
     // test is on `data-act` and not on that: a chip in the panel next door carries the same
     // attribute and means the other create entirely.
     $('#compose-epics-row')?.addEventListener('click', (ev) => {
+      if (ev.target.closest('[data-act="compose-chat"]')) {
+        hideComposePick();
+        const repos = startableRepos();
+        if (repos.length === 1) startChat(repos[0]);
+        else showComposePick(repos);
+        return;
+      }
       const cand = ev.target.closest('[data-act="p0-start"]');
       if (cand) setOnBoard(cand, true);
     });
@@ -12106,8 +12537,13 @@
    * Nothing has been fetched yet, so this costs a wider first sweep and no refetch.
    */
   function bootScope() {
-    const saved = localStorage.getItem('beadcause.scope');
-    if (SCOPES.includes(saved)) state.scope = saved;
+    // Always `human` since bc-qzng7.2. Inbox is "what is waiting on you" by definition,
+    // so the Human / Both / Agent switch is gone and a stored choice from before is not
+    // read back: a phone that last chose `Agent` would otherwise open on a list of live
+    // beads under a pill that says Inbox, with nothing on screen to say why. Agent-side
+    // rows are still reachable — the Beads pill widens the sweep for its own load
+    // (`onWiden` below) and `narrowBack` restores this on the way out.
+    state.scope = 'human';
     const wider = scopeFor(window.beadcause?.inboxFilter?.asked?.());
     // Widened for this load and not stored — see `widenedFrom`.
     if (wider) {
@@ -12187,7 +12623,7 @@
     // replaces whose children. The scope is flat rather than a pill that opens, because
     // three one-word options are legible without being reached for and a fourth control
     // that opened would be the panel bc-khoe.26 took apart, one row down.
-    window.beadcause?.filterPills?.mount?.(filtersEl, { groups: [scopeGroup] });
+    // The scope switch (`scopeGroup`) is no longer mounted (bc-qzng7.2): see bootScope.
     // How the row reaches a kind this scope cannot produce. The filter knows which pill
     // was tapped and that it is unreachable; only this page knows what a scope is, so
     // the widening lives here and the decision to ask for it lives there. `chooseScope`

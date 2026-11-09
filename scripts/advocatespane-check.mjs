@@ -345,11 +345,14 @@ try {
 
   /* -------------------------------------------------------------------- the chips */
 
-  console.log('\nthe chip row, and the address under it\n');
+  // No chips on screen since bc-qzng7.9: Work's links (`details ›`, `merge queue ›`,
+  // `mirror ›`) set the address, and the address picks the section. So a "tap" here is
+  // following one of those links — writing the hash — rather than pressing a chip.
+  console.log('\nthe sections, picked by the address Work links to\n');
   const chips = await evaluate(`(async () => {
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const asked = (path) => performance.getEntriesByType('resource').filter((e) => e.name.includes(path)).length;
-    const tap = (tab) => document.querySelector('#mon-tabs [data-tab="' + tab + '"]').click();
+    const tap = (tab) => { location.hash = tab === 'advocates' ? '#advocates' : '#advocates?tab=' + tab; };
     const board0 = asked('/api/prs');
     tap('prs');
     await sleep(800);
@@ -372,11 +375,13 @@ try {
   })()`);
   console.log(`    ${JSON.stringify(chips)}\n`);
 
-  check('a chip swaps exactly one section', chips.board.shown.join(',') === 'prs' && chips.mirror.shown.join(',') === 'mirror', `${chips.board.shown} / ${chips.mirror.shown}`);
+  check('the address swaps exactly one section', chips.board.shown.join(',') === 'prs' && chips.mirror.shown.join(',') === 'mirror', `${chips.board.shown} / ${chips.mirror.shown}`);
   check('and the section it left stopped being the one showing', chips.board.up && !chips.board.rosterUp);
-  check('the board asked for itself on the tap that showed it', chips.board.board === 1, `${chips.board.board} requests`);
-  check('the chip is written into the hash beside the view', chips.board.hash === '#advocates?tab=prs' && chips.mirror.hash === '#advocates?tab=mirror', `${chips.board.hash} / ${chips.mirror.hash}`);
-  check('and the pane’s own chip is the bare hash rather than a longer way of saying it', chips.bare === '#advocates', chips.bare);
+  // A bare `tab=prs` is Open PRs — what `/prs` and every notification about the board hop
+  // to — so the request that proves the section woke up is the board's.
+  check('the board asked for itself on the link that showed it', chips.board.board === 1, `${chips.board.board} requests`);
+  check('the section is in the hash beside the view', chips.board.hash === '#advocates?tab=prs' && chips.mirror.hash === '#advocates?tab=mirror', `${chips.board.hash} / ${chips.mirror.hash}`);
+  check('and the roster is the bare hash rather than a longer way of saying it', chips.bare === '#advocates', chips.bare);
   check('nothing was written into the query string', chips.search === '', chips.search);
 
   /* ------------------------------------------------------ away, and back again */

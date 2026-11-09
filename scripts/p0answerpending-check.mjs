@@ -65,8 +65,13 @@ const WS = 'alpha';
 const P0 = { id: 'a-p0', title: 'Make the phone the whole interface' };
 // Two beads under the epic, each itself a question — `pending: true` — so the tree draws
 // "Answer it" under both once opened. One answers slowly, the other refuses.
-const SLOW = 'a-p0.1';
-const FAILS = 'a-p0.2';
+//
+// Since bc-s31p5 the row itself opens the card, and opening the effort preloads its first
+// two questions — so two quick ones go first, and the two this check is about are third
+// and fourth, where a tap still has to wait on its own fetch.
+const QUICK = ['a-p0.1', 'a-p0.2'];
+const SLOW = 'a-p0.3';
+const FAILS = 'a-p0.4';
 
 const bead = (id, title) => ({
   id,
@@ -86,7 +91,8 @@ const FAILS_BEAD = bead(FAILS, 'A question whose brief will not load');
 
 // `comments` deliberately absent — that is what `expand()` reads to decide it has to
 // fetch `/api/question` at all, same as pending-check.mjs's own fixture.
-const QUESTIONS = [toQuestion(WS, SLOW_BEAD), toQuestion(WS, FAILS_BEAD)];
+const QUICK_BEADS = QUICK.map((id, i) => bead(id, `A question preloaded with the effort (${i + 1})`));
+const QUESTIONS = [...QUICK_BEADS, SLOW_BEAD, FAILS_BEAD].map((b) => toQuestion(WS, b));
 
 /** What `/api/bead` answers for the tree's own expansion — `bd show`, no question on it. */
 const detail = (id, title) => ({
@@ -117,11 +123,12 @@ const board = () => ({
       status: 'open',
       issue_type: 'epic',
       owners: ['adam'],
-      open: 2,
+      open: 4,
       inFlight: 0,
       waitingOn: null,
       advocate: null,
       tree: [
+        ...QUICK_BEADS.map((b) => ({ id: b.id, title: b.title, status: 'open', parent: P0.id, depth: 1, key: `${WS}/${b.id}`, pending: true })),
         { id: SLOW, title: SLOW_BEAD.title, status: 'open', parent: P0.id, depth: 1, key: `${WS}/${SLOW}`, pending: true },
         { id: FAILS, title: FAILS_BEAD.title, status: 'open', parent: P0.id, depth: 1, key: `${WS}/${FAILS}`, pending: true },
       ],
@@ -182,6 +189,7 @@ function serve() {
       asked.push(id);
       if (id === FAILS) return json({ error: 'the tracker is not answering' }, 500);
       const row = QUESTIONS.find((q) => q.id === id);
+      if (QUICK.includes(id)) return json({ ...row, comments: [], gate: null });
       return void setTimeout(() => json({ ...row, comments: [], gate: null }), DELAY);
     }
     if (req.method === 'POST' && p.startsWith('/api/')) {
@@ -268,7 +276,7 @@ const ANSWER_TAP = (id) => `(() => {
   const row = ${ROW(id)};
   const box = (el) => { const r = el.getBoundingClientRect(); return [r.x, r.y, r.width, r.height].map((n) => Math.round(n * 100) / 100); };
   const before = box(row);
-  ${ANSWER(id)}.click();
+  row.click();
   const now = ${ROW(id)} || row;
   const style = getComputedStyle(now);
   return {
@@ -304,15 +312,11 @@ try {
 
   console.log(`\n${BASELINE ? 'BASELINE (HEAD)' : 'working copy'} · ${VP.width}x${VP.height} · ${BASE}\n`);
 
-  await s.send('Page.navigate', { url: `${BASE}/?t=${TOKEN}` });
+  await s.send('Page.navigate', { url: `${BASE}/?t=${TOKEN}&kind=epics` });
   await waitFor(`document.querySelector('.p0-card') !== null`, 15000);
   await press('.p0-card .p0-tap');
-  await waitFor(`document.querySelectorAll('.p0-row').length >= 2`, 4000);
+  await waitFor(`document.querySelectorAll('.p0-row').length >= 4`, 4000);
 
-  /* ---- open the SLOW row so its "Answer it" button is on screen ---- */
-  await press(`[data-p0bead="${WS}/${SLOW}"]`);
-  await waitFor(`${ANSWER(SLOW)} !== null`, 4000);
-  await shot('row-open');
 
   /* ---- 1 & 2. the tap is answered at once, and nothing moves ---- */
   const tapped = await evalJs(ANSWER_TAP(SLOW));
@@ -346,8 +350,6 @@ try {
   await sleep(400);
 
   /* ---- 3b. and it goes when the fetch fails, which is the one that used to stick ---- */
-  await press(`[data-p0bead="${WS}/${FAILS}"]`);
-  await waitFor(`${ANSWER(FAILS)} !== null`, 4000);
   const failing = await evalJs(ANSWER_TAP(FAILS));
   check('a row whose brief will not load is marked too', failing.mine === true, JSON.stringify(failing.marked));
   await sleep(800);
@@ -364,12 +366,10 @@ try {
 
   /* ---- 4. reduced motion keeps the edge and drops the pulse ---- */
   await s.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
-  await s.send('Page.navigate', { url: `${BASE}/?t=${TOKEN}` });
+  await s.send('Page.navigate', { url: `${BASE}/?t=${TOKEN}&kind=epics` });
   await waitFor(`document.querySelector('.p0-card') !== null`, 15000);
   await press('.p0-card .p0-tap');
-  await waitFor(`document.querySelectorAll('.p0-row').length >= 2`, 4000);
-  await press(`[data-p0bead="${WS}/${SLOW}"]`);
-  await waitFor(`${ANSWER(SLOW)} !== null`, 4000);
+  await waitFor(`document.querySelectorAll('.p0-row').length >= 4`, 4000);
   const quiet = await evalJs(ANSWER_TAP(SLOW));
   await shot('reduced-motion');
   check(

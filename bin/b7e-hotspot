@@ -1,0 +1,115 @@
+#!/usr/bin/env node
+/**
+ * `b7e-hotspot` — why each of one file's conflicted merges conflicted.
+ *
+ *     b7e-hotspot <file>                      the file's conflicted merges, last 30 days
+ *     b7e-hotspot <file> --since 90d          a longer window (Nd or Nh)
+ *     b7e-hotspot <file> --merges <sha,sha>   exactly these merges, ledger or not
+ *     b7e-hotspot <file> --dir <repo> --base main --json
+ *
+ * One row per conflicted merge: sha, date, subject, each parent's line count, and one
+ * cause — driver-not-installed, stale-branch, rewrite-collision or real — with the
+ * whole-file rewrite commit (and its bead) when that is what explains it. Only `real`
+ * is a conflict a restructure of the file would remove. See lib/hotspotwhy.js.
+ *
+ * Exit codes: `0` ran, whatever it found. `1` bad arguments or not a git checkout.
+ *
+ * Reads history through `git merge-tree`, `git show` and `git log`; the one file it
+ * writes is lib/hotspots.js's own ledger cache under the config dir, as b7e-hotspots does.
+ *
+ * @grant read
+ */
+import { execFileSync } from 'node:child_process';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const LIB = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'lib');
+const { HOTSPOTS_PATH, WINDOW_DAYS, scanRepo } = await import(path.join(LIB, 'hotspots.js'));
+const { baseRewrites, explainMerge, tally } = await import(path.join(LIB, 'hotspotwhy.js'));
+
+const argv = process.argv.slice(2);
+const opts = { file: '', dir: '', base: 'main', since: `${WINDOW_DAYS}d`, merges: [], json: false, ledger: HOTSPOTS_PATH };
+function fail(msg) {
+  console.error(`b7e-hotspot: ${msg}`);
+  process.exit(1);
+}
+for (let i = 0; i < argv.length; i++) {
+  const a = argv[i];
+  const val = () => {
+    const v = argv[++i];
+    if (v === undefined) fail(`${a} needs a value`);
+    return v;
+  };
+  if (a === '--dir') opts.dir = val();
+  else if (a === '--base') opts.base = val();
+  else if (a === '--since') opts.since = val();
+  else if (a === '--merges') opts.merges = val().split(',').filter(Boolean);
+  else if (a === '--ledger') opts.ledger = val();
+  else if (a === '--json') opts.json = true;
+  else if (a === '-h' || a === '--help') {
+    console.log('usage: b7e-hotspot <file> [--dir <repo>] [--base main] [--since 30d] [--merges <sha,..>] [--json]');
+    process.exit(0);
+  } else if (a.startsWith('-')) fail(`unknown argument ${a}`);
+  else if (!opts.file) opts.file = a;
+  else fail(`unexpected extra argument ${a}`);
+}
+if (!opts.file) fail('which file? usage: b7e-hotspot <file>');
+const sm = /^(\d+)([dh])$/.exec(opts.since);
+if (!sm) fail('--since must look like 30d or 12h');
+const sinceMs = Number(sm[1]) * (sm[2] === 'd' ? 86400000 : 3600000);
+
+let dir;
+try {
+  dir = execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd: opts.dir || process.cwd(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+} catch {
+  fail(`${opts.dir || process.cwd()} is not inside a git checkout`);
+}
+const gitOut = (args) => execFileSync('git', args, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+
+// The file as the repo spells it: relative to the checkout, whatever the cwd.
+const abs = path.resolve(opts.dir || process.cwd(), opts.file);
+const rel = abs.startsWith(dir + path.sep) ? path.relative(dir, abs) : opts.file;
+
+let shas = opts.merges;
+if (!shas.length) {
+  const scan = await scanRepo(dir, { base: opts.base, ledgerPath: opts.ledger });
+  if (scan.error) fail(scan.error);
+  const cutoff = Date.now() - sinceMs;
+  shas = scan.events.filter((e) => e.files.includes(rel) && new Date(e.at).getTime() >= cutoff).map((e) => e.sha);
+}
+
+let ref = `origin/${opts.base}`;
+try {
+  gitOut(['rev-parse', '--verify', '--quiet', ref]);
+} catch {
+  ref = opts.base;
+}
+const rewrites = await baseRewrites(dir, ref, rel);
+const rows = [];
+for (const sha of shas) {
+  let full;
+  try {
+    full = gitOut(['rev-parse', '--verify', `${sha}^{commit}`]);
+  } catch {
+    fail(`${sha} is not a commit in ${dir}`);
+  }
+  rows.push(await explainMerge(dir, rel, { sha: full }, rewrites));
+}
+
+if (opts.json) {
+  console.log(JSON.stringify({ file: rel, base: ref, since: opts.since, rewrites, summary: tally(rows), merges: rows }, null, 2));
+  process.exit(0);
+}
+
+console.log(`${rel}: ${rows.length} conflicted merge${rows.length === 1 ? '' : 's'} in the last ${opts.since}`);
+if (rewrites.length) {
+  console.log(`whole-file rewrites on ${ref}: ${rewrites.map((r) => `${r.sha.slice(0, 9)}${r.bead ? ` (${r.bead})` : ''} ${r.before}→${r.after}`).join(', ')}`);
+}
+for (const r of rows) {
+  const l = r.lines ? `${r.lines.p1 ?? '-'}/${r.lines.p2 ?? '-'} lines (base ${r.lines.base ?? '-'})` : '';
+  console.log(`\n${r.sha.slice(0, 9)}  ${r.at.slice(0, 10)}  ${r.cause.padEnd(21)} ${l}`);
+  console.log(`     ${r.subject}`);
+  if (r.detail) console.log(`     ${r.detail}${r.rewrite?.bead ? ` [${r.rewrite.bead}]` : ''}`);
+}
+const t = tally(rows);
+if (rows.length) console.log(`\n${Object.entries(t).map(([k, v]) => `${v} ${k}`).join(', ')}`);

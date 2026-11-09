@@ -548,7 +548,7 @@ await check('landing straight on a repo view resolves the moment its pane arrive
 
 console.log('\nthe pill it gets');
 
-await check('a repo pill goes to the end of the row, after Config, and is a button not a link', () => {
+await check('a repo pill goes to the end of the row, after Releases, and is a button not a link', () => {
   const b = boot([pane('epics')]);
   b.run('panes.js');
   b.run('viewbar.js');
@@ -561,7 +561,7 @@ await check('a repo pill goes to the end of the row, after Config, and is a butt
   const nav = b.topbar.parent.children.find((c) => c.className === 'viewbar');
   const row = pills(nav);
   assert.equal(row[row.length - 1].id, 'loremia.studio', 'a repo pill takes the end of the ⋯ menu');
-  assert.equal(row[row.length - 2].id, 'config', 'and does not displace the one that asked for it');
+  assert.equal(row[row.length - 2].id, 'beads', 'and does not displace the last pill of the row (Beads since bc-qzng7.3 emptied the ⋯ menu)');
   const mine = row[row.length - 1];
   assert.equal(mine.tag, 'button', 'the pane is in this document, so the pill must not reload it');
   assert.equal(mine.pane, 'loremia.studio');
@@ -589,6 +589,152 @@ await check('a duplicate pill is refused rather than drawn twice', () => {
   b.run('panes.js');
   b.run('viewbar.js');
   assert.equal(b.bc().views.add({ id: 'history' }), false, 'a built-in pill may not be doubled');
+});
+
+/* ================================ the pill follows the picker (bc-7j5yz) */
+
+/*
+  A repo view is a screen about one checkout, and the row was drawing every one of them on
+  every screen: sorrel's `Screws` — a through-screw calculation for one rib of one
+  building — sat past Config while you were looking at northwind's work.
+
+  What is worth asserting here is the *seam*, and then the one thing about the predicate
+  that a wider one would have got wrong. The seam: that the row asks the picker at all,
+  asks again when it moves, keeps the pill for the pane you are on, and draws everything
+  on a page with no picker. The predicate: that the test is the picked **workspace** and
+  not the selected space. sorrel is one of six repos in `Personal`, so a rule written on
+  `matches` — "would a bead from this repo be on the list" — passes every seam check above
+  and leaves `Screws` drawn on every screen anybody uses. That is the check below called
+  "a space containing the repo is not the same as the repo".
+
+  The fake is public/spacebar.js's shape and nothing more: `filter` is the `{space,
+  workspace}` the real bar publishes, `workspace` being `'all'` until one repo is picked
+  out of a space.
+*/
+
+/** A stand-in space picker, published where public/spacebar.js publishes the real one. */
+function picker(b, filter) {
+  const listeners = [];
+  const state = { space: 'Personal', workspace: 'all', ...filter };
+  b.bc().space = {
+    get filter() {
+      return state;
+    },
+    onChange: (fn) => listeners.push(fn),
+  };
+  return {
+    /** Move the picker, the way a tap on the `<select>` does. */
+    pick(next) {
+      Object.assign(state, { space: 'Personal', workspace: 'all' }, next);
+      for (const fn of listeners) fn({ filter: state, source: 'pick' });
+    },
+  };
+}
+
+/** The row, the panes and one repo view from `sorrel`, over a picker on `filter`. */
+function withPicker(filter, { hash = '' } = {}) {
+  const b = boot([pane('epics')], { hash });
+  b.run('panes.js');
+  b.run('viewbar.js');
+  const control = picker(b, filter);
+  b.bc().route.add({ id: 'sorrel.screws', paths: ['/v/sorrel/screws'] });
+  const el = pane('sorrel.screws');
+  b.body.append(el);
+  b.bc().panes.adopt('sorrel.screws', el);
+  b.bc().views.add({
+    id: 'sorrel.screws',
+    workspace: 'sorrel',
+    label: 'Screws',
+    icon: '\u{1F529}',
+    href: '/v/sorrel/screws',
+  });
+  const nav = b.topbar.parent.children.find((c) => c.className === 'viewbar');
+  return { ...b, control, nav, drawn: () => pills(nav).some((p) => p.id === 'sorrel.screws') };
+}
+
+await check('a repo pill is not drawn while the picker is off that repo', () => {
+  const b = withPicker({ space: 'Northwind', workspace: 'architecture' });
+  assert.equal(b.drawn(), false, 'Screws has no business on the row over northwind');
+  // And the nine the app declares about itself are untouched by any of it.
+  const row = pills(b.nav);
+  assert.equal(row[row.length - 1].id, 'beads', 'the row ends where it did before repo views');
+  assert.ok(row.some((p) => p.id === 'home'));
+});
+
+await check('and is drawn while the picker is on it', () => {
+  assert.equal(withPicker({ workspace: 'sorrel' }).drawn(), true);
+});
+
+await check('a space containing the repo is not the same as the repo', () => {
+  // The whole reason this is `filter.workspace` and not `space.matches()`. sorrel shares
+  // `Personal` with five other repos, and `Everything` is the selection the app ships on
+  // — so a rule that hid the pill only where the *beads* are hidden would have left it
+  // drawn on every screen anybody uses, with every other check in this section green.
+  assert.equal(withPicker({ space: 'Personal', workspace: 'all' }).drawn(), false);
+  assert.equal(withPicker({ space: 'all', workspace: 'all' }).drawn(), false);
+});
+
+await check('the row is redrawn when the picker moves, in both directions', () => {
+  const b = withPicker({ workspace: 'all' });
+  assert.equal(b.drawn(), false);
+  b.control.pick({ workspace: 'sorrel' });
+  assert.equal(b.drawn(), true, 'picking the repo puts its pill back without a reload');
+  b.control.pick({ workspace: 'delmar' });
+  assert.equal(b.drawn(), false, 'and picking another takes it away again');
+  b.control.pick({ workspace: 'all' });
+  assert.equal(b.drawn(), false, 'and widening back out does too');
+});
+
+await check('a page with no space picker at all draws every repo pill', () => {
+  // Nine of the ten pages that draw this row are documents of their own, and spacebar.js
+  // loads *after* viewbar.js on the one that is not. A row that waited for an answer
+  // would blink every pill it has.
+  const b = boot([pane('epics')]);
+  b.run('panes.js');
+  b.run('viewbar.js');
+  b.bc().route.add({ id: 'sorrel.screws', paths: ['/v/sorrel/screws'] });
+  b.bc().views.add({ id: 'sorrel.screws', workspace: 'sorrel', label: 'Screws' });
+  const nav = b.topbar.parent.children.find((c) => c.className === 'viewbar');
+  assert.ok(pills(nav).some((p) => p.id === 'sorrel.screws'));
+});
+
+await check('the pane you are on keeps its pill however the picker moves', () => {
+  // Otherwise the row lights nothing over a screen you are plainly looking at — the same
+  // failure `viewOfPath` exists to stop, arrived at from the other direction.
+  const b = withPicker({ workspace: 'sorrel' });
+  b.navigate('#sorrel.screws');
+  assert.equal(b.bc().panes.showing(), 'sorrel.screws');
+  b.control.pick({ workspace: 'architecture' });
+  assert.equal(b.drawn(), true, 'the pill for the pane on screen survives the pick');
+  assert.equal(pills(b.nav).find((p) => p.id === 'sorrel.screws').current, true);
+  // One tap away it goes, because the pane on screen is no longer its own.
+  b.navigate('');
+  assert.equal(b.drawn(), false);
+});
+
+await check('a hidden pill is still accepted, adopted and addressable', () => {
+  // The picker moves the row, not the grammar: a home-screen shortcut to a repo view has
+  // to keep working with any space selected, which is most of why it is worth having one.
+  const b = withPicker({ workspace: 'architecture' });
+  assert.equal(b.drawn(), false);
+  assert.deepEqual([...b.bc().route.repoViews()], ['sorrel.screws']);
+  assert.equal(b.bc().route.viewOfPath('/v/sorrel/screws'), 'sorrel.screws');
+  assert.ok(
+    b.bc().views.pills.some((p) => p.id === 'sorrel.screws'),
+    'accepted is a fact about the call; drawn is a question about the picker'
+  );
+  b.navigate('#sorrel.screws');
+  assert.equal(b.bc().panes.showing(), 'sorrel.screws', 'the pane is there to land on');
+});
+
+await check('viewhost hands the row the workspace that declared the view', () => {
+  // The seam itself. Without this field the row has nothing to ask the picker about, and
+  // every repo pill would be permanently visible with all seven checks above still green.
+  const HOST = read('public/viewhost.js');
+  assert.ok(
+    /bc\.views\?\.add\?\.\(\{[\s\S]{0,300}?workspace: v\.workspace/.test(HOST),
+    'public/viewhost.js must pass `workspace` to views.add'
+  );
 });
 
 /* ============================== the SDK's half of the address (bc-k7lrc) */

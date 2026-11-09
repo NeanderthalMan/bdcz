@@ -780,10 +780,14 @@ await check('the pane keeps what it fetched, and paints it before asking', () =>
   assert.match(warm, /\{ id: 'releases', paths: \['\/api\/queues'\], holdOnly: true \}/);
 });
 
-await check('the pill row has a Releases pill pointing at the view', () => {
+await check('Releases is Work\'s, lit by the Work pill and reached from its Shipping stage', () => {
+  // bc-qzng7.3 took the Releases pill off the row: the pane is Work's details now. The
+  // Work pill claims the view, so the row still lights something on all three addresses,
+  // and Work's Shipping stage links here when nothing is waiting to ship.
   const bar = read('public/viewbar.js');
-  assert.match(bar, /id: 'releases'/);
-  assert.match(bar, /href: '\/releases'/);
+  assert.match(bar, /id: 'epics',[^\n]*views: \['advocates', 'releases'\]/, 'nothing on the row lights on Releases');
+  assert.ok(!/id: 'releases'/.test(bar), 'the Releases pill is back on the row');
+  assert.match(read('public/app.js'), /href="#releases"/, 'nothing on Work reaches Releases');
   // The three addresses are declared once, in the grammar, since bc-khoe.30.2 — the row
   // asks `viewOfPath` rather than carrying its own copy, which is why the pill lights on
   // all three. Asserted here because a pill whose paths nothing declares never lights at

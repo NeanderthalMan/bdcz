@@ -49,7 +49,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { describe, repair } from '../lib/borrow.js';
-import { NO_LAUNCH } from '../lib/launchguard.js';
+import { NO_LAUNCH, suiteEnv } from '../lib/launchguard.js';
 import { onExit } from '../lib/teardown.js';
 import { HELD_ENV, acquireSlot, findOwner, ownerGone, timeoutMsFor, waitingLine } from '../lib/gate.js';
 
@@ -266,7 +266,8 @@ for (const [i, suite] of suites.entries()) {
     // child, which is exactly the reach that is wanted. lib/launchguard.js says why.
     // `HELD_ENV`: this run already holds a machine-wide slot, so a runner started by a
     // suite is inside it rather than queueing behind its own parent. See lib/gate.js.
-    env: { ...process.env, [NO_LAUNCH]: '1', [HELD_ENV]: '1', TMPDIR: sandbox },
+    // `suiteEnv`: never the observing switches — bc-uy247, lib/launchguard.js.
+    env: { ...suiteEnv(), [NO_LAUNCH]: '1', [HELD_ENV]: '1', TMPDIR: sandbox },
   });
   // Node sets `run.error` to an ETIMEDOUT Error (and `run.signal` to `killSignal`) when the
   // `timeout` above is what ended the child — checked ahead of the generic `run.error`

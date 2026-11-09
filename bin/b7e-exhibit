@@ -4,7 +4,7 @@
  * path checked the way the phone will read it — or audit what a card already links, and
  * write nothing.
  *
- *     b7e-exhibit -w delmar -b dv-abc --doc /Users/you/code/delmar/ai-context/audits/X.md
+ *     b7e-exhibit -w delmar -b dv-abc --doc <home>/code/delmar/ai-context/audits/X.md
  *     b7e-exhibit -w delmar -b dv-abc --doc /abs/X.md --label "the audit behind this card"
  *     b7e-exhibit -w delmar -b dv-abc --image /abs/palette.png --link "PR #268"=https://github.com/…
  *     b7e-exhibit -w delmar -b dv-abc --check              one card's exhibits, writes nothing

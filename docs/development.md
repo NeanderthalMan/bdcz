@@ -3285,7 +3285,13 @@ near-miss to wave through: it is 11px or 13px and the sheet has already decided 
   Run it once; any worktree can run it, since it always records the main checkout's
   copy of the script. `node scripts/jsonmerge.mjs --check` says whether it is
   installed. Without it, git falls back to an ordinary text merge for those two files,
-  so they conflict instead of merging by key.
+  so they conflict instead of merging by key. **Since bc-xl7n.207 the daemon installs it
+  at every startup** (`ensureJsonMergeDriver`, `lib/jsonmergedriver.js`), and repairs it
+  if it names a script or a node that is gone — because nobody ever ran `--install` in
+  this clone, and package-lock.json conflicted in 21 merges in the month after the driver
+  landed. The startup log says `jsonmerge   …` when it wrote something. Do not
+  restructure package-lock.json to dodge its conflicts: replaying those merges shows the
+  installed driver merges every one of them clean.
 - **`bd human respond` is broken in bd 1.1.2** — it dies with `storage is nil`.
   Beadcause does the two steps it documents (`bd comment` then `bd close`) itself.
   If a later bd fixes it, the two-step is still fine.
