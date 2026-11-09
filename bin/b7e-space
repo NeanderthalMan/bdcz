@@ -12,6 +12,9 @@
  * and each worked out the cause with its own df and du commands. lib/space.js does the measuring
  * and `fits` is the check gate admission can reuse.
  *
+ * bc-dgx7.200: also reports ENOSPC debris (orphan worktree-* branches, worktrees whose directory
+ * is missing or half-checked-out). Informational: it never changes the exit code.
+ *
  * Writes nothing. Exit codes: `0` answered (and fits, if asked). `1` `--need` does not fit.
  * `2` bad usage.
  *
@@ -27,7 +30,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { mainCheckout } from '../lib/gitref.js';
-import { survey, fits, floorFor, render } from '../lib/space.js';
+import { survey, fits, floorFor, render, debris } from '../lib/space.js';
 
 const USAGE = `usage: b7e-space [--need worktree|gate|<bytes>] [--json]
 
@@ -74,6 +77,7 @@ const statfs = stub
   : fs.statfsSync;
 
 const answer = survey({ root, tmp: opts.tmp || os.tmpdir(), siblings, statfs });
+answer.debris = debris({ root });
 const verdict = opts.need != null ? fits(answer, opts.need) : null;
 
 console.log(opts.json ? JSON.stringify({ ...answer, fits: verdict }, null, 2) : render(answer, verdict));

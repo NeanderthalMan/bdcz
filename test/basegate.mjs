@@ -389,6 +389,24 @@ check('a red with real failures outnumbering the timeout kills stays failed', ()
   assert.equal(baseRunRefusal(real, CZ).kind, 'failed');
 });
 
+check('a kill plus a suite that timed out waiting for its router reads starved (grdv, bc-xl7n.216)', () => {
+  const grdv = czd8();
+  grdv.results = [
+    timeoutAt('test/one.mjs', '2026-10-01T02:00:00.000Z', 300, 300),
+    {
+      suite: 'test/four.mjs',
+      status: 'fail',
+      elapsed: 30.6,
+      at: '2026-10-01T02:30:00.000Z',
+      tail: 'Error: timed out waiting for the router to serve /api/health\n1 check(s) failed',
+    },
+  ];
+  grdv.failed = ['test/one.mjs', 'test/four.mjs'];
+  assert.equal(baseRunRefusal(grdv, CZ).kind, 'starved');
+  grdv.results[1].tail = 'assertion failed';
+  assert.equal(baseRunRefusal(grdv, CZ).kind, 'failed');
+});
+
 check('ordinary failures at the same second are not a sleep — only timeouts over their limit count', () => {
   const same = czd8();
   for (const r of same.results) r.tail = 'assertion failed';

@@ -228,7 +228,7 @@ try {
 
   console.log(`\n${BASELINE ? 'BASELINE (HEAD)' : 'working copy'} · ${VP.width}x${VP.height} · ${BASE}\n`);
 
-  await s.send('Page.navigate', { url: `${BASE}/?t=${TOKEN}` });
+  await s.send('Page.navigate', { url: `${BASE}/?t=${TOKEN}&kind=epics` });
   await waitFor(`document.querySelector('.p0-card') !== null`, 15000);
 
   /* ---- nobody on it: the offer, exactly as it was ---- */

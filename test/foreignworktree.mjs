@@ -185,32 +185,42 @@ check('a repo that has not opted in is left alone entirely', () => {
 
 /* ------------------------------------------------- report: the line that misinformed */
 
+// The banner used to list every worktree and put "← you" beside the current one, with
+// "STALE pid" beside a dead lock. On 2026-11-06 the hook dropped that listing (CLAUDE.md:
+// "It no longer lists every worktree; use `git worktree list` for that") and kept only the
+// one-line banner for the worktree you are standing in. The question these checks pin did
+// not change — does the banner ever tell a session a sibling's worktree is its own — so
+// they assert on what the banner still says: "✓ worktree <name>" is the claim of
+// ownership, "LOCKED BY ANOTHER LIVE SESSION" the refusal. Pinning the old listing is what
+// turned main red (bc-qae4v).
+const OWNED = /^✓ worktree wt\b/m;
+
 console.log('worktree-guard.sh report — the “← you” that was a lie');
 
-check('withholds “← you” from a worktree another live session holds', () => {
+check('withholds the ownership line from a worktree another live session holds', () => {
   const { wt, lock } = repoWithWorktree('banner');
   fs.writeFileSync(lock, lockText(sibling.pid));
   const msg = report(wt);
-  assert.ok(!/← you\b/.test(msg), `this is the sentence that told 37283 the worktree was its own:\n${msg}`);
+  assert.ok(!OWNED.test(msg) && !/← you\b/.test(msg), `this is the sentence that told 37283 the worktree was its own:\n${msg}`);
   assert.match(msg, /LOCKED BY ANOTHER LIVE SESSION/, msg);
   assert.match(msg, new RegExp(`\\b${sibling.pid}\\b`), msg);
   assert.match(msg, /EnterWorktree/, 'the banner is read before the first edit — it must say the fix');
 });
 
-check('still says “← you” about a worktree that is actually yours', () => {
+check('still claims a worktree that is actually yours', () => {
   const { wt, lock } = repoWithWorktree('banner-mine');
   fs.writeFileSync(lock, lockText(process.pid));
   const msg = report(wt);
-  assert.match(msg, /← you\b/, msg);
-  assert.ok(!/ANOTHER LIVE SESSION/.test(msg), msg);
+  assert.match(msg, OWNED, msg);
+  assert.ok(!/ANOTHER LIVE SESSION|DENIED/.test(msg), msg);
 });
 
-check('a stale lock is reported prunable, not stolen', () => {
+check('a stale lock is reported usable, not stolen', () => {
   const { wt, lock } = repoWithWorktree('banner-stale');
   fs.writeFileSync(lock, lockText(dead));
   const msg = report(wt);
-  assert.match(msg, /← you\b/, 'an abandoned worktree you are standing in is yours to use');
-  assert.match(msg, /STALE pid/, msg);
+  assert.match(msg, OWNED, 'an abandoned worktree you are standing in is yours to use');
+  assert.ok(!/ANOTHER LIVE SESSION|DENIED/.test(msg), msg);
 });
 
 /* ------------------------------------------------------------------------ done */

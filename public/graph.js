@@ -144,7 +144,10 @@
       body: JSON.stringify(body),
     });
     const out = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(out.error || `HTTP ${res.status}`);
+    // `refused` as well as `error`: /api/bead/move answers a 409 with the engine's plan,
+    // whose `refused` is the sentence saying why — and that sentence is what the card
+    // shows, not `HTTP 409`.
+    if (!res.ok) throw new Error(out.error || out.refused || `HTTP ${res.status}`);
     return out;
   }
 
@@ -1073,6 +1076,14 @@
     `/graph?ws=${encodeURIComponent(workspace)}&id=${encodeURIComponent(id)}&open=1`;
 
   /**
+   * The same link into a *different* tracker — the sheet is keyed by this page's `ws=`,
+   * so a bead in another bead-space is reached by loading the page for that space rather
+   * than by `openSheet`. Used for a moved bead's successor and for landing after a move.
+   */
+  const beadUrlIn = (ws, id) =>
+    `/graph?ws=${encodeURIComponent(ws)}&id=${encodeURIComponent(id)}&open=1`;
+
+  /**
    * Where the bead sits, split out of the one array bd already sends.
    *
    * `bd show --json` returns `dependencies[]` with a full row per edge — id, title,
@@ -1735,9 +1746,16 @@
    * finished bead under a retired epic is exactly the thing somebody tidying the tracker
    * from a phone wants to pick up. lib/beadmove.js refuses nothing on status either, so
    * an item drawn here has a route behind it.
+   *
+   * **Move to another space is the third** (bc-ka5y.45), and on a closed bead too for
+   * Move's reason — but not on one that has already been moved or superseded, which is
+   * the one case where the move would make a second live copy of one job.
    */
   function sheetMenuHtml(b) {
     const shut = String(b?.status || '').trim() === 'closed';
+    // A superseded original is closed and points at its live copy, and lib/movespace.js
+    // would happily copy it a second time — minting a second successor for one job.
+    const gone = Boolean(successorOf(b));
     return `<div class="menu" role="menu">
       <button class="menu-item" role="menuitem" data-sheet-act="edit"${shut ? ' disabled' : ''}>
         <span class="glyph">✎</span> Edit this bead
@@ -1754,6 +1772,14 @@
       <button class="menu-item" role="menuitem" data-sheet-act="move">
         <span class="glyph">↳</span> Move this bead
       </button>
+      <button class="menu-item" role="menuitem" data-sheet-act="space"${gone ? ' disabled' : ''}>
+        <span class="glyph">⇄</span> Move to another space
+      </button>
+      ${
+        gone
+          ? '<p class="menu-why" role="none">Already moved — the copy it points at is the one to move.</p>'
+          : ''
+      }
     </div>`;
   }
 
@@ -1872,6 +1898,30 @@
   };
 
   /**
+   * The children question, as both move cards ask it — Move and Move to another space.
+   *
+   * One renderer for the two because the acceptance on bc-ka5y.45 is that the question
+   * *reads the same* on both, and two copies of one sentence are two sentences the moment
+   * somebody edits one. The values stay `with`/`leave` on both cards for the same reason:
+   * the reparent route takes `with` and lib/movespace.js takes `move`, and that is a fact
+   * about the two routes, said once at each post (`saveSpaceMove` maps it), not a
+   * difference the reader is shown.
+   *
+   * The caller decides whether to draw it at all: `kids` is a count, and a bead with none
+   * is not asked a question with one answer.
+   */
+  function childrenChoiceHtml(kids, here) {
+    const opt = (value, label, on) => `<option value="${esc(value)}"${on ? ' selected' : ''}>${esc(label)}</option>`;
+    const leaveLabel = here ? `leave them under ${here}` : 'leave them under a new epic';
+    return `<label class="eq-lab">${esc(kids === 1 ? 'Its one child' : `Its ${kids} children`)}
+        <select data-move="children">
+          ${opt('with', 'move with it', true)}
+          ${opt('leave', leaveLabel, false)}
+        </select>
+      </label>`;
+  }
+
+  /**
    * Where a bead should go, and what happens to what is under it. bc-ka5y.44.
    *
    * The edit card's shape a second time (`.eq-edit`, `.eq-lab`, `.board-actions`) and
@@ -1924,14 +1974,8 @@
       .filter(Boolean)
       .join('');
     const kids = (children || []).length;
-    const leaveLabel = here ? `leave them under ${here}` : 'leave them under a new epic';
     const kidsRow = kids
-      ? `<label class="eq-lab">${esc(kids === 1 ? 'Its one child' : `Its ${kids} children`)}
-        <select data-move="children">
-          ${opt('with', 'move with it', true)}
-          ${opt('leave', leaveLabel, false)}
-        </select>
-      </label>
+      ? `${childrenChoiceHtml(kids, here)}
       ${
         here
           ? ''
@@ -1944,6 +1988,10 @@
       <label class="eq-lab">Move it under
         <select data-move="parent">${destinations}</select>
       </label>
+      <label class="eq-lab">…or any other bead, by id or title
+        <input type="search" data-move="find" placeholder="bc-… or a word from the title" autocomplete="off">
+      </label>
+      <div id="sheet-move-hits" class="board-hint" hidden></div>
       ${kidsRow}
       <div class="board-actions">
         <button class="board-btn merge" data-sheet-act="move-save">Move</button>
@@ -1960,6 +2008,168 @@
           : 'Choosing top level means nothing decides it, and nothing will open a session on it until something does.'
       }</p>
     </div>`;
+  }
+
+  /* ------------------------------------------------- the move-to-another-space card */
+
+  /**
+   * The bead this one was moved to or superseded by, as `{ workspace, id }`, or `null`.
+   *
+   * `supersededBy` and `parseSupersedeTarget` in lib/superseded.js, restated for
+   * `bylineBase`'s reason — nothing under public/ imports from lib/. A bare id means "in
+   * this tracker" (a duplicate somebody marked), and `<bead-space>/<id>` means the
+   * successor is in another one, which is what lib/movespace.js always writes. Anything
+   * else is not a marker, so it draws nothing rather than a link to nowhere.
+   */
+  const SUPERSEDE_PREFIX = 'superseded-by:';
+  function successorOf(b) {
+    for (const raw of b?.labels || []) {
+      const label = String(raw).trim();
+      if (!label.startsWith(SUPERSEDE_PREFIX)) continue;
+      const target = label.slice(SUPERSEDE_PREFIX.length).trim();
+      const bare = /^[a-z][a-z0-9]*-[a-z0-9.]+$/i.exec(target);
+      if (bare) return { workspace: '', id: target };
+      const m = /^([^/\s]+)\/([a-z][a-z0-9]*-[a-z0-9.]+)$/i.exec(target);
+      if (m) return { workspace: m[1], id: m[2] };
+    }
+    return null;
+  }
+
+  /**
+   * The row on a superseded original that goes to its successor. bc-ka5y.45.
+   *
+   * A row and not only the close reason, because the close reason is a sentence and this
+   * is the way through: the successor of a moved bead is in *another tracker*, which this
+   * page cannot reach by `openSheet` — the sheet reads `/api/bead?workspace=` off the
+   * page's own `ws=`. So it is a plain link to `/graph?ws=<that space>`, the same shape
+   * as every other row here, which drawer.js retargets the frame on like any other.
+   */
+  function successorRowHtml(b) {
+    const next = successorOf(b);
+    if (!next) return '';
+    const away = next.workspace && next.workspace !== workspace;
+    const ws = away ? next.workspace : workspace;
+    return `<div class="rel"><div class="rel-group">
+      <span class="rel-kind">${away ? 'Moved to' : 'Superseded by'}</span>
+      <a class="rel-row" href="${esc(beadUrlIn(ws, next.id))}">
+        <span class="pill id">${esc(away ? `${ws}/${next.id}` : next.id)}</span>
+        <span class="rel-title">${esc(away ? `the live copy, in ${ws}` : 'the bead that does this job')}</span>
+      </a>
+    </div></div>`;
+  }
+
+  /**
+   * Every bead-space the bead could go to: `/api/spaces`'s workspace names, less the one
+   * it is in, each with the space it belongs to.
+   *
+   * `/api/spaces` because it is the picker's own payload (public/spacebar.js), already
+   * narrowed to the active account — so this card can never offer a tracker the screens
+   * are not showing. The space is carried for the `<optgroup>`; a workspace in no space
+   * still appears, just with nothing above it.
+   */
+  function spaceTargets(payload, here) {
+    const spaceOf = new Map();
+    for (const s of payload?.spaces || []) for (const w of s.workspaces || []) if (!spaceOf.has(w)) spaceOf.set(w, s.name);
+    return (payload?.workspaces || [])
+      .map((w) => String(w || '').trim())
+      .filter((w, i, all) => w && w !== here && all.indexOf(w) === i)
+      .map((name) => ({ name, space: spaceOf.get(name) || '' }));
+  }
+
+  /**
+   * Where in another tracker a bead should go, and what happens to what is under it.
+   *
+   * `sheetMoveHtml`'s card a second time and on purpose: the same classes, the same
+   * Cancel, and the children question from `childrenChoiceHtml` — so it reads the same,
+   * and is absent on a bead with none.
+   *
+   * **Nothing here says what the move will do.** That is `#sheet-space-plan`, which is
+   * filled from the engine's own dry run (`spacePlanHtml`) every time the destination or
+   * the children choice changes. The ids, the count crossing, where the children land and
+   * what the minted epic is called all come back from lib/movespace.js, and re-deriving
+   * any of them here would be a second answer to a question the engine already answered
+   * deterministically. Until a plan has arrived the Move button is disabled, so the write
+   * can only ever follow a plan somebody could read.
+   */
+  function sheetSpaceHtml(b, { targets = [], children = [], parent = null } = {}) {
+    const id = String(b?.id || '');
+    const here = String(parent?.id || '').trim();
+    const opt = (t) => `<option value="${esc(t.name)}">${esc(t.name)}</option>`;
+    const groups = [];
+    for (const t of targets) {
+      const last = groups[groups.length - 1];
+      if (last && last.space === t.space) last.items.push(t);
+      else groups.push({ space: t.space, items: [t] });
+    }
+    const options = groups
+      .map((g) => (g.space ? `<optgroup label="${esc(g.space)}">${g.items.map(opt).join('')}</optgroup>` : g.items.map(opt).join('')))
+      .join('');
+    const kids = (children || []).length;
+    return `<div class="eq-edit" id="sheet-space" data-id="${esc(id)}">
+      <label class="eq-lab">Move it into
+        <select data-space="to">${options}</select>
+      </label>
+      ${kids ? childrenChoiceHtml(kids, here) : ''}
+      <div id="sheet-space-plan"><p class="board-hint">Asking what the move would do…</p></div>
+      <div class="board-actions">
+        <button class="board-btn merge" data-sheet-act="space-save" disabled>Move</button>
+        <button class="board-btn link" data-sheet-act="cancel">Cancel</button>
+      </div>
+      <p class="edit-err" id="sheet-space-err" hidden></p>
+    </div>`;
+  }
+
+  /**
+   * What the engine said the move would do — `publicPlan` from a `dryRun: true` post.
+   *
+   * Read off the plan's own fields and nothing else: `map` is `[old, new]` pairs and its
+   * length is what crosses; `leaving` is the children that stay, each with the bead it
+   * lands under (`to`), which is empty when `epic.needed` and the epic is what they land
+   * under; `droppedEdges` are the links that stay with the original only.
+   *
+   * **The epic's title is a box, seeded from the plan.** The acceptance is that it is
+   * shown and editable *before* the write, and the plan is where the default comes from
+   * (`defaultEpicTitle`), so the box is the plan's title and what is typed in it is sent
+   * on the next dry run and on the real one as `epicTitle`. A box that only appears after
+   * the move is a title you can only fix with a second edit.
+   */
+  function spacePlanHtml(plan) {
+    const map = plan?.map || [];
+    const to = String(plan?.to || '');
+    const from = String(plan?.from || workspace);
+    const row = ([was, now]) =>
+      `<span class="rel-row"><span class="pill id">${esc(was)}</span><span class="rel-title">becomes</span><span class="pill id">${esc(now)}</span></span>`;
+    const bits = [
+      `<div class="rel"><div class="rel-group">
+        <span class="rel-kind">${esc(map.length === 1 ? `1 bead crosses to ${to}` : `${map.length} beads cross to ${to}`)}</span>
+        ${map.map(row).join('')}
+      </div></div>`,
+    ];
+    const leaving = plan?.leaving || [];
+    if (leaving.length) {
+      const where = plan?.epic?.needed ? 'a new epic' : String(leaving[0]?.to || '');
+      bits.push(`<div class="rel"><div class="rel-group">
+        <span class="rel-kind">${esc(`${leaving.length === 1 ? '1 child stays' : `${leaving.length} children stay`} in ${from}, under ${where}`)}</span>
+        ${leaving
+          .map(
+            (k) => `<span class="rel-row"><span class="pill id">${esc(k.id)}</span><span class="rel-title">${esc(k.title || '')}</span></span>`
+          )
+          .join('')}
+      </div></div>`);
+    }
+    if (plan?.epic?.needed) {
+      bits.push(`<label class="eq-lab">The epic to leave them under
+        <input type="text" data-space="epic" value="${esc(plan.epic.title || '')}">
+      </label>`);
+    }
+    const dropped = (plan?.droppedEdges || []).length;
+    const notes = [
+      `The original stays in ${from}, closed and pointing at the new id — every pull request, branch and session that names it still works.`,
+      dropped ? `${dropped === 1 ? '1 link to a bead that is not moving stays' : `${dropped} links to beads that are not moving stay`} on the original only.` : '',
+      plan?.prCheck && !plan.prCheck.ok && plan.prCheck.reason ? `Open pull requests were not checked: ${plan.prCheck.reason}.` : '',
+    ].filter(Boolean);
+    bits.push(`<p class="board-hint">${esc(notes.join(' '))}</p>`);
+    return bits.join('');
   }
 
   function sheetHtml(b) {
@@ -1992,6 +2202,11 @@
     // meaningless once you have scrolled past the description looking for it.
     const closed = closedHtml(b);
     if (closed) parts.push(closed);
+    // And straight under the outcome, on a bead that was moved or marked a duplicate: the
+    // way to the copy that is live. Under the close note because that note is the sentence
+    // saying it moved, and this is the tap that follows it. bc-ka5y.45.
+    const successor = successorRowHtml(b);
+    if (successor) parts.push(successor);
     // Whose this is, under the outcome and above the session. The order is the order the
     // three answer each other on a closed bead — it closed, here is why, here is who was
     // answerable for it — and on an open root it puts the question the board is built
@@ -2174,6 +2389,7 @@
     ev.preventDefault();
     if (btn.dataset.sheetAct === 'save') return saveEdit();
     if (btn.dataset.sheetAct === 'move-save') return saveMove();
+    if (btn.dataset.sheetAct === 'space-save') return saveSpaceMove();
     // Cancel: the bead as the server last described it, which is the copy `paintSheet`
     // kept. Nothing typed is written anywhere, so there is nothing to undo.
     if (btn.dataset.sheetAct === 'cancel' && sheetBead) {
@@ -2198,6 +2414,7 @@
     const act = btn.dataset.sheetAct;
     closeSheetMenu();
     if (act === 'move') return openMoveCard();
+    if (act === 'space') return openSpaceCard();
     if (act !== 'edit') return;
     $('sheet-body').innerHTML = sheetEditHtml(sheetBead);
     $('sheet-body').scrollTop = 0;
@@ -2218,6 +2435,74 @@
     const box = $('sheet-move-standin');
     if (box) box.style.display = ev.target.value === 'leave' ? '' : 'none';
   });
+
+  /**
+   * The Move card's bead search: the inbox typeahead's gesture (`/api/beads?q=`, a beat of
+   * debounce, an answer dropped if the box has moved on) narrowed to this space, because a
+   * parent in another space cannot exist. A pick becomes the selected option of the
+   * roots `<select>`, so `saveMove` still reads one field and the server still refuses
+   * a loop or an unrooted destination in its own words.
+   */
+  let moveFindTimer = null;
+  let moveFindAsked = '';
+  async function findMoveTargets(q) {
+    const out = $('sheet-move-hits');
+    if (!out) return;
+    const selfId = $('sheet-move')?.dataset.id;
+    if (!q) {
+      out.hidden = true;
+      out.innerHTML = '';
+      return;
+    }
+    moveFindAsked = q;
+    try {
+      const data = await api(`/api/beads?workspace=${encodeURIComponent(workspace)}&q=${encodeURIComponent(q)}`);
+      if (moveFindAsked !== q || !$('sheet-move-hits')) return;
+      const hits = (Array.isArray(data.beads) ? data.beads : []).filter((h) => h.id !== selfId && (!h.workspace || h.workspace === workspace));
+      out.innerHTML = hits.length
+        ? hits
+            .map((h) => `<button type="button" class="board-btn link" data-move-pick="${esc(h.id)}" data-move-title="${esc(String(h.title || '').slice(0, 50))}">${esc(h.id)} — ${esc(String(h.title || '').slice(0, 50))}</button>`)
+            .join('<br>')
+        : esc(data.warming ? 'Still reading the tracker — try again in a moment.' : 'No bead matches that.');
+      out.hidden = false;
+    } catch (err) {
+      if (moveFindAsked !== q || !$('sheet-move-hits')) return;
+      out.textContent = err.message === 'token rejected' ? '' : `Search failed — ${err.message || 'the daemon did not answer'}`;
+      out.hidden = false;
+    }
+  }
+
+  $('sheet-body').addEventListener('input', (ev) => {
+    if (!ev.target.matches?.('[data-move="find"]')) return;
+    clearTimeout(moveFindTimer);
+    const q = ev.target.value.trim();
+    moveFindTimer = setTimeout(() => findMoveTargets(q), 200);
+  });
+
+  $('sheet-body').addEventListener('click', (ev) => {
+    const pick = ev.target.closest?.('[data-move-pick]');
+    const sel = $('sheet-move')?.querySelector('[data-move="parent"]');
+    if (!pick || !sel) return;
+    ev.preventDefault();
+    const id = pick.dataset.movePick;
+    let o = [...sel.options].find((x) => x.value === id);
+    if (!o) {
+      o = document.createElement('option');
+      o.value = id;
+      o.textContent = `${id} — ${pick.dataset.moveTitle || ''}`;
+      sel.appendChild(o);
+    }
+    sel.value = id;
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+    const hits = $('sheet-move-hits');
+    hits.hidden = true;
+    hits.innerHTML = '';
+    clearMoveFind();
+  });
+  function clearMoveFind() {
+    const f = $('sheet-move')?.querySelector('[data-move="find"]');
+    if (f) f.value = '';
+  }
 
   /** The card as the route wants it: the six fields, labels split on commas. */
   function editsNow(card) {
@@ -2362,6 +2647,163 @@
       return;
     }
     await paintSheet(id, sheetSeq);
+  }
+
+  /* ------------------------------------------------- moving it into another space */
+
+  /**
+   * Ask where it could go and what is under it — then draw the card and plan it.
+   *
+   * `openMoveCard`'s rule, both reads first: a card drawn without `/api/bead-links` would
+   * have no children question on a bead that has six. A tracker list with nothing in it
+   * but this bead's own space is a refusal said on the sheet, not a card with an empty
+   * select.
+   */
+  async function openSpaceCard() {
+    const b = sheetBead;
+    if (!b) return;
+    const seq = sheetSeq;
+    const notice = (cls, text) => {
+      $('sheet-move-err')?.remove();
+      $('sheet-body').insertAdjacentHTML('afterbegin', `<p class="${cls}" id="sheet-move-err">${esc(text)}</p>`);
+    };
+    notice('board-hint', 'Reading which spaces it could go to…');
+    let targets = [];
+    let children = [];
+    try {
+      const [spaces, links] = await Promise.all([
+        api('/api/spaces'),
+        api(`/api/bead-links?workspace=${encodeURIComponent(workspace)}&id=${encodeURIComponent(b.id)}`),
+      ]);
+      targets = spaceTargets(spaces, workspace);
+      children = links?.children || [];
+    } catch (err) {
+      if (seq !== sheetSeq) return;
+      notice('edit-err', `Can't offer a move — ${err.message}`);
+      return;
+    }
+    if (seq !== sheetSeq) return;
+    if (!targets.length) return notice('edit-err', `There is no other space to move it into — ${workspace} is the only one here.`);
+    $('sheet-body').innerHTML = sheetSpaceHtml(b, { targets, children, parent: relations(b).parent });
+    $('sheet-body').scrollTop = 0;
+    planSpaceMove();
+  }
+
+  /** The card as `/api/bead/move` wants it, `dryRun` aside. */
+  function spaceMoveBody(card) {
+    const val = (sel) => card.querySelector(sel)?.value ?? '';
+    const kids = card.querySelector('[data-move="children"]');
+    return {
+      workspace,
+      to: val('[data-space="to"]'),
+      id: card.dataset.id,
+      // The engine says `move` where the reparent route says `with` — see childrenChoiceHtml.
+      children: kids && kids.value === 'leave' ? 'leave' : 'move',
+      epicTitle: val('[data-space="epic"]'),
+    };
+  }
+
+  /**
+   * Each dry run gets a number, and only the newest may paint — two quick changes of the
+   * select are two plans in the air, and the slower one landing last would leave Move
+   * armed over a plan for a destination that is no longer chosen.
+   */
+  let spacePlanSeq = 0;
+
+  /**
+   * Ask the engine what the move would do, and show it. Move is disabled from the moment
+   * this starts until a plan for exactly what is on the card has come back, so the write
+   * can only ever follow a plan somebody could read.
+   */
+  async function planSpaceMove() {
+    const card = $('sheet-space');
+    if (!card) return;
+    const mine = ++spacePlanSeq;
+    const slot = $('sheet-space-plan');
+    const err = $('sheet-space-err');
+    const go = card.querySelector('[data-sheet-act="space-save"]');
+    if (go) go.disabled = true;
+    if (err) err.hidden = true;
+    let plan;
+    try {
+      plan = await post('/api/bead/move', { ...spaceMoveBody(card), dryRun: true });
+    } catch (e) {
+      if (mine !== spacePlanSeq) return;
+      if (slot) slot.innerHTML = '';
+      if (err) {
+        err.textContent = e.message;
+        err.hidden = false;
+      }
+      return;
+    }
+    if (mine !== spacePlanSeq || !$('sheet-space')) return;
+    if (slot) slot.innerHTML = spacePlanHtml(plan);
+    if (go) go.disabled = false;
+  }
+
+  // A new destination or a new children choice is a new plan. The epic box is not on this
+  // list: its title is sent as typed, and the engine only echoes it back.
+  $('sheet-body').addEventListener('change', (ev) => {
+    if (!ev.target.closest?.('#sheet-space')) return;
+    if (!ev.target.matches?.('[data-space="to"], [data-move="children"]')) return;
+    planSpaceMove();
+  });
+
+  /**
+   * Make the move, then land on the bead in its new space.
+   *
+   * Landing is a page load, not a repaint: the sheet reads `/api/bead` off this page's
+   * `ws=`, and the bead now lives in another one. `location.replace` for drawer.js's
+   * reason — back still closes the drawer once.
+   *
+   * **A move that copied but did not finish is not offered again.** `applyMove` writes the
+   * copy first, so a 200 with `applied: false` and `imported` set means the new bead
+   * exists and the original was left open; a second Move would mint a second successor.
+   * So the card shows the engine's own sentences, links to the copy, and stays disarmed.
+   */
+  async function saveSpaceMove() {
+    const card = $('sheet-space');
+    if (!card) return;
+    const err = $('sheet-space-err');
+    const go = card.querySelector('[data-sheet-act="space-save"]');
+    const body = spaceMoveBody(card);
+    if (err) err.hidden = true;
+    if (go) {
+      go.disabled = true;
+      go.textContent = 'Moving…';
+    }
+    let out;
+    try {
+      out = await post('/api/bead/move', body);
+    } catch (e) {
+      if (err) {
+        err.textContent = e.message;
+        err.hidden = false;
+      }
+      if (go) {
+        go.disabled = false;
+        go.textContent = 'Move';
+      }
+      return;
+    }
+    const next = new Map(out?.map || []).get(body.id);
+    if (out?.applied && next) {
+      location.replace(beadUrlIn(out.to || body.to, next));
+      return;
+    }
+    if (go) go.textContent = 'Move';
+    if (err) {
+      err.textContent = (out?.problems || []).join(' ') || 'The move did not finish, and the server did not say why.';
+      err.hidden = false;
+    }
+    if (out?.imported && next) {
+      err?.insertAdjacentHTML(
+        'afterend',
+        `<a class="rel-row" href="${esc(beadUrlIn(out.to || body.to, next))}"><span class="pill id">${esc(next)}</span><span class="rel-title">the copy that was made</span></a>`
+      );
+    } else if (go) {
+      go.disabled = false;
+    }
   }
 
   $('sheet-close').addEventListener('click', closeSheet);

@@ -1,0 +1,90 @@
+#!/usr/bin/env node
+/**
+ * `b7e-hotspots` — which files keep conflicting in this repo, and what shape each one is.
+ *
+ *     b7e-hotspots                       the repo the cwd is in, against origin/main
+ *     b7e-hotspots --dir <repo>          another checkout
+ *     b7e-hotspots --base develop        a different base branch
+ *     b7e-hotspots --min 2               a lower bar than the filing threshold
+ *     b7e-hotspots --json
+ *
+ * Report only: it brings the repo's conflict ledger up to date (lib/hotspots.js — it
+ * replays every merge on the base through `git merge-tree`) and prints the files that
+ * conflicted at least `--min` times in the last 30 days, with the restructuring pattern
+ * that fits each one. It files nothing; the daemon does that after a merge lands
+ * (bc-8nyxa). `--ledger <file>` points the ledger elsewhere, which is how it is tested.
+ *
+ * Exit codes: `0` ran, whatever it found. `1` bad arguments or not a git checkout.
+ *
+ * Read-only as far as anything shared goes: the one file it writes is its own ledger
+ * cache under the config dir — never the repo, never the tracker.
+ *
+ * @grant read
+ */
+import { execFileSync } from 'node:child_process';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const LIB = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'lib');
+const { HOTSPOTS_PATH, MIN_CONFLICTS, SHAPES, WINDOW_DAYS, classify, hotspotsOf, scanRepo } = await import(
+  path.join(LIB, 'hotspots.js')
+);
+
+const argv = process.argv.slice(2);
+const opts = { dir: '', base: 'main', min: MIN_CONFLICTS, json: false, ledger: HOTSPOTS_PATH };
+for (let i = 0; i < argv.length; i++) {
+  const a = argv[i];
+  const val = () => {
+    const v = argv[++i];
+    if (v === undefined) fail(`${a} needs a value`);
+    return v;
+  };
+  if (a === '--dir') opts.dir = val();
+  else if (a === '--base') opts.base = val();
+  else if (a === '--min') opts.min = Number(val());
+  else if (a === '--ledger') opts.ledger = val();
+  else if (a === '--json') opts.json = true;
+  else if (a === '-h' || a === '--help') {
+    console.log('usage: b7e-hotspots [--dir <repo>] [--base main] [--min N] [--json]');
+    process.exit(0);
+  } else fail(`unknown argument ${a}`);
+}
+if (!Number.isInteger(opts.min) || opts.min < 1) fail('--min must be a positive integer');
+
+function fail(msg) {
+  console.error(`b7e-hotspots: ${msg}`);
+  process.exit(1);
+}
+
+let dir;
+try {
+  dir = execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd: opts.dir || process.cwd(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+} catch {
+  fail(`${opts.dir || process.cwd()} is not inside a git checkout`);
+}
+
+const scan = await scanRepo(dir, { base: opts.base, ledgerPath: opts.ledger });
+if (scan.error) fail(scan.error);
+
+const spots = hotspotsOf(scan.events, { min: opts.min }).map((s) => {
+  let text = '';
+  try {
+    text = execFileSync('git', ['show', `origin/${opts.base}:${s.file}`], { cwd: dir, maxBuffer: 1 << 28, stdio: ['ignore', 'pipe', 'ignore'] }).toString();
+  } catch {
+    /* gone from the base — classified on its name alone */
+  }
+  return { ...s, shape: classify(s.file, text) };
+});
+
+if (opts.json) {
+  console.log(JSON.stringify({ repo: scan.repo, windowDays: WINDOW_DAYS, conflictedMerges: scan.events.length, hotspots: spots }, null, 2));
+  process.exit(0);
+}
+
+console.log(`${scan.repo}: ${scan.events.length} conflicted merge${scan.events.length === 1 ? '' : 's'} in the last ${WINDOW_DAYS} days`);
+if (!spots.length) console.log(`no file conflicted ${opts.min}+ times`);
+for (const s of spots) {
+  const shape = SHAPES[s.shape];
+  console.log(`\n${String(s.count).padStart(3)}  ${s.file}  — ${shape.name}`);
+  console.log(`     ${shape.fix[0]}`);
+}

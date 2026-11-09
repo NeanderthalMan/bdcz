@@ -202,7 +202,13 @@
       // The first chip is the pane's own default and is left off the address, so the bare
       // `#advocates` a pill tap writes is not immediately rewritten into a longer form
       // that means the same thing.
-      const q = which && which !== chips[0]?.dataset.tab ? `tab=${encodeURIComponent(which)}` : '';
+      // Other keys in the slot are kept (bc-qzng7.9): `sub=` is public/mergeboard.js's,
+      // naming which PRs list is up, and it belongs only beside `tab=prs`.
+      const params = new URLSearchParams(route.parse(location.hash).query || '');
+      if (which && which !== chips[0]?.dataset.tab) params.set('tab', which);
+      else params.delete('tab');
+      if (which !== 'prs') params.delete('sub');
+      const q = params.toString();
       const next = location.pathname + location.search + route.hashFor(VIEW, q);
       // `replaceState` because a chip is not a place you go back *to*: three chips would
       // otherwise fill the back stack with steps between you and the screen you arrived
@@ -225,6 +231,10 @@
        pane deserves to come back to. */
     const asked = address.read();
     if (known(asked)) return asked;
+    /* In the shell the chips are hidden (bc-qzng7.9), so the address is the only control
+       there is: no `?tab=` means the roster, never whatever was up last time — a section
+       you could not see a way out of. */
+    if (inShell) return chips[0]?.dataset.tab || '';
     /* And the path, on the document. Arriving on one of these selects the PRs chip whatever
        was up last time — they are on the phone's home screen and in the notifications the
        ship path sends, and a notification that opened the advocates roster instead would be
@@ -313,8 +323,13 @@
    * were not the thing that moved, which is every other pane's show.
    */
   function moved() {
-    // Back on screen, so the chip belongs on the address again: a pill tap writes the bare
-    // `#advocates`, exactly as it does for the ledger's filters.
+    // Arriving is a link now (bc-qzng7.9): Work's `details ›`, `merge queue ›` and
+    // `mirror ›` each name their section in the address, and a bare `#advocates` is the
+    // roster. So the address is read on the way in, rather than written from what was up.
+    if (onScreen()) {
+      const asked = address.read();
+      show(known(asked) ? asked : chips[0]?.dataset.tab || '');
+    }
     address.write(active);
     announce();
   }
@@ -422,5 +437,12 @@
        *whether* this pane is the first one built. */
     document.addEventListener('DOMContentLoaded', build);
   }
-  if (inShell) panes.onShow(moved);
+  if (inShell) {
+    panes.onShow(moved);
+    // And the address moving while the pane is already up — the back button, or a link to
+    // another section of it.
+    panes.onQuery?.((view) => {
+      if (view === VIEW) moved();
+    });
+  }
 })();

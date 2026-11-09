@@ -32,7 +32,7 @@
  *    were looking for underneath them — and nothing about that reads as a bug, it reads as
  *    a tracker in a state. Same sentence `wantsAdvocate` makes, same rule.
  *
- * 3. **The write is a status write and nothing else.** Not `bd update --claim`, which is the
+ * 3. **The write is a status write and the `board-started` label, nothing else.** Not `bd update --claim`, which is the
  *    same status plus an assignee: the assignee of an epic is who is on it, and a tap saying
  *    "this is my week" is not a claim to be doing it this minute. Asserted on the argv,
  *    because the wrong flag here works perfectly and quietly rewrites a field nobody looked
@@ -185,6 +185,12 @@ function page({ roots = [CARD], startable = CANDIDATES, owned = true, space = 'a
       // rather than the hint line `p0HintText` drew, which went with the inline tree.
       lift(APP, 'function p0Progress(card)'),
       lift(APP, 'function p0ProgressHtml(card)'),
+      // Work's pipeline strip on each card (bc-qzng7.3). `prRows` is the pull request
+      // board, which this suite does not serve, so it is an empty board here.
+      'const prRows = () => [];',
+      lift(APP, 'const SHIPPING_RUNGS = '),
+      lift(APP, 'function workPipeline(c)'),
+      lift(APP, 'function workStripHtml(c)'),
       lift(APP, 'const p0RowKey = ('),
       lift(APP, 'const p0Step = ('),
       lift(APP, 'function p0RowHtml(card, row)'),
@@ -300,7 +306,7 @@ await check('THE CARD STILL OFFERS THE REVERSE — one tap, back to open', () =>
   // screen, so it stays on the card.
   const html = board();
   assert.match(html, /data-act="p0-unstart" data-ws="alpha" data-bead="zz-live"/);
-  assert.match(html, /Take it off My Efforts/);
+  assert.match(html, /Take it off Work/);
 });
 
 await check('with nothing started the section is gone entirely, offer and all', () => {
@@ -365,9 +371,12 @@ await check('and the rows in it reach the write, which is not on the list handle
   // chips in the panel next door also carry and which means the other create entirely.
   assert.match(
     APP,
-    /\$\('#compose-epics-row'\)\?\.addEventListener\('click', \(ev\) => \{\s*\n\s*const cand = ev\.target\.closest\('\[data-act="p0-start"\]'\);\s*\n\s*if \(cand\) setOnBoard\(cand, true\);/,
+    // Since bc-qzng7.3 the panel's first row starts a chat (Chats moved onto Work), so a
+    // `compose-chat` branch comes first; the effort rows still reach the same write.
+    /\$\('#compose-epics-row'\)\?\.addEventListener\('click', \(ev\) => \{[\s\S]{0,400}?const cand = ev\.target\.closest\('\[data-act="p0-start"\]'\);\s*\n\s*if \(cand\) setOnBoard\(cand, true\);/,
     'nothing in the panel starts an epic'
   );
+  assert.match(APP, /data-act="compose-chat"/, 'Work\'s ＋ panel cannot start a chat');
   // One write, from both controls. A copy beside the panel is what would drift: the
   // refusal handling is the feature rather than incidental to it.
   assert.match(APP, /async function setOnBoard\(btn, on\)/, 'the shared write is gone');
@@ -570,6 +579,16 @@ try {
     assert.doesNotMatch(line, /--claim|--assignee/, `the tap rewrote who is on the epic: ${line}`);
   });
 
+  await check('AND IT SAYS IT WAS THE BOARD — the label the stall sweep reads (bc-xl7n.220)', () => {
+    // Without this a board-started sub-epic is indistinguishable from a worker's dead claim,
+    // and its parent's brief reports it as a stall and prescribes the board's exact inverse.
+    // In the SAME write as the status, so there is no moment when one is true without the other.
+    const line = bdLog()
+      .split('\n')
+      .find((l) => l.startsWith('update zz-small --status in_progress'));
+    assert.match(line, / --add-label board-started(\s|$)/, `bd was asked: ${line}`);
+  });
+
   await check('AND IT IS A CARD ON THE NEXT POLL — inside the graph cache’s own minute', async () => {
     // The whole of bc-s8mc's fourth acceptance criterion. `Bd.graph` holds a workspace for
     // sixty seconds; without the refresh inside the write this assertion fails for that
@@ -602,6 +621,13 @@ try {
       .find((l) => l.startsWith('update zz-small --status open'));
     assert.ok(line, 'nothing took it off the board');
     assert.doesNotMatch(line, /--assignee/, `taking an epic off the board erased who is on it: ${line}`);
+  });
+
+  await check('and it takes the board label off in the same write', () => {
+    const line = bdLog()
+      .split('\n')
+      .find((l) => l.startsWith('update zz-small --status open'));
+    assert.match(line, / --remove-label board-started(\s|$)/, `bd was asked: ${line}`);
   });
 
   console.log('\nand every refusal is a sentence\n');

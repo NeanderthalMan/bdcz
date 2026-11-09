@@ -259,16 +259,17 @@
       // what a tap on it leaves you with — so the pill said `My Epics 46` over a tracker
       // holding three. Splitting them lets each number be what its own word says.
       side: 'any',
-      icon: '🏠',
-      label: 'Home',
-      note: 'Everything at once — questions, pull requests, chats and beads, unnarrowed.',
-      // Every group here *can* narrow Home, and only the search is offered all the same.
-      // The two sub-filters are the second axis of a pill you have not picked, and
-      // offering both of them over a list that is mostly neither would be two more pills
-      // for a view you have not picked yet.
-      // What they still do here is confessed on the line rather than dropped: see
-      // `subSaid`, and the standing `unmerged` default it exists for.
-      filters: ['bead'],
+      // `Inbox` since bc-qzng7.2: everything waiting on you, in one list. The id stays
+      // `home` so stored selections, `?kind=home` and every caller keep working.
+      icon: '📥',
+      label: 'Inbox',
+      note: 'Everything waiting on you: questions, pull requests to merge, chats and requests.',
+      // The bead search and the Kind filter. Kind is what the Questions and PRs pills
+      // were before bc-qzng7.2 folded them into Inbox: a narrowing, so a filter pill
+      // rather than a place on the view row. The two sub-filters stay on their kinds,
+      // and their defaults (asked, unmerged) are what Inbox *is*, so they are no longer
+      // confessed as a note here — see `subSaid`.
+      filters: ['bead', 'kind'],
       // A place with a create, which is not a contradiction: `compose` is about the
       // screen you are on, and `test` is about which rows are in the list. This is the
       // screen you land on, so it is also the one ＋ is drawn on by default — and what it
@@ -291,9 +292,14 @@
       // seam bc-khoe.49 opened for the board and it is now the only way this pill is ever
       // counted, rather than a branch taken on some renders and not others.
       side: 'any',
-      icon: '🎯',
-      label: 'My Efforts',
-      note: 'The efforts you have started, and the work under each one.',
+      // `Work` since bc-qzng7.3: what is moving. The efforts you have started, each with
+      // a strip saying where its beads have got to — ready, in a session, in review,
+      // merged, shipped — and your chats under them. It replaced My Efforts, Chats, the
+      // advocate console's place on the row, the PR board and Releases. The id stays
+      // `epics` so stored selections, `?kind=epics` and every caller keep working.
+      icon: '🛠️',
+      label: 'Work',
+      note: 'What is moving: your efforts and where each has got to, and your chats.',
       test: () => false,
       // **Its number is supplied, not counted** — the flag `survey` reads to keep the
       // cards out of Home's row sum. Without it a caller that passed an `epics` count
@@ -302,10 +308,11 @@
       // the id in a condition, for this table's standing reason: a second file — or a
       // second line — that knows which kind is the board is one that can be wrong about it.
       board: true,
-      // Nothing, and for the reason Chats has nothing: this screen is not a list of rows,
-      // so a search box over it would narrow a list that is not there. The board has its
-      // own two narrowings already — the space and workspace chips, applied in `p0Cards`.
-      filters: [],
+      // Not the bead search, and for the reason Chats has none: this screen is not a list
+      // of rows, so a search box over it would narrow a list that is not there. The one
+      // narrowing it has is `stage` (bc-qzng7.3), which is the PR board and Releases
+      // folded in: it swaps the board for the pull requests at one stage of the pipeline.
+      filters: ['stage'],
       // What ＋ makes is an epic *you already filed*: the board is the roots you have
       // started, so the create here is picking one of your own unstarted beads and
       // putting it on the board (bc-khoe.27.2). The candidates are the server's
@@ -338,7 +345,7 @@
       // filter the page believes it has drawn and has not (see `adopt`). The other two
       // sub-filters still cannot: a question is not a pull request and it is not one of
       // the live beads nobody is asking you about.
-      filters: ['bead', 'asked', 'qsort'],
+      filters: ['bead', 'kind', 'asked', 'qsort'],
       /**
        * Asked or held — the two jobs this pill carries, told apart. bc-iaju1.5.
        *
@@ -384,7 +391,7 @@
       test: (q) => !q.session && isPr(q),
       // The one pill with both. A pull request follows its beads — see `inBead` in
       // public/app.js — so the search narrows this list as well as the status does.
-      filters: ['bead', 'status'],
+      filters: ['bead', 'kind', 'status'],
       // The status sub-filter. `options` are read through public/prcard.js, which mirrors
       // the ladder in lib/prstage.js, so the chips cannot name a rung the daemon does not
       // put on a row. `closed` is deliberately not among them: a pull request closed
@@ -420,6 +427,11 @@
       label: 'Chats',
       note: 'Conversations you have open about what to file next. Tap one to pick it up.',
       test: (q) => Boolean(q.session),
+      // **Drawn on Work, not on Inbox** (bc-qzng7.3). A chat is a conversation you were
+      // having, not something waiting on you, so it is out of Inbox's list and out of its
+      // count; Work draws the chats under the board. Still a slice, so a chat's card can
+      // still be opened full screen by key, and `?kind=session` lands on Work — see `set`.
+      work: true,
       // **The empty list, and the reason this bead exists.** A chat is not in the
       // tracker, so it is under no bead and has no status — and `inBead` hides a row
       // that is not a bead outright rather than showing it, so a pick left over from
@@ -526,6 +538,10 @@
      * See `survey`.
      */
     counts: {},
+    /** The stage picked on Work, or `''` for the board (bc-qzng7.3). Never stored. */
+    stage: '',
+    /** Pull requests at each stage, for the Stage chips. Pushed by public/app.js. */
+    stageCounts: {},
     /** sub group id → option id → the same, one level down. */
     subCounts: {},
   };
@@ -650,7 +666,12 @@
    */
   function set(ids, { quiet = false } = {}) {
     const next = new Set(
-      (ids || []).filter((id) => BY_ID.get(id)?.test && state.usable.includes(id))
+      (ids || [])
+        // Chats is Work since bc-qzng7.3: a stored `session` selection, `?kind=session`
+        // or an old Chats link lands on Work, where the chats are drawn under the board,
+        // rather than on an Inbox narrowed to them with no pill to take it off.
+        .map((id) => (id === 'session' ? 'epics' : id))
+        .filter((id) => BY_ID.get(id)?.test && state.usable.includes(id))
     );
     const same = next.size === state.on.size && [...next].every((id) => state.on.has(id));
     state.on = next;
@@ -799,7 +820,7 @@
         screen rather than a case being special.
       */
       const rows = Object.entries(counts).reduce(
-        (n, [id, c]) => (BY_ID.get(id)?.test && !BY_ID.get(id)?.board ? n + (Number(c) || 0) : n),
+        (n, [id, c]) => (BY_ID.get(id)?.test && !BY_ID.get(id)?.board && !BY_ID.get(id)?.work ? n + (Number(c) || 0) : n),
         0
       );
       /*
@@ -901,7 +922,93 @@
       return g;
     });
 
-  const allGroups = () => [...pageGroups, ...subGroups()];
+  /**
+   * Kind — the Questions and PRs pills, as one filter pill on Inbox (bc-qzng7.2).
+   *
+   * They were view pills, but both were Inbox narrowed: same list, same address, and
+   * the badge on Home was their sum. A narrowing belongs on the filter row, where it
+   * says what it is narrowing to on its own face and a second tap on the armed chip
+   * takes it off. Chats is not a Kind: since bc-qzng7.3 chats are drawn on Work, under
+   * the board, and are not in Inbox at all (`work` on the session kind).
+   *
+   * It goes through `pick`, so a kind still widens the scope if the scope cannot fetch
+   * it, exactly as the pill did.
+   */
+  const KIND_TOKENS = ['question', 'pr'];
+  const kindGroup = {
+    id: 'kind',
+    legend: 'Kind',
+    multi: false,
+    all: 'everything',
+    options: () =>
+      KIND_TOKENS.filter((id) => BY_ID.has(id)).map((id) => ({
+        id,
+        label: BY_ID.get(id).label,
+        note: BY_ID.get(id).note,
+        count: state.counts?.[id] || 0,
+        on: state.on.has(id),
+      })),
+    pick: (id) => (state.on.has(id) ? set([]) : pick(id)),
+    narrowing: () => KIND_TOKENS.includes(current()),
+    hidden: () => !offered('kind'),
+  };
+
+  /**
+   * Stage — the PR board and Releases, as one filter pill on Work (bc-qzng7.3).
+   *
+   * Work draws efforts, and each effort's strip already says how many of its pull
+   * requests are in review or merged-not-shipped. This is the list view back when you
+   * want it: pick a stage and the board gives way to every pull request at that stage,
+   * whatever effort it belongs to. A second tap on the armed chip takes it off.
+   *
+   * Not stored: a stage is a look you take, and coming back to Work tomorrow on the
+   * pull request list instead of the board would be the board having gone missing.
+   * `of` is the PR ladder's own ids (lib/prstage.js, mirrored in public/prcard.js).
+   */
+  const STAGES = [
+    { id: 'pr', label: 'In review', note: 'Pull requests open and waiting on a merge.', of: ['review'] },
+    {
+      id: 'shipping',
+      label: 'Shipping',
+      note: 'Merged but not live yet — pushed, deploying, or waiting on a release.',
+      of: ['merged', 'pushed', 'deployed'],
+    },
+  ];
+  const STAGE_BY_ID = new Map(STAGES.map((st) => [st.id, st]));
+  const stageGroup = {
+    id: 'stage',
+    legend: 'Stage',
+    multi: false,
+    all: 'efforts',
+    options: () =>
+      STAGES.map((st) => ({
+        id: st.id,
+        label: st.label,
+        note: st.note,
+        count: state.stageCounts?.[st.id] || 0,
+        on: state.stage === st.id,
+      })),
+    pick: (id) => setStage(state.stage === id ? '' : id),
+    narrowing: () => Boolean(state.stage) && current() === 'epics',
+    hidden: () => !offered('stage'),
+  };
+
+  /** Pick a stage on Work, or `''` for the board. Paints and tells the page. */
+  function setStage(id, { quiet = false } = {}) {
+    const next = STAGE_BY_ID.has(id) ? id : '';
+    if (next === state.stage) return;
+    state.stage = next;
+    paint();
+    if (!quiet) notify();
+  }
+
+  /** Which stage a pull request row is at, as a STAGES id, or `''` for none of them. */
+  const stageOf = (q) => {
+    const rung = q?.pr?.stage || (q?.delivery ? 'review' : '');
+    return STAGES.find((st) => st.of.includes(rung))?.id || '';
+  };
+
+  const allGroups = () => [...pageGroups, kindGroup, stageGroup, ...subGroups()];
 
   /**
    * Which filter pills the lit view pill can use — its `filters`, by id (bc-khoe.3).
@@ -1006,8 +1113,11 @@
   const subSaid = (g) =>
     subOpen(g) ||
     (inView(g.parent) &&
-      (chosenSub(g.parent).size > 0 ||
-        (Boolean(subOf(g.parent)?.fallback) && (state.counts[g.parent] || 0) > 0)));
+      // A default (asked, unmerged) is not confessed on the unnarrowed Inbox any more
+      // (bc-qzng7.2): Inbox is defined as what is waiting on you, so the defaults are
+      // the definition rather than a filter you forgot you set. A choice you made is
+      // still said.
+      chosenSub(g.parent).size > 0);
 
   /** Chips and summary, never structure. Safe to call from a render loop, and a no-op
    *  before the control is drawn — `set()` runs at load, which is earlier than that. */
@@ -1162,6 +1272,14 @@
     creates: () => BY_ID.get(current())?.compose || '',
     /** Selected kind ids — empty for "all of them". */
     selected: () => [...state.on],
+    /** The stage picked on Work (bc-qzng7.3), or `''` for the board. Off any other view. */
+    stage: () => (current() === 'epics' ? state.stage : ''),
+    setStage,
+    stageOf,
+    /** Tell the Stage chips how many pull requests are at each stage. */
+    stageCounts(counts) {
+      state.stageCounts = counts && typeof counts === 'object' ? counts : {};
+    },
     /** One kind's sub-filter selection — empty for that kind's own default. */
     selectedSub: (kindId) => [...chosenSub(kindId)],
     setSub,

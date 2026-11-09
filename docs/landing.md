@@ -631,8 +631,10 @@ and union stitched the two orderings into a `package.json` that was not JSON. Bo
 are now `merge=jsonmerge`. That is a structural three-way merge (`lib/jsonmerge.js`): it
 parses base, ours and theirs, merges key by key, keeps both sides' new entries the way
 union did, honours a deletion, and turns a key both sides changed differently into
-ordinary conflict markers that name the key. The driver is per-clone git config, installed
-once with `node scripts/jsonmerge.mjs --install` (`--check` says whether it is there). It
+ordinary conflict markers that name the key. The driver is per-clone git config. The daemon
+installs it at startup (bc-xl7n.207 — it had never been installed in this clone, and that
+alone accounted for 21 conflicted merges of package-lock.json in a month), and
+`node scripts/jsonmerge.mjs --install` does the same by hand (`--check` says whether it is there). It
 always points at the main checkout's copy, so a retired worktree cannot leave it dangling.
 A clone without it, or GitHub's own update-branch, falls back to git's ordinary text
 merge. That gives a conflict to resolve, which is a question rather than a wrong answer.
@@ -641,6 +643,102 @@ merge. That gives a conflict to resolve, which is a question rather than a wrong
 This narrows what a resolver is for rather than replacing it. The conflict that is left is
 the `lib/server.js` one, where two branches really did edit the same code — which is the
 case the resolver was built for, and the only case worth a window.
+
+### Changesets — a log only the merge advocate writes
+
+Some logs put the newest entry at the top, like a repo's numbered CHANGE_LOG. Neither
+union nor a structural merge helps there. Two branches that each insert a block directly
+under the header always conflict, because git cannot order two insertions at one point.
+The numbers race as well, because each branch picks one offline. On 2026-10-31, #1107
+(Entry 271) landing made #1098 (Entries 270, 269) unmergeable, and a resolver stacked the
+blocks by hand. Only the queue sees pull requests one at a time, so only the queue can
+number them. bc-7vt6r moves the prepend to the merge advocate (`lib/changesets.js`).
+
+**A branch writes a fragment, never the log.** One new file per entry, by default
+`changelog.d/<bead-id>.md`, with a second entry from the same bead as `<bead-id>__2.md`. It
+holds the whole entry with `{{N}}` where the number goes:
+
+```markdown
+## Entry {{N}} — 2026-10-31
+
+**Status:** PENDING PROPAGATION
+**Decision:** … companion to [[Entry {{N:dv-x__2}}]].
+```
+
+`{{N:<fragment-name>}}` cites another fragment that has not landed yet. It resolves in the
+same pass, or from the fold record of one that has already landed. If it is in neither,
+the pull request is held. A guessed number is worse than none.
+
+**The advocate folds them in when it downmerges.** The tick calls this step 2a. It runs
+before the conflicted check and in place of GitHub's update-branch, for any queued branch
+that carries fragments. The advocate merges the base into the head in the object store
+(`merge-tree --write-tree`, as `lib/premerge.js` does, never touching a checkout). It reads
+the log's highest number on that merged tree, and gives each fragment the next free one,
+in natural order of fragment name, so `bc-9` comes before `bc-10`. It substitutes every
+placeholder, inserts the blocks newest-first at the configured anchor, and deletes the
+fragments. All of that is pushed to the branch as one merge commit with parents
+`[head, base]`, so the review gate reads it as a downmerge rather than new work. The tick
+ends there, and the checks run on the commit that will actually land (bc-ysqd.1).
+`trustChecksAcrossDownmerge` never skips that run, because the diff did change. Fragment
+order is by name rather than commit time because name order is a fact about the tree
+alone. The same tree always numbers the same way, which is what makes a re-run reproduce
+the same tree.
+
+**Idempotent, and it renumbers itself.** The fold deletes its fragments in the same commit
+that inserts their blocks, so the next tick finds nothing to do. A crash between the
+commit and the push leaves origin unchanged, and the re-run builds the same tree. Each fold
+commit carries a `Beadcause-Changesets:` trailer with the log's top number at fold time
+and each fragment's blob. A folded pull request that waits (red checks, a review) can see
+another pull request land the same number, and then GitHub reports it CONFLICTING. That
+is why this step runs before the resolver does. The advocate takes its own blocks back out
+of the head's log, rebuilt exactly from the trailer, restores the fragments, merges the
+base in again, and folds afresh with the next free numbers. Nobody resolves the log by
+hand. A folded block someone then edited on the branch cannot be taken back out exactly,
+so that holds with a sentence saying so.
+
+**Per repo, declared in the repo**, like `checks.json`. `.beadcause/changesets.json` is
+read off the base branch, and a repo without one behaves exactly as before:
+
+```json
+{
+  "fragments": "changelog.d/*.md",
+  "target": "CHANGE_LOG.md",
+  "heading": "^## Entry (\\d+)",
+  "anchor": "^## Pending Entries\\n\\n---\\n\\n",
+  "token": "N",
+  "separator": "\n---\n\n",
+  "pad": 3
+}
+```
+
+`heading` finds every entry number (its capture group is the number). `anchor` is the text
+the newest entry goes directly after. `separator` goes between blocks. `pad` zero-pads the
+number. `README.md` and dotfiles in the fragment directory are never fragments.
+
+**Holds, never guesses.** These hold the pull request with the reason on its merge card,
+the same as a red check:
+- a fragment that is empty, has no `{{N}}`, or does not open with the entry heading;
+- a cross-reference nothing resolves;
+- a config that will not parse;
+- a folded block edited after the fold.
+
+The pull request does not merge without its entry. A conflict inside the log during the
+fold is a beadcause bug, because the advocate owns that region. It holds the pull request
+and files a bead, once, and nobody hand-resolves it. A conflict anywhere else goes to the
+resolver as before. A head this checkout has not fetched waits a tick rather than merging
+its fragments as plain files.
+
+**Bead titles.** A repo whose tracking beads are titled `Entry NNN — …` titles one
+`Entry {{N}} — …` instead. After the push, the advocate fills in the number on the bead the
+fragment is named after, and fills it in again on a refold, using the template the
+trailer keeps. Only a title carrying the placeholder is touched. Putting a number on a
+bead that never asked for one could make a worker bead look like a tracked entry.
+
+**What stays a direct edit.** Only the prepend moves to fragments. Flipping an existing
+entry's `**Status:**` line edits a line inside an entry that has already landed. Two
+branches flipping different entries do not conflict, and git merges them on its own. Do
+not "fix" Status flips into fragments as well. `test/changesets.mjs` covers the whole flow
+against real repositories, and also how each answer is routed through the tick.
 
 ### A clean downmerge does not pay for the gate twice
 

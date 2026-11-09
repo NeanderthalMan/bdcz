@@ -421,10 +421,23 @@
       legend: 'Bead id',
       text: true,
       all: 'Any id',
-      placeholder: 'bc-nib3',
+      placeholder: 'bc-nib3, or is:open',
       value: () => filters.id,
       set: (v) => {
-        filters.id = v.trim();
+        // `is:open`, `is:closed` and `is:all` first (bc-qzng7.11) — the words that
+        // replaced the Beads pane's Open / Closed / All toggle, owned by
+        // public/viewbar.js. A token for another side goes there with the other words;
+        // `is:open` is Home, so this box empties behind you. Without viewbar.js the box
+        // takes the text as typed, and the daemon matches it as an id as it always did.
+        const t = window.beadcause?.beads?.typed?.(v);
+        if (t?.moved) {
+          if (t.side === 'open' && filters.id) {
+            filters.id = '';
+            applyFilters();
+          }
+          return;
+        }
+        filters.id = (t?.side ? t.rest : v).trim();
         // Typed, not tapped: `bc-nib3` is seven requests if every keystroke is one, and
         // the sweep behind them is only free once it is warm. The list still moves while
         // you type — just a beat behind the field rather than a beat behind every letter.
@@ -446,13 +459,6 @@
     clearTimeout(typeTimer);
     writeUrl();
     rebuild(state.scope || scopeOf(filterNow()));
-    /* The Beads pane's Open / Closed / All toggle (bc-yjekg.3) reads which of its three
-       this is off the status filter, so it has to hear about a chip tap here as well as
-       its own taps. An event rather than a call into public/viewbar.js: `replaceState`
-       fires nothing, and this file has no business knowing who draws the toggle. */
-    if (typeof dispatchEvent === 'function' && typeof CustomEvent === 'function') {
-      dispatchEvent(new CustomEvent('beadcause:ledger'));
-    }
   }
 
   /** The control the four filters are drawn in, once `build` has mounted it. */
@@ -952,15 +958,18 @@
       menu = window.beadcause.filterMenu.mount(filterHost, { groups: filterGroups });
     }
 
-    /* The status half of the Beads toggle (bc-yjekg.3): `Closed` is this list narrowed
-       to closed and `All` is it unnarrowed, so the toggle sets the one filter it is about
-       and leaves the other three where you put them. Published here rather than at load,
-       because before `readUrl` has run there is no filter to set — public/viewbar.js
-       writes the query into the hash instead, and `readUrl` above is what reads it. */
+    /* The status half of the Beads pane's sides (bc-yjekg.3, tokens since bc-qzng7.11):
+       `is:closed` is this list narrowed to closed and `is:all` is it unnarrowed, so a
+       token sets the one filter it is about and leaves priority and provenance where you
+       put them. `id` is the words typed beside the token, when there were any. Published
+       here rather than at load, because before `readUrl` has run there is no filter to
+       set — public/viewbar.js writes the query into the hash instead, and `readUrl`
+       above is what reads it. */
     window.beadcause.ledger = {
       status: () => filters.status.slice(),
-      setStatus(list) {
+      setStatus(list, carry) {
         filters.status = [...new Set((list || []).map((v) => String(v).toLowerCase()))];
+        if (carry && typeof carry.id === 'string') filters.id = carry.id.trim();
         menu?.paint?.();
         applyFilters();
       },

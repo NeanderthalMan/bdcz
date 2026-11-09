@@ -1,5 +1,12 @@
 /*
-  The selected space's settings, as a view of its own (bc-khoe.10).
+  The Settings screen (bc-qzng7.1) — which began as the selected space's settings, as a
+  view of its own (bc-khoe.10).
+
+  Since bc-qzng7.1 this pane is a grouped list of pages — This space, Advocate, Repos in
+  this space, Notifications, This machine, All settings, Reference — each at
+  `#config?p=<page>`. "The Settings screen" further down says why it is shaped that way;
+  everything from here to there is the history of the This space page, which is still
+  `spaceHtml` and still the bulk of the file.
 
   ## Why it is a page and not a chip
 
@@ -93,14 +100,6 @@
   const esc = (s) =>
     String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
-  function readOpen() {
-    try {
-      return JSON.parse(localStorage.getItem('beadcause.mon.open') || '[]');
-    } catch {
-      return [];
-    }
-  }
-
   const state = {
     /** The selected space's own configuration — see `/api/space` and `spaceHtml`. */
     space: null,
@@ -112,33 +111,10 @@
     slackDraft: null, // { space, text }
     /** Is this instance one that only watches? Off `/api/space`. */
     observing: false,
-    /* Which panels are unfolded, under the console's own key and deliberately so: these
-       are the same two panels they have always been, and somebody who left Settings open
-       on the screen this card used to be part of should find it open here. */
-    open: new Set(readOpen()),
+    /* There was an `open` set here — which of the card's two folding panels were
+       unfolded, kept under the console's `beadcause.mon.open`. The panels became pages of
+       the Settings screen (bc-qzng7.1), so there is nothing left to fold. */
   };
-
-  const isOpen = (key) => state.open.has(key);
-
-  function toggle(key) {
-    if (state.open.has(key)) state.open.delete(key);
-    else state.open.add(key);
-    localStorage.setItem('beadcause.mon.open', JSON.stringify([...state.open]));
-  }
-
-  /** A collapsible section. `count` sits in the summary so a shut panel still counts. */
-  function section(key, title, count, body, { tone = '', badge = '' } = {}) {
-    const open = isOpen(key);
-    return `<div class="mon-sec${open ? ' open' : ''}">
-      <button class="mon-sum" data-toggle="${esc(key)}" aria-expanded="${open}">
-        <span class="mon-caret" aria-hidden="true">▾</span>
-        <span class="mon-sum-title">${esc(title)}</span>
-        ${count ? `<span class="mon-n${tone ? ` ${tone}` : ''}">${esc(count)}</span>` : ''}
-        ${badge}
-      </button>
-      ${open ? `<div class="mon-body">${body}</div>` : ''}
-    </div>`;
-  }
 
   async function api(path, opts = {}) {
     const res = await fetch(path, {
@@ -372,7 +348,7 @@
    * here knowing which of the two you came to change, and a card that opened both would
    * be a screenful of controls to scroll past to reach the one you wanted.
    */
-  function spaceHtml() {
+  function spaceHtml(half = 'space') {
     const name = spaceName();
     if (!name) {
       // Not an error and not worth a card: nothing is narrowed, so there is no one
@@ -682,6 +658,14 @@
     // head off the top one was the margin an unstyled <h2> happens to bring. bc-8l74
     // took that margin away to make the head a row, so the class it should always have
     // had is here now. See `.space-card` in public/style.css.
+    /* Two pages of the Settings screen rather than two folding panels of one card
+       (bc-qzng7.1). The panels were how a card that held both kept a phone screen short;
+       a page per half does that job, and the root list is the one place both are named,
+       so neither has to be opened to be found. The head, the drift warnings and the last
+       write's sentence are on both, because both are this space and both write to it. */
+    const said = state.spaceSaid
+      ? `<div class="adv-note${state.spaceSaid.bad ? ' bad' : ''}">${esc(state.spaceSaid.text)}</div>`
+      : '';
     return `<article class="card work-card mon-card space-card">
       <div class="work-head">
         <h2>${esc(d.space)}</h2>
@@ -689,19 +673,840 @@
       </div>
       ${missing}
       ${retired}
-      ${state.spaceSaid ? `<div class="adv-note${state.spaceSaid.bad ? ' bad' : ''}">${esc(state.spaceSaid.text)}</div>` : ''}
-      ${section(`space:${d.space}:cfg`, 'Settings', '', rows)}
-      ${section(
-        `space:${d.space}:repos`,
-        // Narrowed to one repo, "each repo" is a heading over a panel with one row in
-        // it, and the reading it invites is that this space has one repo. The fold key
-        // is unchanged either way, so a panel you left open stays open across a change
-        // of picker.
-        only ? `What ${only} resolves to` : 'What each repo resolves to',
-        String(total),
-        repos
-      )}
+      ${said}
+      ${
+        half === 'repos'
+          ? // Narrowed to one repo, "each repo" is a heading over a list with one row in
+            // it, and the reading it invites is that this space has one repo.
+            `<p class="subtitle">${esc(only ? `What ${only} resolves to` : `What each of ${total} resolves to`)} — and the overrides that outrank the space for one repo.</p>${repos}`
+          : rows
+      }
     </article>`;
+  }
+
+  /* ------------------------------------------------------------ the Settings screen
+
+     bc-qzng7.1 grew this pane from one space's settings card into the app's Settings
+     screen: the one place to manage the space, its advocate, and everything else that is
+     configuration rather than work. It is a grouped list where each row opens a page of
+     its own, the way a phone's Settings is — and the pages are reached by *address*, not
+     by a tab row, because the epic's rule is that there is no second row of tabs
+     anywhere. `#config` is the list; `#config?p=advocate` is one page of it.
+
+     Why an address rather than a state variable: the back button. A row is a plain
+     `<a href="#config?p=…">`, so tapping it pushes one history entry and back walks out of
+     the page the way you walked in — on a phone that is the gesture you reach for, and a
+     page held in a variable would have sent it to whatever screen was before Settings.
+     The shell already carries a view's own query for exactly this (decision 5 in
+     public/hashroute.js), and `panes.onQuery` is how this pane hears it move.
+
+     Why these groups and in this order: widest scope you change most often first. This
+     space and its advocate are what you come here to change; this machine is about once a
+     month; reference is reading, not setting. Every page on that list that is a document
+     of its own — Admin, Foundations, the terminal, the four reference pages — is a row
+     that *links* to it rather than a copy of it: those pages keep their addresses and
+     their own scripts, and each draws a `‹ Settings` link back to the page that holds it.
+
+     Reached from the space name: the picker's first row is ⚙ Settings (public/spacebar.js).
+     The Config pill that used to reach it is gone, and so are the rows in the mark's menu
+     that reached Admin, the account and Android's notification settings — all three are
+     here now.
+  */
+
+  /** Every page of the screen. The key is the `p=` in the address. */
+  const PAGES = {
+    space: { icon: '🎛', title: 'This space' },
+    advocate: { icon: '📣', title: 'Advocate' },
+    repos: { icon: '📦', title: 'Repos in this space' },
+    notifications: { icon: '🔔', title: 'Notifications' },
+    machine: { icon: '💻', title: 'This machine' },
+    all: { icon: '🗂', title: 'All settings' },
+    reference: { icon: '📚', title: 'Reference' },
+  };
+
+  /** Which page the address names — `''` for the list itself, and for any name it does not know. */
+  function page() {
+    const q = route?.queryFor ? route.queryFor(VIEW, location.hash) : location.search.slice(1);
+    const p = new URLSearchParams(q || '').get('p') || '';
+    return Object.prototype.hasOwnProperty.call(PAGES, p) ? p : '';
+  }
+
+  /** The address of one page, or of the list for `''`. A hash in the shell; `/settings` hops to it. */
+  const pageHref = (p) => {
+    const q = p ? `p=${encodeURIComponent(p)}` : '';
+    if (route?.hashFor) return route.hashFor(VIEW, q) || '#config';
+    return `/settings${q ? `?${q}` : ''}`;
+  };
+
+  /** One row of the list: an icon, a title, a line under it saying what is there, and ›. */
+  const row = (href, icon, title, sub, attrs = '') =>
+    `<li><a class="settings-row" href="${esc(href)}"${attrs}>
+      <span class="settings-icon" aria-hidden="true">${icon}</span>
+      <span class="settings-label"><span class="settings-name">${esc(title)}</span>${
+        sub ? `<span class="settings-sub">${esc(sub)}</span>` : ''
+      }</span>
+      <span class="settings-chev" aria-hidden="true">›</span>
+    </a></li>`;
+
+  /** A row that does something here rather than going somewhere — a `<button>`, same shape. */
+  const actionRow = (icon, title, sub, attrs) =>
+    `<li><button type="button" class="settings-row"${attrs}>
+      <span class="settings-icon" aria-hidden="true">${icon}</span>
+      <span class="settings-label"><span class="settings-name">${esc(title)}</span>${
+        sub ? `<span class="settings-sub">${esc(sub)}</span>` : ''
+      }</span>
+      <span class="settings-chev" aria-hidden="true">›</span>
+    </button></li>`;
+
+  /** A row with nothing behind it — a fact about this device, stated where the row would be. */
+  const noteRow = (icon, title, sub) =>
+    `<li><div class="settings-row settings-row-note">
+      <span class="settings-icon" aria-hidden="true">${icon}</span>
+      <span class="settings-label"><span class="settings-name">${esc(title)}</span>${
+        sub ? `<span class="settings-sub">${esc(sub)}</span>` : ''
+      }</span>
+    </div></li>`;
+
+  const group = (heading, rows) =>
+    `<section class="settings-group">${heading ? `<h3>${esc(heading)}</h3>` : ''}<ul>${rows.join('')}</ul></section>`;
+
+  /** A page of its own pages: one row per page key, in the order given. */
+  const pageRow = (p, sub) => row(pageHref(p), PAGES[p].icon, PAGES[p].title, sub);
+
+  /** What the root list says under "This space" — the same three states the card's head says. */
+  function spaceSub() {
+    const name = spaceName();
+    if (!name) return 'Pick a space in the bar above';
+    const d = state.space;
+    if (state.spaceError) return 'No settings for this group';
+    if (!d || d.space !== name) return 'Reading…';
+    const q = d.effective || {};
+    return q.muted ? 'Muted' : q.quiet ? 'Quiet right now' : 'Muting, quiet hours, what merges and ships itself';
+  }
+
+  function reposSub() {
+    const d = state.space;
+    if (!spaceName()) return 'Pick a space in the bar above';
+    if (!d || !Array.isArray(d.repos)) return 'Per-repo overrides';
+    // Pinned to one repo, the page shows that one — say so rather than the space's count.
+    if (onlyRepo()) return `${onlyRepo()} · per-repo overrides`;
+    const n = d.repos.length;
+    return `${n} repo${n === 1 ? '' : 's'} · per-repo overrides`;
+  }
+
+  /** The list itself. */
+  function rootHtml() {
+    const name = spaceName();
+    const account = window.beadcause?.account;
+    return `<nav class="settings" aria-label="Settings">
+      <h2 class="settings-title">Settings</h2>
+      ${group(name ? `Space · ${name}` : 'Space', [
+        pageRow('space', spaceSub()),
+        pageRow('advocate', 'Capacity, pause, reclaim, and its full status'),
+        pageRow('repos', reposSub()),
+      ])}
+      ${group('', [pageRow('notifications', account?.nativeNotifications?.() ? 'Android channels, quiet hours, sounds' : 'Quiet hours, push detail, sounds')])}
+      ${group('', [
+        pageRow('machine', account?.who ? `Admin, Foundations, Terminal · ${account.who()}` : 'Admin, account, Foundations, Terminal'),
+        pageRow('all', 'Every config.json key'),
+      ])}
+      ${group('', [pageRow('reference', 'Flow, Requirements, Skills, Sounds')])}
+    </nav>`;
+  }
+
+  /** One page: a way back to the list, its title, and its body. */
+  const pageShell = (p, body) =>
+    `<div class="settings settings-page">
+      <a class="settings-back" href="${esc(pageHref(''))}">‹ Settings</a>
+      <h2 class="settings-title">${esc(PAGES[p].title)}</h2>
+      ${body}
+    </div>`;
+
+  function notificationsHtml() {
+    const account = window.beadcause?.account;
+    const name = spaceName();
+    return group('', [
+      account?.nativeNotifications?.()
+        ? actionRow('📱', 'Android notification settings', 'Sound and importance per channel, in the phone’s own settings', ' data-native-notify')
+        : noteRow('📱', 'Android notification channels', 'Only in the Android app — a browser has no per-channel settings to open'),
+      row(
+        pageHref('space'),
+        '🌙',
+        name ? `Muting and quiet hours for ${name}` : 'Muting and quiet hours',
+        name ? 'Mute, quiet hours, quiet days, push and Slack detail' : 'Per space — pick one in the bar above'
+      ),
+      row('/sounds', '🔊', 'Sounds', 'What each notification sounds like'),
+    ]);
+  }
+
+  function machineHtml() {
+    const account = window.beadcause?.account;
+    return group('', [
+      account?.open
+        ? actionRow('👤', 'Account', `${account.who ? account.who() : ''} · switch or add one`, ' data-account')
+        : '',
+      row('/admin', '⏸', 'Admin', 'Pause the daemon, trackers, devices, sign-in'),
+      row('/foundations', '⚖️', 'Foundations', 'What each agent kind is, and what it may do'),
+      row('/terminal', '⌨️', 'Terminal', 'A shell on this Mac'),
+    ]);
+  }
+
+  function referenceHtml() {
+    return group('', [
+      row('/flow', '🗺', 'Flow', 'The map — how a bead moves, step by step'),
+      row('/requirements', '📐', 'Requirements', 'The requirement graph and its coverage'),
+      row('/skills', '🧰', 'Skills', 'The b7e tools, their candidates, and what uses them'),
+      row('/sounds', '🔊', 'Sounds', 'Every notification sound, named'),
+    ]);
+  }
+
+  /* ------------------------------------------------------------ All settings
+
+     bc-qzng7.5: every key docs/config.md documents, grouped the way it groups them,
+     searchable by name and by description, each with its value, its default, where the
+     value comes from and a typed editor. The list is the daemon's (`GET /api/config`,
+     which reads the document), so this file knows no key by name — a key documented
+     tomorrow is drawn tomorrow with no change here.
+
+     **Secrets never arrive.** The payload carries `isSet` for `token` and `ntfy.topic`
+     and a placeholder for any credential inside an object (lib/configkeys.js), so there
+     is nothing on this page to leak; a key the browser may not write arrives with
+     `editable: false` and the reason, and is drawn with its value and that sentence.
+
+     **One write, one key.** `POST /api/config` with `{key, value}` or `{key, reset}` —
+     the server validates against the same spec the page was drawn from and edits one path
+     of the stored file, which is what makes a change here and a change in the file the
+     same change. After it, the catalogue is fetched again rather than patched, because
+     the reply that matters (the file's new value, the restart list, the log line) is the
+     server's. Every write is in the log at the foot of the page, with Revert.
+
+     Each key is a `<details>`: closed, it is one line — the key, its value, and a badge
+     if it waits for a restart. Which are open, and what is half-typed into an editor, are
+     held in `state` rather than read back from the DOM, because every press repaints the
+     pane (the slack channel field above makes the same choice for the same reason). The
+     search box does not repaint: it hides rows in place, so the keyboard stays up. */
+  Object.assign(state, {
+    /** `/api/config`, read only while All settings is up. */
+    all: null,
+    allError: null,
+    allQuery: '',
+    /** Keys whose row is unfolded. */
+    allOpen: new Set(),
+    /** What is typed into an editor and not yet saved, by key. */
+    allDrafts: new Map(),
+    /** What the last press on one key said, by key — and `''` for the page itself. */
+    allSaid: new Map(),
+  });
+
+  async function loadAll() {
+    try {
+      state.all = await api('/api/config');
+      state.allError = null;
+      state.observing = state.observing || Boolean(state.all?.observing);
+    } catch (err) {
+      state.allError = err.message;
+    }
+  }
+
+  /** A value in a line: JSON for structures, cut short; the word for the empty cases. */
+  function cfgShow(v, max = 80) {
+    if (v === undefined) return 'unset';
+    const s = typeof v === 'string' ? v : JSON.stringify(v);
+    return s.length > max ? `${s.slice(0, max - 1)}…` : s;
+  }
+
+  /** The document's markdown, as far as a description uses it: code, bold, links as their text. */
+  function cfgProse(md) {
+    return esc(md)
+      .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+      .replace(/`([^`]+)`/g, '<code>$1</code>')
+      .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
+      .replace(/\*([^*]+)\*/g, '<i>$1</i>');
+  }
+
+  /** What an editor starts holding: the draft, else the value as that editor spells it. */
+  function cfgDraft(k) {
+    if (state.allDrafts.has(k.key)) return state.allDrafts.get(k.key);
+    if (k.type === 'json') return JSON.stringify(k.value === undefined ? null : k.value, null, 2);
+    if (k.value === null || k.value === undefined) return k.type === 'boolean' || k.type === 'enum' ? 'null' : '';
+    return String(k.value);
+  }
+
+  /** The editor for one key, by type. Every one carries `data-cfg-input` and its key. */
+  function cfgEditor(k) {
+    const attr = `data-cfg-input="${esc(k.key)}"`;
+    const v = cfgDraft(k);
+    const opt = (val, label) => `<option value="${esc(val)}"${v === val ? ' selected' : ''}>${esc(label)}</option>`;
+    const nullOpt = k.nullable ? opt('null', 'null') : '';
+    if (k.type === 'boolean') return `<select class="cfg-in" ${attr}>${opt('true', 'true')}${opt('false', 'false')}${nullOpt}</select>`;
+    if (k.type === 'enum') return `<select class="cfg-in" ${attr}>${(k.options || []).map((o) => opt(o, o)).join('')}${nullOpt}</select>`;
+    if (k.type === 'number') {
+      const bounds = `${Number.isFinite(k.min) ? ` min="${k.min}"` : ''}${Number.isFinite(k.max) ? ` max="${k.max}"` : ''}`;
+      return `<input class="cfg-in" type="number" inputmode="decimal" step="${k.integer ? 1 : 'any'}"${bounds} ${attr} value="${esc(v)}">`;
+    }
+    if (k.type === 'json') return `<textarea class="cfg-in cfg-json" rows="${Math.min(12, Math.max(2, v.split('\n').length))}" spellcheck="false" ${attr}>${esc(v)}</textarea>`;
+    return `<input class="cfg-in" type="text" autocomplete="off" spellcheck="false" ${attr} value="${esc(v)}"${k.nullable ? ' placeholder="empty is null"' : ''}>`;
+  }
+
+  /** The editor's text as the value the server is sent, or a throw with what is wrong. */
+  function cfgParse(k, text) {
+    if ((k.type === 'boolean' || k.type === 'enum') && text === 'null') return null;
+    if (k.type === 'boolean') return text === 'true';
+    if (k.type === 'enum') return text;
+    if (k.type === 'number') {
+      if (text.trim() === '' && k.nullable) return null;
+      const n = Number(text);
+      if (text.trim() === '' || !Number.isFinite(n)) throw new Error('Type a number.');
+      return n;
+    }
+    if (k.type === 'json') {
+      try {
+        return JSON.parse(text);
+      } catch (err) {
+        throw new Error(`Not valid JSON — ${err.message}`);
+      }
+    }
+    return text === '' && k.nullable ? null : text;
+  }
+
+  /** The bounds, said: "1–36", "at least 60", "". */
+  function cfgBounds(k) {
+    const lo = Number.isFinite(k.min) ? k.min : null;
+    const hi = Number.isFinite(k.max) ? k.max : null;
+    if (lo !== null && hi !== null) return `${lo}–${hi}`;
+    if (lo !== null && lo > 0) return `at least ${lo}`;
+    if (hi !== null) return `at most ${hi}`;
+    return '';
+  }
+
+  /** Where the value comes from — the file or the default, and who outranks it. */
+  function cfgSource(k) {
+    const out = [];
+    if (k.type === 'secret') out.push(k.isSet ? 'Set.' : 'Not set.');
+    else if (k.inFile === false) out.push(k.hasDefault ? 'Not in the file — the default applies.' : 'Not in the file.');
+    else if (k.inFile) out.push(k.isDefault ? 'In the file, at the default.' : 'Set in the file.');
+    if (k.fileValue !== undefined) {
+      out.push(`The file says <code>${esc(cfgShow(k.fileValue))}</code>; the running daemon still has the value above — restart to apply it.`);
+    }
+    for (const o of k.overrides || []) {
+      out.push(`${o.scope === 'space' ? 'Space' : 'Repo'} <b>${esc(o.name)}</b> overrides it: <code>${esc(cfgShow(o.value))}</code>.`);
+    }
+    return out.map((s) => `<div>${s}</div>`).join('');
+  }
+
+  /** For a per-workspace map: what each repo resolves to, and from which level. */
+  function cfgPerWorkspace(k) {
+    if (!k.perWorkspace?.length) return '';
+    const from = { workspace: 'this repo', space: 'its space', global: 'the global' };
+    return `<table class="cfg-pw"><tbody>${k.perWorkspace
+      .map((r) => `<tr><td>${esc(r.workspace)}</td><td><code>${esc(String(r.value))}</code></td><td>from ${esc(from[r.from] || r.from)}${r.from === 'space' && r.space ? ` (${esc(r.space)})` : ''}</td></tr>`)
+      .join('')}</tbody></table>`;
+  }
+
+  /** Does this key match what is typed into the search box? Name and description both. */
+  const cfgMatches = (k, q) => !q || `${k.key} ${k.description || ''}`.toLowerCase().includes(q);
+
+  function cfgRow(k) {
+    const q = state.allQuery.trim().toLowerCase();
+    const said = state.allSaid.get(k.key);
+    const value = k.type === 'secret' ? (k.isSet ? 'set' : 'not set') : cfgShow(k.value, 48);
+    const badges = [
+      k.restart ? '<span class="cfg-badge" title="Takes effect after a daemon restart">↻ restart</span>' : '',
+      k.editable ? '' : '<span class="cfg-badge" title="Changed in the file on the Mac">file only</span>',
+      k.inFile === false || k.isDefault ? '' : '<span class="cfg-badge cfg-set">set</span>',
+    ].join('');
+    const bounds = cfgBounds(k);
+    const controls = k.editable
+      ? `<div class="cfg-edit">
+          ${cfgEditor(k)}
+          <div class="space-btns">
+            <button class="adv-btn primary" data-cfg-save="${esc(k.key)}">Save</button>
+            ${k.inFile ? `<button class="adv-btn" data-cfg-reset="${esc(k.key)}" title="Take it out of the file, so the default applies">Reset to default</button>` : ''}
+          </div>
+        </div>`
+      : `<p class="cfg-why">${esc(k.why || 'Changed in the file on the Mac.')}</p>`;
+    return `<details class="cfg-key" data-cfg-key="${esc(k.key)}"${state.allOpen.has(k.key) ? ' open' : ''}${cfgMatches(k, q) ? '' : ' hidden'}>
+      <summary><code class="cfg-name">${esc(k.key)}</code><span class="cfg-val">${esc(value)}</span>${badges}</summary>
+      <div class="cfg-body">
+        <p class="cfg-desc">${cfgProse(k.description || '')}</p>
+        <dl class="cfg-facts">
+          ${k.type === 'secret' ? '' : `<div><dt>Value</dt><dd><code>${esc(cfgShow(k.value, 400))}</code></dd></div>`}
+          ${k.type === 'secret' || !k.hasDefault ? '' : `<div><dt>Default</dt><dd><code>${esc(cfgShow(k.default, 400))}</code></dd></div>`}
+          <div><dt>Type</dt><dd>${esc(k.type)}${bounds ? ` · ${esc(bounds)}` : ''}${k.options ? ` · ${esc(k.options.join(' | '))}` : ''}</dd></div>
+          <div><dt>Source</dt><dd>${cfgSource(k)}</dd></div>
+          <div><dt>Takes effect</dt><dd>${k.restart ? 'after a daemon restart' : 'now, on the running daemon'}</dd></div>
+        </dl>
+        ${cfgPerWorkspace(k)}
+        ${controls}
+        ${said ? `<div class="adv-note${said.bad ? ' bad' : ''}">${esc(said.text)}</div>` : ''}
+      </div>
+    </details>`;
+  }
+
+  /** One line of the log: when, who, old → new, and Revert. */
+  function cfgLogRow(e) {
+    const side = (s) => (s?.set ? cfgShow(s.value, 40) : 'default');
+    const when = new Date(e.at);
+    const at = Number.isNaN(when.getTime()) ? e.at : when.toLocaleString();
+    return `<li class="cfg-log-row">
+      <div><code>${esc(e.key)}</code> <span class="cfg-log-change">${esc(side(e.old))} → ${esc(side(e.new))}</span></div>
+      <div class="cfg-log-meta">${esc(at)} · ${esc(e.who || 'a paired device')}${e.revertOf ? ' · a revert' : ''}
+        <button class="adv-btn" data-cfg-revert="${esc(e.id)}" title="Put back ${esc(side(e.old))}">Revert</button></div>
+    </li>`;
+  }
+
+  function allHtml() {
+    if (state.allError && !state.all) return `<p class="subtitle">${esc(state.allError)}</p>`;
+    const d = state.all;
+    if (!d) return '<p class="subtitle space-none">Reading the settings…</p>';
+    const q = state.allQuery.trim().toLowerCase();
+    const pageSaid = state.allSaid.get('');
+    const pending = d.restartPending || [];
+    const restart = pending.length
+      ? `<div class="adv-note cfg-restart">Changed since the daemon started, and waiting for a restart: ${pending
+          .map((k) => `<code>${esc(k)}</code>`)
+          .join(', ')}.
+          <button class="adv-btn primary" data-cfg-restart>Restart the daemon</button></div>`
+      : '';
+    const groups = (d.groups || [])
+      .map((g) => {
+        const shown = g.keys.some((k) => cfgMatches(k, q));
+        return `<section class="settings-group cfg-group" data-cfg-group${shown ? '' : ' hidden'}>
+          <h3>${esc(g.name)} <span class="cfg-count">${g.keys.length}</span></h3>
+          ${g.keys.map(cfgRow).join('')}
+        </section>`;
+      })
+      .join('');
+    const log = d.log?.length
+      ? `<section class="settings-group cfg-log"><h3>Changes made from here</h3><ul>${d.log.map(cfgLogRow).join('')}</ul></section>`
+      : '';
+    const total = (d.groups || []).reduce((n, g) => n + g.keys.length, 0);
+    return `${pageSaid ? `<div class="adv-note${pageSaid.bad ? ' bad' : ''}">${esc(pageSaid.text)}</div>` : ''}
+      ${restart}
+      <p class="subtitle">${total} keys in <code>${esc(d.path || 'config.json')}</code>, as docs/config.md documents them.
+      Secrets show only whether they are set.</p>
+      <input class="cfg-search" type="search" id="cfg-search" placeholder="Search keys and descriptions" autocomplete="off" value="${esc(state.allQuery)}">
+      ${groups}
+      ${log}
+      <p class="subtitle cfg-foot">Not every key waits for a restart, and not every reader re-reads on each use —
+      if a change does not show, <button class="adv-btn" data-cfg-restart>Restart the daemon</button></p>`;
+  }
+
+  /** Hide what the search does not match, in place — no repaint, so the keyboard stays up. */
+  function allFilter() {
+    const q = state.allQuery.trim().toLowerCase();
+    const keys = new Map();
+    for (const g of state.all?.groups || []) for (const k of g.keys) keys.set(k.key, k);
+    for (const sec of out.querySelectorAll('[data-cfg-group]')) {
+      let any = false;
+      for (const row of sec.querySelectorAll('[data-cfg-key]')) {
+        const k = keys.get(row.dataset.cfgKey);
+        const hit = Boolean(k && cfgMatches(k, q));
+        row.hidden = !hit;
+        any = any || hit;
+      }
+      sec.hidden = !any;
+    }
+  }
+
+  const allKey = (key) => (state.all?.groups || []).flatMap((g) => g.keys).find((k) => k.key === key) || null;
+
+  /** One write: a key's new value, a reset, a revert, or the restart. */
+  async function allWrite(body, sayOn, btn) {
+    const was = btn?.textContent;
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = '…';
+    }
+    try {
+      const r = await api('/api/config', { method: 'POST', body: JSON.stringify(body) });
+      if (body.action === 'restart') {
+        state.allSaid.set('', { text: 'Restarting — this page answers again once the daemon is back. Press ⟳ then.' });
+        render();
+        return;
+      }
+      if (body.key) state.allDrafts.delete(body.key);
+      state.allSaid.set(sayOn, {
+        text: !r.changed ? 'Nothing to change — it already says that.' : r.restart ? 'Saved. It takes effect after a restart.' : 'Saved, and applied to the running daemon.',
+      });
+      await loadAll();
+    } catch (err) {
+      state.allSaid.set(sayOn, { text: err.message, bad: true });
+      if (btn) {
+        btn.textContent = was;
+        btn.disabled = false;
+      }
+    }
+    render();
+  }
+
+  /** The All settings page's presses. True when one was handled. */
+  function allClick(e) {
+    const summary = e.target.closest('[data-cfg-key] > summary');
+    if (summary) {
+      // Not prevented: the browser opens the details, and this only remembers it did.
+      const key = summary.parentElement.dataset.cfgKey;
+      if (state.allOpen.has(key)) state.allOpen.delete(key);
+      else state.allOpen.add(key);
+      return true;
+    }
+    const save = e.target.closest('[data-cfg-save]');
+    if (save) {
+      e.preventDefault();
+      const key = save.dataset.cfgSave;
+      const k = allKey(key);
+      if (!k) return true;
+      const input = out.querySelector(`[data-cfg-input="${key}"]`);
+      const text = state.allDrafts.has(key) ? state.allDrafts.get(key) : input ? input.value : cfgDraft(k);
+      let value;
+      try {
+        value = cfgParse(k, text);
+      } catch (err) {
+        state.allSaid.set(key, { text: err.message, bad: true });
+        render();
+        return true;
+      }
+      allWrite({ key, value }, key, save);
+      return true;
+    }
+    const reset = e.target.closest('[data-cfg-reset]');
+    if (reset) {
+      e.preventDefault();
+      allWrite({ key: reset.dataset.cfgReset, reset: true }, reset.dataset.cfgReset, reset);
+      return true;
+    }
+    const revert = e.target.closest('[data-cfg-revert]');
+    if (revert) {
+      e.preventDefault();
+      allWrite({ revert: revert.dataset.cfgRevert }, '', revert);
+      return true;
+    }
+    const restart = e.target.closest('[data-cfg-restart]');
+    if (restart) {
+      e.preventDefault();
+      if (typeof confirm === 'function' && !confirm('Restart the beadcause daemon? Every open page loses it for a few seconds.')) return true;
+      allWrite({ action: 'restart' }, '', restart);
+      return true;
+    }
+    return false;
+  }
+
+  /** Typing: the search filters in place; an editor's text is held as a draft. */
+  function allInput(e) {
+    if (e.target.closest('#cfg-search')) {
+      state.allQuery = e.target.value;
+      allFilter();
+      return true;
+    }
+    const input = e.target.closest('[data-cfg-input]');
+    if (input) {
+      state.allDrafts.set(input.dataset.cfgInput, input.value);
+      return true;
+    }
+    return false;
+  }
+
+  /* ---------------------------------------------------------- the advocate's page
+
+     Everything on the Advocates view that *changes* what an advocate does — capacity,
+     Pause, Reclaim sessions, Forget attempts, Turn off — and its full status: the counts
+     and the launchd and build lines. The same endpoint (`POST /api/advocate`) and the
+     same actions as public/monitor.js, so a press here is the press there. What stays on
+     the Advocates view is what is *happening*: the sessions each one has open, the
+     epics, the held beads one by one. Phase 3 (bc-qzng7.3) folds that view into Work and
+     takes these controls off it; until then they are on both, deliberately, because
+     taking them off the console before Work exists would leave the console unable to
+     answer the thing it shows you.
+
+     Its own copy of the stepper rather than a call into the console's, because the two
+     files are separate views with separate state and the console's is not exported —
+     the hold-until-Apply behaviour is the part worth copying exactly, and it is.
+  */
+
+  /** The global stepper's key; a repo's is `ws:<name>`, as on the console. */
+  const GLOBAL_STEP = 'global';
+  const stepWs = (key) => (key === GLOBAL_STEP ? undefined : key.slice(3));
+  const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+  Object.assign(state, {
+    /** `/api/work`, read only while the Advocate page is up. */
+    work: null,
+    workError: null,
+    /** What the last press on this page said. */
+    advSaid: null,
+    /** Stepped but not yet applied, by stepper key. */
+    pendingLimits: new Map(),
+    applyingLimits: new Set(),
+    limitErrors: new Map(),
+  });
+
+  async function loadWork() {
+    try {
+      state.work = await api('/api/work');
+      state.workError = null;
+      state.observing = state.observing || Boolean(state.work?.observing);
+    } catch (err) {
+      state.workError = err.message;
+    }
+  }
+
+  function liveLimit(key) {
+    if (key === GLOBAL_STEP) return state.work?.globals?.maxWorkers ?? null;
+    return (state.work?.advocates || []).find((a) => a.workspace === stepWs(key))?.limit ?? null;
+  }
+
+  /** `−  3  +  Apply`, held until Apply — the console's `limitControl`, same markup. */
+  function stepper(key, live, ceiling, title) {
+    const want = state.pendingLimits.has(key) ? state.pendingLimits.get(key) : live;
+    const busy = state.applyingLimits.has(key);
+    const moved = want !== live;
+    const step = (delta, label, atEnd) =>
+      `<button class="adv-btn adv-step" data-step="${esc(key)}" data-value="${want + delta}" data-ceiling="${ceiling}"${
+        atEnd || busy ? ' disabled' : ''
+      }>${label}</button>`;
+    return `<span class="adv-limit${moved ? ' pending' : ''}" title="${esc(title)}">
+      ${step(-1, '−', want <= 1)}<b>${want}</b>${step(1, '+', want >= ceiling)}
+      ${
+        moved
+          ? `<button class="adv-btn adv-apply primary" data-apply="${esc(key)}"${busy ? ' disabled' : ''}>${busy ? '…' : 'Apply'}</button>`
+          : ''
+      }
+    </span>${state.limitErrors.has(key) ? `<div class="adv-note bad">${esc(state.limitErrors.get(key))}</div>` : ''}`;
+  }
+
+  /** The advocate's state in a few words — the console's `stateOf`, without the epic detail. */
+  function advState(a) {
+    const coders = (a.workers || []).filter((w) => !w.planning).length;
+    if (a.draining) return { text: 'switched off', tone: 'held' };
+    if (a.error) return { text: `cannot read the tracker — ${a.error}`, tone: 'bad' };
+    if (a.paused) return { text: `paused · ${plural(a.queue || 0, 'bead')} ready`, tone: 'held' };
+    if (a.quiet) return { text: 'quiet hours · watching, not launching', tone: 'held' };
+    if (coders) return { text: `${coders} of ${plural(a.limit, 'session')}`, tone: 'live' };
+    if (a.queue) return { text: `${plural(a.queue, 'bead')} ready, none picked up`, tone: 'warn' };
+    return { text: 'clear — no ready beads', tone: '' };
+  }
+
+  /** The counts, every one — the eleven that leave the Work view in phase 3 land here. */
+  function advCounts(w, a) {
+    const c = w?.counts || {};
+    const len = (k) => (a && Array.isArray(a[k]) ? a[k].length : 0);
+    const rows = [
+      ['open', c.open],
+      ['ready', c.ready],
+      ['held for endorsement', c.held],
+      ['in progress', c.inProgress],
+      ['blocked', c.blocked],
+      ['for the advocate', a?.queue],
+      ['below the priority floor', a?.deferredByPriority],
+      ['waiting on their children', len('heldByChildren')],
+      ['waiting on a decision', len('heldByUndecided')],
+      ['given up on', len('givenUp')],
+      ['closed', c.closed],
+    ].filter(([, n]) => typeof n === 'number');
+    if (!rows.length) return '';
+    return `<dl class="settings-counts">${rows
+      .map(([what, n]) => `<div${n ? '' : ' class="dim"'}><dt>${esc(what)}</dt><dd>${n}</dd></div>`)
+      .join('')}</dl>`;
+  }
+
+  /** One repo's advocate: its state, every control, its counts. */
+  function advCard(name, w, a, r) {
+    if (!a) {
+      const sw = !r ? '' : r.can
+        ? `<button class="adv-btn primary" data-adv="enable" data-ws="${esc(name)}" title="Give this repo an advocate: it watches the ready queue and opens a Claude session on this Mac for each bead it picks up, without asking.">Turn on</button>`
+        : `<span class="adv-why">${esc(r.why)}</span>`;
+      return `<article class="card work-card mon-card plain">
+        <div class="work-head"><h2>${esc(name)}</h2><span class="mon-state dim">no advocate</span></div>
+        ${sw ? `<div class="space-btns">${sw}</div>` : ''}
+        ${advCounts(w, null)}
+      </article>`;
+    }
+    const st = advState(a);
+    const gaveUp = a.givenUp || [];
+    const sessions = w?.sessions || [];
+    const turnOff = !r ? '' : r.can
+      ? `<button class="adv-btn" data-adv="disable" data-ws="${esc(name)}" title="Take this advocate away. Nothing new is launched; the sessions it has already opened are left to finish.">Turn off</button>`
+      : `<span class="adv-why">${esc(r.why)}</span>`;
+    const controls = a.draining
+      ? [r?.can ? `<button class="adv-btn primary" data-adv="enable" data-ws="${esc(name)}">Turn on</button>` : '']
+      : [
+          stepper(
+            `ws:${name}`,
+            a.limit,
+            a.ceiling || 9,
+            a.globalHeld
+              ? `${a.limit} sessions at once — but the Mac-wide cap is ${a.globalMax}, so this repo will not get more than that`
+              : 'How many sessions this advocate may open at once — one iTerm window each, on this Mac'
+          ),
+          `<button class="adv-btn" data-adv="${a.paused ? 'resume' : 'pause'}" data-ws="${esc(name)}">${a.paused ? 'Resume' : 'Pause'}</button>`,
+          (a.workers || []).length || sessions.length
+            ? `<button class="adv-btn" data-adv="reclaim" data-ws="${esc(name)}" title="Ask each open session whether it is still working. Windows that have gone give their slots back.">Reclaim sessions</button>`
+            : '',
+          `<button class="adv-btn" data-adv="forget" data-ws="${esc(name)}" title="${esc(
+            gaveUp.length
+              ? `Clear attempt counters so beads it gave up on are eligible again:\n${gaveUp.map((h) => `${h.id} — ${h.title || 'untitled'} (${h.attempts})`).join('\n')}`
+              : 'Clear attempt counters so beads it gave up on are eligible again. It has not given up on anything.'
+          )}">Forget attempts${gaveUp.length ? ` (${gaveUp.length})` : ''}</button>`,
+          turnOff,
+        ];
+    return `<article class="card work-card mon-card">
+      <div class="work-head"><h2>${esc(name)}</h2><span class="mon-state ${st.tone}">${esc(st.text)}</span></div>
+      <div class="space-btns adv-controls">${controls.filter(Boolean).join('')}</div>
+      ${advCounts(w, a)}
+    </article>`;
+  }
+
+  /** launchd and the build — plumbing, behind details unless one of them is wrong. */
+  function plumbingHtml(data) {
+    const svc = data.service;
+    const rt = data.router;
+    if (!svc && !rt) return '';
+    const line = (ok, text) => `<div class="svc ${ok ? 'ok' : 'bad'}"><span class="svc-dot">${ok ? '✓' : '⚠'}</span><span>${text}</span></div>`;
+    const lines = [
+      svc
+        ? svc.ok
+          ? line(true, `launchd runs <code>${esc(svc.label || svc.program || 'nothing')}</code> — hot-swap live`)
+          : line(false, `HOT-SWAP IS NOT LIVE — ${esc(svc.detail || svc.code || '')}${svc.fix ? ` · fix it: <code>${esc(svc.fix)}</code>` : ''}`)
+        : '',
+      rt
+        ? rt.ok
+          ? line(true, `serving build <code>${esc(rt.build || '?')}</code>${rt.pid ? ` from pid ${esc(rt.pid)}` : ''}`)
+          : line(false, `${esc(rt.summary || rt.code || 'the build is not current')}${rt.fix ? ` · <code>${esc(rt.fix)}</code>` : ''}`)
+        : '',
+    ].join('');
+    const bad = (svc && !svc.ok) || (rt && !rt.ok);
+    return `<details class="settings-details"${bad ? ' open' : ''}><summary>Details — launchd and the build</summary>${lines}</details>`;
+  }
+
+  function advocateHtml() {
+    if (state.workError && !state.work) return `<p class="subtitle">${esc(state.workError)}</p>`;
+    const data = state.work;
+    if (!data) return '<p class="subtitle space-none">Reading the advocates…</p>';
+    const inSpace = (ws) => window.beadcause?.space?.matches?.(ws) ?? true;
+    const advs = new Map((data.advocates || []).filter((a) => inSpace(a.workspace)).map((a) => [a.workspace, a]));
+    const works = new Map((data.workspaces || []).map((w) => [w.name, w]));
+    const roster = new Map((data.roster || []).map((r) => [r.workspace, r]));
+    const names = [...new Set([...(data.workspaces || []).map((w) => w.name).filter(inSpace), ...advs.keys()])];
+    // Advocated repos first, the way the console orders them: those are what you came to change.
+    names.sort((x, y) => Number(advs.has(y)) - Number(advs.has(x)) || x.localeCompare(y));
+    const g = data.globals;
+    const global = g
+      ? `<div class="svc ok svc-set"><span class="svc-dot">⚙</span><span><b>${g.live + (g.resolvers || 0)}</b> of ${plural(
+          g.maxWorkers,
+          'session'
+        )} open across every advocate on this Mac</span>${stepper(
+          GLOBAL_STEP,
+          g.maxWorkers,
+          g.ceiling || 36,
+          'The total across every advocate on this Mac, whatever any one repo’s own limit says'
+        )}</div>`
+      : '';
+    return `${state.advSaid ? `<div class="adv-note${state.advSaid.bad ? ' bad' : ''}">${esc(state.advSaid.text)}</div>` : ''}
+      ${global}
+      ${names.map((n) => advCard(n, works.get(n), advs.get(n), roster.get(n))).join('') || '<p class="subtitle">No repo in this space.</p>'}
+      ${plumbingHtml(data)}
+      <p class="subtitle">The sessions each advocate has open, its epics and its held beads are on the
+      <a href="${esc(route?.hashFor ? route.hashFor('advocates') || '/monitor' : '/monitor')}">Advocates</a> view.</p>`;
+  }
+
+  /** A press on one of the advocate's buttons — the console's `control`. */
+  async function advControl(ws, action, btn) {
+    const was = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '…';
+    try {
+      await api('/api/advocate', { method: 'POST', body: JSON.stringify({ workspace: ws, action }) });
+      state.advSaid = null;
+      await loadWork();
+    } catch (err) {
+      btn.textContent = was;
+      btn.disabled = false;
+      state.advSaid = { text: `${ws}: ${err.message}`, bad: true };
+    }
+    render();
+  }
+
+  function stepLimit(key, want, ceiling) {
+    if (state.applyingLimits.has(key)) return;
+    const live = liveLimit(key);
+    const next = Math.max(1, Math.min(Number(want) || 1, Number.isFinite(ceiling) ? ceiling : Infinity));
+    if (live != null && next === live) state.pendingLimits.delete(key);
+    else state.pendingLimits.set(key, next);
+    state.limitErrors.delete(key);
+    render();
+  }
+
+  async function applyLimit(key) {
+    const want = state.pendingLimits.get(key);
+    if (want == null || state.applyingLimits.has(key)) return;
+    state.applyingLimits.add(key);
+    state.limitErrors.delete(key);
+    render();
+    try {
+      await api('/api/advocate', {
+        method: 'POST',
+        body: JSON.stringify({ workspace: stepWs(key), action: key === GLOBAL_STEP ? 'globalLimit' : 'limit', value: Number(want) }),
+      });
+      state.pendingLimits.delete(key);
+      await loadWork();
+    } catch (err) {
+      state.limitErrors.set(key, err.message);
+    }
+    state.applyingLimits.delete(key);
+    render();
+  }
+
+  /** The Settings screen's own presses. True when one was handled. */
+  function advClick(e) {
+    const step = e.target.closest('[data-step]');
+    if (step) {
+      e.preventDefault();
+      stepLimit(step.dataset.step, Number(step.dataset.value), Number(step.dataset.ceiling));
+      return true;
+    }
+    const apply = e.target.closest('[data-apply]');
+    if (apply) {
+      e.preventDefault();
+      applyLimit(apply.dataset.apply);
+      return true;
+    }
+    const adv = e.target.closest('[data-adv]');
+    if (adv) {
+      e.preventDefault();
+      advControl(adv.dataset.ws, adv.dataset.adv, adv);
+      return true;
+    }
+    if (e.target.closest('[data-account]')) {
+      e.preventDefault();
+      window.beadcause?.account?.open?.();
+      return true;
+    }
+    if (e.target.closest('[data-native-notify]')) {
+      e.preventDefault();
+      window.beadcause?.account?.openNotifications?.();
+      return true;
+    }
+    return false;
+  }
+
+  /** Whatever the address names: the list, or one page of it. */
+  function pageHtml(p) {
+    if (!p) return rootHtml();
+    const body =
+      p === 'space'
+        ? spaceHtml('space')
+        : p === 'repos'
+          ? spaceHtml('repos')
+          : p === 'advocate'
+            ? advocateHtml()
+            : p === 'notifications'
+              ? notificationsHtml()
+              : p === 'machine'
+                ? machineHtml()
+                : p === 'all'
+                  ? allHtml()
+                  : referenceHtml();
+    return pageShell(p, body);
   }
 
   /* ------------------------------------------------------------------- render */
@@ -715,7 +1520,7 @@
    */
   function render() {
     if (!out) return;
-    out.innerHTML = spaceHtml();
+    out.innerHTML = pageHtml(page());
     // Which daemon am I looking at? Two consoles side by side are otherwise identical,
     // and the one that acts is not the one you have been pressing. `hidden` rather than
     // absent text: the live instance must show nothing at all, so a badge that failed to
@@ -732,7 +1537,7 @@
     // belongs to. The server refuses the write either way (see `POST /api/space`); this
     // is so the refusal is not something you find out by pressing.
     for (const el of out.querySelectorAll(
-      '[data-space-set],[data-repo-set],[data-space-day],[data-space-hours],[data-space-channel],#qh-from,#qh-to,#slack-channel'
+      '[data-space-set],[data-repo-set],[data-space-day],[data-space-hours],[data-space-channel],#qh-from,#qh-to,#slack-channel,[data-adv],[data-step],[data-apply],[data-cfg-save],[data-cfg-reset],[data-cfg-revert],[data-cfg-restart],[data-cfg-input]'
     )) {
       el.disabled = true;
       el.title = 'This instance only watches — the settings belong to the daemon that acts.';
@@ -778,9 +1583,16 @@
     }
   }
 
-  /** The one fetch this page makes. */
+  /**
+   * What the page on screen needs, and nothing else.
+   *
+   * `/api/space` on every page — it is a read of the daemon's config object, it is what
+   * the root list's subtitles come from, and it carries `observing`. `/api/work` only on
+   * the Advocate page, because it is two `bd` calls per workspace and the other six
+   * pages draw nothing from it.
+   */
   async function load() {
-    await loadSpace();
+    await Promise.all([loadSpace(), page() === 'advocate' ? loadWork() : null, page() === 'all' ? loadAll() : null]);
     render();
   }
 
@@ -925,11 +1737,8 @@
       return;
     }
 
-    const sum = e.target.closest('[data-toggle]');
-    if (sum) {
-      toggle(sum.dataset.toggle);
-      render();
-    }
+    if (allClick(e)) return;
+    advClick(e);
   };
 
   /* The one field on this page you type into, and it is held in `state` rather than read
@@ -937,6 +1746,7 @@
      pressed after a Mute would otherwise find the input rebuilt and the id gone. The
      limit steppers on the console get the same treatment for the same reason. */
   const onInput = (e) => {
+    if (allInput(e)) return;
     if (!e.target.closest('#slack-channel')) return;
     state.slackDraft = { space: spaceName(), text: e.target.value };
   };
@@ -990,11 +1800,29 @@
        The picker's *fine* level matters here too and costs nothing — `onlyRepo`
        narrows the repo panel to the one repo you pinned, which is a repaint with no
        fetch involved. */
+    /* A row of the root list is a plain link to `#config?p=…`, so the back button walks
+       out of a page the way it walked in. The shell tells this pane when its query moved
+       under it — a row, a back, a deep link — and that is a different page to draw and,
+       for the Advocate page, a fetch. The first one is read directly in `page()`. */
+    panes?.onQuery?.((view) => {
+      if (view !== VIEW) return;
+      state.spaceSaid = null;
+      state.advSaid = null;
+      render();
+      if (page() === 'advocate') loadWork().then(render);
+      if (page() === 'all') loadAll().then(render);
+    });
+    /* The account row's words arrive after the first paint, off `/api/accounts`. Only the
+       root and This machine draw them, so only those repaint. */
+    window.beadcause?.account?.onChange?.(() => {
+      if (!page() || page() === 'machine') render();
+    });
+
     window.beadcause?.space?.onChange(() => {
       state.spaceSaid = null;
       render();
       if (!inShell) tellPresence();
-      loadSpace().then(render);
+      load();
     });
 
     /* Draw whatever the picker already says before the first request lands: with no

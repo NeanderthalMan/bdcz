@@ -221,6 +221,18 @@ if (a === 'api') {
   // and every other one gets the sentence that made twelve pull requests look
   // individually broken. Same shape as writeRefusal on pr create / pr merge; separate
   // because this refusal does not look like a permission error to anything reading it.
+  // Workflow runs and their jobs — bc-xl7n.217. state.runs is the list GitHub hands back
+  // for a head commit, state.jobs[id] the jobs of one run; a re-run answers like GitHub's
+  // own 201 with nothing in the body, and state.rerunRefusal is the sentence it fails with.
+  if (/\\/actions\\/runs\\?head_sha=/.test(route)) out(JSON.stringify({ workflow_runs: state.runs || [] }));
+  if (/\\/actions\\/runs\\/\\d+\\/jobs/.test(route)) {
+    var rid = route.match(/runs\\/(\\d+)\\/jobs/)[1];
+    out(JSON.stringify({ jobs: (state.jobs || {})[rid] || [] }));
+  }
+  if (/\\/actions\\/runs\\/\\d+\\/(rerun|rerun-failed-jobs)$/.test(route)) {
+    if (state.rerunRefusal) fail(state.rerunRefusal);
+    out('');
+  }
   if (/\\/pulls\\/\\d+\\/update-branch$/.test(route)) {
     var ub = state.updateBranch || {};
     if (asToken !== (ub.token || null)) fail('gh: Not Found (HTTP 404)');
@@ -400,7 +412,7 @@ check('an unauthenticated gh is not ok', unauthed.ok === false);
 check('and the reason names the command that fixes it', /gh auth login/.test(unauthed.reason), unauthed.reason);
 check(
   'and the restart, because a login alone does not reach a daemon holding the old answer',
-  /launchctl kickstart -k gui\/\d+\/n12n\.beadcause/.test(unauthed.reason),
+  /launchctl kickstart -k gui\/\d+\/n12n\.beadcause|systemctl --user restart beadcause\.service/.test(unauthed.reason),
   unauthed.reason
 );
 
@@ -2569,6 +2581,86 @@ check(
   'comment() goes out under the resolved token, exactly like every other write in this file',
   !!identityComment && identityComment.token === 'tok-owner',
   JSON.stringify(calls().map((c) => [c.args.join(' '), c.token]))
+);
+
+/* ---------------------------------------------------- re-running a cancelled check */
+
+/* bc-xl7n.217. The check a pull request shows is a JOB's check-run, and GitHub can cancel
+   a job inside a run it still marks `failure` — PR 326, run 42050825602, 2026-11-05. The
+   old selection read the run's conclusion only, so it found nothing and the queue waited
+   for ever. These drive the fake with that exact shape and the two it must still handle. */
+
+console.log('\nrerunCancelled');
+
+const HEAD = '362510fe0123456789abcdef0123456789abcdef';
+const rerunPosts = () =>
+  calls()
+    .filter((c) => c.args.includes('POST'))
+    .map((c) => c.args.find((x) => x.startsWith('repos/')));
+
+world({
+  runs: [{ id: 42050825602, status: 'completed', conclusion: 'failure', run_attempt: 1 }],
+  jobs: { 42050825602: [{ id: 1, name: 'test', status: 'completed', conclusion: 'cancelled' }] },
+});
+resetLog();
+const jobCancelled = await pr.rerunCancelled(REPO, HEAD);
+check(
+  'a cancelled JOB inside a run GitHub marked failure is re-run — the PR 326 shape',
+  jobCancelled.rerun === 1 && jobCancelled.reason === '',
+  JSON.stringify(jobCancelled)
+);
+check(
+  'and through rerun-failed-jobs, so the jobs that already passed are left alone',
+  JSON.stringify(rerunPosts()) === JSON.stringify(['repos/{owner}/{repo}/actions/runs/42050825602/rerun-failed-jobs']),
+  JSON.stringify(rerunPosts())
+);
+
+world({ runs: [{ id: 7, status: 'completed', conclusion: 'cancelled', run_attempt: 1 }] });
+resetLog();
+const runCancelled = await pr.rerunCancelled(REPO, HEAD);
+check(
+  'a run that itself ended cancelled is still re-run whole, as bc-axipn built it',
+  runCancelled.rerun === 1 &&
+    JSON.stringify(rerunPosts()) === JSON.stringify(['repos/{owner}/{repo}/actions/runs/7/rerun']),
+  JSON.stringify([runCancelled, rerunPosts()])
+);
+
+world({
+  runs: [
+    { id: 8, status: 'completed', conclusion: 'failure', run_attempt: 1 },
+    { id: 9, status: 'in_progress', conclusion: null, run_attempt: 2 },
+    { id: 10, status: 'completed', conclusion: 'success', run_attempt: 1 },
+  ],
+  jobs: {
+    8: [{ id: 2, conclusion: 'failure' }],
+    9: [{ id: 3, conclusion: 'cancelled' }],
+    10: [{ id: 4, conclusion: 'cancelled' }],
+  },
+});
+resetLog();
+const nothing = await pr.rerunCancelled(REPO, HEAD);
+check(
+  'a genuine failure, a run already re-run and going, and a green run are all left alone',
+  nothing.rerun === 0 && rerunPosts().length === 0 && /no cancelled run or job/.test(nothing.reason),
+  JSON.stringify([nothing, rerunPosts()])
+);
+check(
+  'and only the unsuccessful completed run had its jobs read — nothing asked of the others',
+  JSON.stringify(calls().filter((c) => c.args.some((x) => /\/jobs/.test(x))).map((c) => c.args[1])) ===
+    JSON.stringify(['repos/{owner}/{repo}/actions/runs/8/jobs?per_page=100']),
+  JSON.stringify(calls().map((c) => c.args.join(' ')))
+);
+
+world({
+  runs: [{ id: 11, status: 'completed', conclusion: 'failure', run_attempt: 1 }],
+  jobs: { 11: [{ id: 5, conclusion: 'cancelled' }] },
+  rerunRefusal: 'gh: Must have admin rights to Repository. (HTTP 403)',
+});
+const rerunRefused = await pr.rerunCancelled(REPO, HEAD);
+check(
+  'a re-run GitHub refuses counts zero and says why, rather than throwing out of the tick',
+  rerunRefused.rerun === 0 && /HTTP 403/.test(rerunRefused.reason),
+  JSON.stringify(rerunRefused)
 );
 
 /* -------------------------------------------------------------- the one rule */

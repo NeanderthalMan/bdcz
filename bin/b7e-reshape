@@ -1,0 +1,111 @@
+#!/usr/bin/env node
+/**
+ * `b7e-reshape` — replay a file's past merges with a proposed change and count the conflicts.
+ *
+ *     b7e-reshape <file> --transform ./sort.mjs      # module default-exporting (text, side) => text
+ *     b7e-reshape <file> --driver jsonmerge='node scripts/jsonmerge.mjs %O %A %B %P'
+ *     b7e-reshape <file> --transform t.mjs --since 90d --merges <sha,sha> --json
+ *
+ * Every merge that changed the file on both sides is merged twice from the same three
+ * copies: as git does, and with the change (the transform applied to base/ours/theirs, a
+ * driver run in place of the text merge, or both). Prints the totals — merges, conflicted
+ * merges and conflicted sections before -> after — then one row per merge that moved,
+ * worse first. See lib/reshape.js.
+ *
+ * Exit codes: `0` ran, whatever it found. `1` bad arguments, not a git checkout, or a
+ * transform that would not load.
+ *
+ * @grant read
+ */
+import { execFileSync } from 'node:child_process';
+import path from 'node:path';
+import { pathToFileURL, fileURLToPath } from 'node:url';
+
+const LIB = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'lib');
+const { replay, render, parseSince, parseDriver } = await import(path.join(LIB, 'reshape.js'));
+
+const argv = process.argv.slice(2);
+const opts = { file: '', dir: '', base: 'main', since: '120d', merges: [], json: false, transform: '', driver: '' };
+function fail(msg) {
+  console.error(`b7e-reshape: ${msg}`);
+  process.exit(1);
+}
+for (let i = 0; i < argv.length; i++) {
+  const a = argv[i];
+  const val = () => {
+    const v = argv[++i];
+    if (v === undefined) fail(`${a} needs a value`);
+    return v;
+  };
+  if (a === '--dir') opts.dir = val();
+  else if (a === '--base') opts.base = val();
+  else if (a === '--since') opts.since = val();
+  else if (a === '--merges') opts.merges = val().split(',').filter(Boolean);
+  else if (a === '--transform') opts.transform = val();
+  else if (a === '--driver') opts.driver = val();
+  else if (a === '--json') opts.json = true;
+  else if (a === '-h' || a === '--help') {
+    console.log('usage: b7e-reshape <file> [--transform <module.mjs>] [--driver <name>=<cmd>] [--since 120d] [--merges <sha,..>] [--dir <repo>] [--base main] [--json]');
+    process.exit(0);
+  } else if (a.startsWith('-')) fail(`unknown argument ${a}`);
+  else if (!opts.file) opts.file = a;
+  else fail(`unexpected extra argument ${a}`);
+}
+if (!opts.file) fail('which file? usage: b7e-reshape <file> --transform <module.mjs> | --driver <name>=<cmd>');
+if (!opts.transform && !opts.driver) fail('nothing to test: give --transform <module.mjs> and/or --driver <name>=<cmd>');
+const sinceMs = parseSince(opts.since);
+if (sinceMs == null) fail('--since must look like 30d or 12h');
+const driver = opts.driver ? parseDriver(opts.driver) : null;
+if (opts.driver && !driver) fail('--driver must look like name=command');
+
+let dir;
+try {
+  dir = execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd: opts.dir || process.cwd(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+} catch {
+  fail(`${opts.dir || process.cwd()} is not inside a git checkout`);
+}
+const gitOut = (args) => execFileSync('git', args, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+
+const abs = path.resolve(opts.dir || process.cwd(), opts.file);
+const rel = abs.startsWith(dir + path.sep) ? path.relative(dir, abs) : opts.file;
+
+let transform = null;
+if (opts.transform) {
+  try {
+    const mod = await import(pathToFileURL(path.resolve(process.cwd(), opts.transform)).href);
+    transform = mod.default;
+  } catch (e) {
+    fail(`cannot load ${opts.transform}: ${e.message}`);
+  }
+  if (typeof transform !== 'function') fail(`${opts.transform} must default-export a function (text, side) => text`);
+}
+
+let ref = `origin/${opts.base}`;
+try {
+  gitOut(['rev-parse', '--verify', '--quiet', ref]);
+} catch {
+  ref = opts.base;
+}
+let shas = null;
+if (opts.merges.length) {
+  shas = [];
+  for (const s of opts.merges) {
+    try {
+      shas.push(gitOut(['rev-parse', '--verify', `${s}^{commit}`]));
+    } catch {
+      fail(`${s} is not a commit in ${dir}`);
+    }
+  }
+}
+
+let result;
+try {
+  result = await replay(dir, rel, { ref, sinceMs, shas, transform, driver });
+} catch (e) {
+  fail(e.message);
+}
+if (opts.json) {
+  console.log(JSON.stringify({ file: rel, base: ref, since: opts.since, totals: result.totals, rows: result.rows }, null, 2));
+} else {
+  console.log(render(result, { since: opts.since }));
+}

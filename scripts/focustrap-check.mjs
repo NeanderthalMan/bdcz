@@ -66,7 +66,7 @@ const board = () => ({
   owned: true,
   under: {},
   // The plain bead is under no epic — `assignedToMe` in public/app.js keeps it on the
-  // Questions pill only because it is here, exactly as bc-i7tw's own loose question is.
+  // Inbox (Questions, before bc-qzng7.2) only because it is here, exactly as bc-i7tw's own loose question is.
   unhomed: { [`${WS}/ft-one`]: true },
   assigned: { [`${WS}/${P0.id}`]: true, ...Object.fromEntries(TREE.map((r) => [r.key, true])) },
   roots: [
@@ -304,7 +304,7 @@ try {
 
   /* ================================================================ .p0-full */
 
-  await s.send('Page.navigate', { url: `${BASE}/?t=${TOKEN}` });
+  await s.send('Page.navigate', { url: `${BASE}/?t=${TOKEN}&kind=epics` });
   if (!(await waitFor(`!!document.querySelector('.p0-card .p0-tap')`)))
     throw new Error('the epic card never rendered');
 
@@ -345,7 +345,9 @@ try {
 
   /* ================================================================== .drawer */
 
-  if (!(await click('button.viewpill[data-pill="question"]'))) throw new Error('no Questions pill to switch to');
+  // Inbox, not a Questions pill: bc-qzng7.2 folded Questions into Inbox, which is "what is
+  // waiting on you" and therefore holds this loose question unnarrowed.
+  if (!(await click('button.viewpill[data-pill="home"]'))) throw new Error('no Inbox pill to switch to');
   if (!(await waitFor(`!!document.querySelector('.card[data-key=${JSON.stringify(KEY)}]')`))) throw new Error('the bead never rendered');
   await click(`.card[data-key=${JSON.stringify(KEY)}][data-act="toggle"]`);
   if (!(await waitFor(`!!document.querySelector('a[href^="/doc?"]')`))) throw new Error('the doc link never rendered');

@@ -165,6 +165,38 @@ await check('the brief tells the window what to do when bd show says CLOSED', as
   );
 });
 
+/* ------------------------------------------------- bc-xl7n.221: an open blocker */
+
+const { assertNotBlocked, openBlockersOf } = await import(LIB('stillopen.js'));
+const blockedRow = (deps) => ({ id: 'zz-blocked', status: 'open', labels: [], dependencies: deps });
+
+await check('an open blocks edge refuses; a closed one, a parent edge, or none passes', () => {
+  assert.deepEqual(openBlockersOf(blockedRow([{ id: 'zz-a', dependency_type: 'blocks', status: 'open' }])), ['zz-a']);
+  assert.throws(
+    () => assertNotBlocked(blockedRow([{ id: 'zz-a', dependency_type: 'blocks', status: 'in_progress' }])),
+    (err) => err.status === 409 && err.blocked === true && /zz-a/.test(err.message)
+  );
+  for (const deps of [
+    [],
+    undefined,
+    [{ id: 'zz-a', dependency_type: 'blocks', status: 'closed' }],
+    [{ id: 'zz-p', dependency_type: 'parent-child', status: 'open' }],
+    [{ id: 'zz-d', dependency_type: 'discovered-from', status: 'open' }],
+  ]) {
+    assert.equal(assertNotBlocked(blockedRow(deps)).id, 'zz-blocked');
+  }
+});
+
+await check('openWorkSession refuses a bead whose edge was written after the survey', async () => {
+  // The queue row says nothing about blockers; only the tracker, asked at launch, knows.
+  await assert.rejects(
+    () => openWorkSession(cfg, ws, { id: 'zz-blocked', title: 'chained a minute ago' }, {
+      bd: trackerSaying(blockedRow([{ id: 'zz-a', dependency_type: 'blocks', status: 'open' }])),
+    }),
+    (err) => err.status === 409 && err.blocked === true
+  );
+});
+
 /* -------------------------------------------------------------------- the result */
 
 console.log(`\n${ran - failures}/${ran} passed\n`);

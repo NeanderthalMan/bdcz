@@ -164,7 +164,7 @@ const SESSION = {
   pid: PID,
   sessionId: 'aaaabbbb-cccc-dddd-eeee-ffff00001111',
   name: SESSION_NAME,
-  cwd: '/Users/someone/dev/demo/.claude/worktrees/a-thing-4e7',
+  cwd: '/srv/someone/dev/demo/.claude/worktrees/a-thing-4e7',
   where: 'a-thing-4e7',
   workspace: WS,
   status: 'busy',

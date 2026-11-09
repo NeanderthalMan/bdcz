@@ -156,23 +156,6 @@
     // sweep earlier in the queue does not make it cheaper, it only makes it sooner. See
     // `prewarm`.
     { id: 'prs', paths: ['/api/prs'], holdOnly: true },
-    // The ledger (bc-nib3.2) is here in the row's order and is the one view that warms
-    // **nothing** — a recorded decision rather than a gap, because a pill missing from
-    // this list is a pill that stays cold and nobody notices until they are on a phone
-    // wondering why one is slower than the others.
-    //
-    // Every path above is a constant, which is the whole mechanism: the list is fetched
-    // from whatever page you are on, for the pages you are not. History has no constant
-    // to offer. Its boot request carries the space picker's current selection —
-    // `workspace=`, or `space=`, or neither — so any path written here would be the
-    // right ledger only for whoever happened to have the picker set the way this file
-    // guessed, and warming every selection is a sweep of the whole tracker to fill a
-    // cache for a page that may not be opened.
-    //
-    // It is also the view that needs it least: the one screen in the app explicitly
-    // about what has already happened, where an instant first frame of slightly stale
-    // rows buys less than it does anywhere else.
-    { id: 'history', paths: [] },
     // The seventh pill — last until Releases and Config arrived to its right — and still
     // the heaviest `bd` on the list: `/api/work` is two calls per workspace, and it is
     // the one whose entry the inbox goes on to *maintain* off
@@ -204,6 +187,25 @@
     // that answer lands, and the `/releases` document, which is the address a phone's
     // home screen holds and has no shell boot behind it at all.
     { id: 'releases', paths: ['/api/queues'], holdOnly: true },
+    // The ledger (bc-nib3.2) is here in the row's order — after Work's three since
+    // bc-qzng7.3, because the Work pill sits before Beads and its health line, strips
+    // and details panes draw from `/api/prs`, `/api/work` and `/api/queues` and is the one view that warms
+    // **nothing** — a recorded decision rather than a gap, because a pill missing from
+    // this list is a pill that stays cold and nobody notices until they are on a phone
+    // wondering why one is slower than the others.
+    //
+    // Every path above is a constant, which is the whole mechanism: the list is fetched
+    // from whatever page you are on, for the pages you are not. History has no constant
+    // to offer. Its boot request carries the space picker's current selection —
+    // `workspace=`, or `space=`, or neither — so any path written here would be the
+    // right ledger only for whoever happened to have the picker set the way this file
+    // guessed, and warming every selection is a sweep of the whole tracker to fill a
+    // cache for a page that may not be opened.
+    //
+    // It is also the view that needs it least: the one screen in the app explicitly
+    // about what has already happened, where an instant first frame of slightly stale
+    // rows buys less than it does anywhere else.
+    { id: 'history', paths: [] },
     // The last pill (bc-khoe.10), and the second view here that warms **nothing** — for
     // History's reason, arrived at from the other end. Its boot request is
     // `/api/space?space=<whichever the picker is on>`, so there is no constant this file

@@ -39,7 +39,7 @@
   directory, and re-read the line: git may well have merged it silently. `node
   test/swcache.mjs` checks precisely that, in about a second.
 */
-const CACHE = 'beadcause-v117';
+const CACHE = 'beadcause-v125';
 const SHELL = [
   '/',
   '/index.html',
@@ -94,6 +94,7 @@ const SHELL = [
   // — it is the only way off a page — so it belongs in the shell rather than being
   // fetched once per page over a phone link.
   '/viewbar.js',
+  '/find.js',
   // How the app finds out that what it is made of has moved — the reload after a deploy
   // that changed public/, and the download-ask-install-restart the shell does when one
   // rebuilt the APK. In the shell rather than network-first because the moment it is

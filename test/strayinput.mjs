@@ -349,7 +349,11 @@ check('both launchers hand it launchCommand', () => {
   assert.match(session, /const command = launchCommand\(commandFile\)/);
   assert.match(session, /openTab\(cfg, command, tabTitle, workspace\)/);
   assert.match(session, /openTab\(cfg, launchCommand\(commandFile\), tabTitle, workspace\)/);
-  assert.match(session, /\[SCRIPT, command, tabTitle,/, 'the one AppleScript call passes the command it was handed');
+  // The AppleScript call moved behind the terminal backend in bc-obucr.1: `openTab` hands
+  // the command on unchanged, and the iTerm backend passes it to the script.
+  assert.match(session, /terminal\(cfg\)\.open\(\{ cfg, command, tabTitle, workspace \}\)/, 'openTab no longer hands the backend the command it was handed');
+  const backend = fs.readFileSync(path.join(ROOT, 'lib', 'termbackend-iterm.js'), 'utf8');
+  assert.match(backend, /\[SCRIPT, command, tabTitle,/, 'the one AppleScript call passes the command it was handed');
 });
 
 console.log(failures ? `\n\x1b[31m${failures} failed\x1b[0m` : '\n\x1b[32mall good\x1b[0m');

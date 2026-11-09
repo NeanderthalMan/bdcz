@@ -232,10 +232,16 @@ await check('and removed with a PATH that has no lsof on it — the daemon\'s PA
   const realPath = process.env.PATH;
   // Every directory on PATH *except* the ones holding an lsof — so `git` still resolves
   // and `lsof` cannot, on any machine, however this suite was started.
-  const stripped = realPath
+  // On Linux git and lsof share /usr/bin, so no directory can be dropped to lose one and
+  // keep the other: build a PATH of one directory holding only a git.
+  const gitDir = path.join(tmp, 'git-only-bin');
+  fs.mkdirSync(gitDir, { recursive: true });
+  const gitReal = realPath
     .split(path.delimiter)
-    .filter((d) => d && !fs.existsSync(path.join(d, 'lsof')))
-    .join(path.delimiter);
+    .map((d) => path.join(d, 'git'))
+    .find((p) => fs.existsSync(p));
+  fs.symlinkSync(gitReal, path.join(gitDir, 'git'));
+  const stripped = gitDir;
   assert.ok(
     ['/usr/sbin/lsof', '/usr/bin/lsof'].some((p) => fs.existsSync(p)),
     'this machine has no lsof where the code looks for one, so the case cannot be posed'

@@ -121,7 +121,7 @@ let RELEASE = {
 const BOARD = () => ({
   unavailable: null,
   observing: false,
-  build: { dir: '/Users/x/repos/demo', commit: 'a'.repeat(40), short: 'aaaaaaa', at: '2026-08-09T09:00:00Z' },
+  build: { dir: '/srv/x/repos/demo', commit: 'a'.repeat(40), short: 'aaaaaaa', at: '2026-08-09T09:00:00Z' },
   // `ship` is absent, not zero, when there is no queue to report — a daemon predating
   // the queue sends no such key, and nothing may read an invented nought. (There was a
   // tab badge fed from these numbers; the PRs tab is gone with bc-l8jp.6 and so is it.)
@@ -534,7 +534,7 @@ try {
   await evalJs(s, OPEN_ROW(3));
   await sleep(200);
   posted.length = 0;
-  reply = { status: 200, body: { ok: true, via: 'session', dir: '/Users/x/repos/demo', mode: 'default' } };
+  reply = { status: 200, body: { ok: true, via: 'session', dir: '/srv/x/repos/demo', mode: 'default' } };
   const shipLabel = await evalJs(s, `document.querySelector('#prs [data-act="ship"]')?.textContent.trim() || ''`);
   ok(/on the Mac/.test(shipLabel), `a repo with no declared deploy says the window in the label — "${shipLabel}"`);
   ok(

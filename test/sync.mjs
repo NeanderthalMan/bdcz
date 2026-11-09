@@ -70,6 +70,7 @@ const {
   syncEnabled,
   syncEveryMs,
   syncCeilingMs,
+  syncOverrideFor,
   SYNC_FLOOR_SECONDS,
   SYNC_CEILING_SHARE,
   STUCK_AFTER,
@@ -812,6 +813,30 @@ await check('and it has a floor, because there is no such thing as a usefully fa
   assert.equal(syncEveryMs({ sync: { seconds: 'nonsense' } }), 120_000);
 });
 
+await check('one workspace can have its own clock, and the rest keep the global one', () => {
+  const cfg = { sync: { seconds: 120, overrides: { architecture: { seconds: 60 } } } };
+  assert.equal(syncEveryMs(cfg, { name: 'architecture' }), 60_000, 'the team tracker on a minute');
+  assert.equal(syncEveryMs(cfg, 'architecture'), 60_000, 'by name as well as by workspace');
+  assert.equal(syncEveryMs(cfg, { name: 'personal' }), 120_000, 'a workspace not named keeps the global clock');
+  assert.equal(syncEveryMs(cfg), 120_000, 'and no workspace means the global clock, as before');
+  // The floor applies to an override exactly as it does to the global setting.
+  assert.equal(syncEveryMs({ sync: { overrides: { a: { seconds: 1 } } } }, 'a'), SYNC_FLOOR_SECONDS * 1000);
+  // An override without a usable number falls back to the global one, not to the default.
+  assert.equal(syncEveryMs({ sync: { seconds: 300, overrides: { a: { seconds: 'x' } } } }, 'a'), 300_000);
+  // And the ceiling follows that workspace's interval, so the pair still fits inside it.
+  assert.equal(syncCeilingMs(cfg, 'architecture'), Math.floor(60_000 * SYNC_CEILING_SHARE));
+  assert.equal(syncCeilingMs(cfg, 'personal'), Math.floor(120_000 * SYNC_CEILING_SHARE));
+});
+
+await check('an override map is not a list of which workspaces sync', () => {
+  // Absent from the map means the default, never silence — the property the header of
+  // lib/sync.js argues a `sync.workspaces` list could not have.
+  assert.equal(syncOverrideFor({ sync: { overrides: { a: { seconds: 60 } } } }, 'b'), null);
+  assert.equal(syncEnabled({ sync: { overrides: { a: { seconds: 60 } } } }, 'b'), true);
+  assert.equal(syncOverrideFor({}, 'a'), null);
+  assert.equal(syncOverrideFor({ sync: { overrides: { a: 60 } } }, 'a'), null, 'a bare number is not an override');
+});
+
 /* --------------------------------------- the ceiling, against the interval (bc-y3qk.2) */
 
 // `BD_TIMEOUT` is two minutes and the default `sync.seconds` is two minutes, and those
@@ -966,6 +991,18 @@ await check('syncing can be turned off, and off is a real answer', () => {
   assert.equal(syncEnabled({ sync: { enabled: false } }), false);
 });
 
+await check('one workspace can be turned off, but not back on under a global off', () => {
+  const cfg = { sync: { overrides: { scratch: { enabled: false } } } };
+  assert.equal(syncEnabled(cfg, 'scratch'), false);
+  assert.equal(syncEnabled(cfg, 'architecture'), true);
+  assert.equal(syncEnabled(cfg), true, 'the global answer is unchanged by one workspace');
+  assert.equal(
+    syncEnabled({ sync: { enabled: false, overrides: { a: { enabled: true } } } }, 'a'),
+    false,
+    'the global switch wins'
+  );
+});
+
 await check('the config ships the block, so it is documented where every other setting is', async () => {
   // `defaults()` is not exported, so this loads a config the way a daemon does: an empty
   // config directory, which `loadConfig` fills in from those defaults and writes.
@@ -974,6 +1011,7 @@ await check('the config ships the block, so it is documented where every other s
   assert.equal(cfg.sync.enabled, true);
   assert.equal(typeof cfg.sync.seconds, 'number');
   assert.ok(!('workspaces' in cfg.sync), 'and deliberately no list of which — a remote is the list');
+  assert.deepEqual(cfg.sync.overrides, {}, 'and an empty override map, so the key is discoverable');
 });
 
 /* ------------------------------------------------------- the bd adapter's parsing */
@@ -1150,18 +1188,28 @@ const APP = read('public/app.js');
 const CSS = read('public/style.css');
 const MON = read('bin/monitor.js');
 
-await check('the poll cycle syncs, and the failure it cannot handle files itself', () => {
+await check('the sync runs on its own clock, and the failure it cannot handle files itself', () => {
   assert.match(SERVER, /const sweepSync = async \(\)/, 'the sweep exists');
-  assert.match(SERVER, /await sweepSync\(\)/, 'and the cycle calls it');
+  assert.match(SERVER, /\.then\(\(\) => sweepSync\(\)\)/, 'the sync beat starts it');
   assert.match(SERVER, /sweepFailed\('the tracker sync'/, 'and a bug in it becomes a bead like the other five');
+  // The bug this pins: in the cycle, `sync.seconds` was a minimum — the sync came round
+  // once per cycle, and a long cycle left a team tracker dozens of commits behind.
+  assert.doesNotMatch(SERVER, /await sweepSync\(\)/, 'nothing awaits it, so no cycle can delay it');
+  const beat = SERVER.slice(SERVER.indexOf('const beat = async () => {'));
+  assert.ok(
+    beat.indexOf('syncBeat();') !== -1 && beat.indexOf('syncBeat();') < beat.indexOf('if (running)'),
+    'and every beat starts it before the overlap guard, so a running cycle cannot skip it'
+  );
 });
 
-await check('and it is the cycle that names the ceiling, because it is the half holding cfg', () => {
+await check('and it is the poller that names each ceiling, because it is the half holding cfg', () => {
   // A static read because everything above it is reachable with a fake and this is not:
   // `createSyncer` takes a `bd` and nothing else, on purpose, so the number derived from
   // `sync.seconds` can only arrive here. Drop this one argument and every assertion in
   // the ceiling section still passes while the daemon goes back to two minutes a call.
-  assert.match(SERVER, /syncer\.sweep\(cfg\.workspaces, \{ ceiling: syncCeilingMs\(cfg\) \}\)/);
+  assert.match(SERVER, /const ceiling = syncCeilingMs\(cfg, w\)/, 'per workspace');
+  assert.match(SERVER, /app\.syncer\.sweep\(workspaces, \{ ceiling \}\)/);
+  assert.match(SERVER, /syncEveryMs\(cfg, w\)/, 'and each workspace comes due on its own interval');
   assert.match(SERVER, /import \{[^}]*syncCeilingMs[^}]*\} from '\.\/sync\.js'/);
 });
 

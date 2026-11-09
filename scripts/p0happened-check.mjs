@@ -330,7 +330,7 @@ try {
 
   console.log(`\n${BASELINE ? 'BASELINE (HEAD)' : 'working copy'} · ${VP.width}x${VP.height} · ${BASE}\n`);
 
-  await s.send('Page.navigate', { url: `${BASE}/?t=${TOKEN}` });
+  await s.send('Page.navigate', { url: `${BASE}/?t=${TOKEN}&kind=epics` });
   await waitFor(`document.querySelector('.p0-card') !== null`, 15000);
   await press('.p0-card .p0-tap');
   await waitFor(`document.querySelector('.p0-tree') !== null`, 4000);

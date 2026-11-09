@@ -12,7 +12,15 @@
  * `/demo?from=<id>`, and `from` is what puts the candidate you were just using first.
  *
  * Only this app's own pull requests are listed, because green runs a beadcause backend —
- * see lib/demomode.js. Nothing here approves or merges: that is bc-sj8k.3.
+ * see lib/demomode.js.
+ *
+ * Down the right of each card are the three verdicts (bc-sj8k.3), beside the card rather
+ * than inside it because the card itself is the tap that tries it. **Approve** is the
+ * merge queue and then the deploy, and it arms: the first tap writes what the second will do
+ * into the button, the way the board's Merge does. **Decline** and **Comment** open a box
+ * under the card, and nothing is sent until something is typed and Send is pressed — a
+ * decline's reason goes on the bead, a comment goes on the bead and sends an agent to
+ * answer it. None of the three is one tap.
  */
 (() => {
   'use strict';
@@ -39,7 +47,28 @@
   // `open` and `history` are bc-sj8k.4's: which cards are expanded, and what each one's
   // `/api/demo/history` said — `'loading'`, `{ error }`, or the answer. Kept here rather than
   // in the DOM because `render` redraws the whole list.
-  const state = { data: null, env: 'blue', candidate: '', loading: false, busy: null, refused: {}, open: new Set(), history: {} };
+  // `armed`, `panel`, `acting`, `said` and `drafts` are bc-sj8k.3's: which Approve is waiting
+  // for its second tap, which card has its Decline or Comment box open (`{ number, kind }`),
+  // which verdict is in flight, what the last one said per card (`{ ok, text }`), and what has
+  // been typed so far — kept here so a redraw of the list never eats a half-written reason.
+  const state = {
+    data: null,
+    env: 'blue',
+    candidate: '',
+    loading: false,
+    busy: null,
+    refused: {},
+    open: new Set(),
+    history: {},
+    armed: null,
+    panel: null,
+    acting: null,
+    said: {},
+    drafts: {},
+  };
+  /** How long an armed Approve waits for its second tap, as the board's Merge does. */
+  const ARM_MS = 5000;
+  let armTimer = null;
 
   const plural = (n, one, many) => `${n} ${n === 1 ? one : many || `${one}s`}`;
 
@@ -145,8 +174,171 @@
       return;
     }
     out.innerHTML = `${notes.join('')}<div class="demo-list">${d.rows
-      .map((r) => `<div class="demo-item">${card(r)}${expander(r)}</div>`)
+      .map((r) => `<div class="demo-item"><div class="demo-row">${card(r)}${verdicts(r)}</div>${panel(r)}${saidLine(r)}${expander(r)}</div>`)
       .join('')}</div>`;
+  }
+
+  /* ---- Approve, Decline, Comment — bc-sj8k.3 ----------------------------------------- */
+
+  /** Why Approve cannot be pressed at all yet, or '' — the server refuses the rest. */
+  function approveBlocked(r) {
+    if (r.draft) return 'A draft cannot merge';
+    if (!r.candidate?.current) return 'Try it on green first';
+    return '';
+  }
+
+  function verdicts(r) {
+    const acting = state.acting === r.number;
+    const armed = state.armed === r.number;
+    const blocked = approveBlocked(r);
+    const open = state.panel?.number === r.number ? state.panel.kind : '';
+    const dis = (extra) => (acting || extra ? ' disabled' : '');
+    return `<div class="demo-verdicts" data-number="${esc(r.number)}">
+      <button type="button" class="board-btn merge${armed ? ' armed' : ''}" data-verdict="approve"${dis(blocked)}
+        title="${esc(blocked || 'Merges it through the merge queue, then the deploy makes it live')}">${
+          acting && state.actingKind === 'approve' ? 'Approving…' : armed ? 'Tap again — merge & ship' : 'Approve'
+        }</button>
+      <button type="button" class="board-btn${open === 'decline' ? ' armed' : ''}" data-verdict="decline"${dis()}
+        title="Close the pull request and say why on its bead">Decline</button>
+      <button type="button" class="board-btn${open === 'comment' ? ' armed' : ''}" data-verdict="comment"${dis(!r.beads.length)}
+        title="${esc(r.beads.length ? 'Comment on its bead — an agent answers' : 'No bead to comment on')}">Comment</button>
+    </div>`;
+  }
+
+  /** The box a Decline or a Comment is typed into. Nothing is sent without its Send. */
+  function panel(r) {
+    const p = state.panel;
+    if (!p || p.number !== r.number) return '';
+    const decline = p.kind === 'decline';
+    const key = `${p.kind}:${r.number}`;
+    const beadPick =
+      !decline && r.beads.length > 1
+        ? `<select class="demo-bead-pick">${r.beads
+            .map((b) => `<option value="${esc(b.id)}"${state.drafts[`bead:${r.number}`] === b.id ? ' selected' : ''}>${esc(b.id)}</option>`)
+            .join('')}</select>`
+        : '';
+    const said = decline
+      ? `Closes #${esc(r.number)} without merging${r.onGreen ? ', takes it off green' : ''}, and puts this on ${
+          r.beads.length ? r.beads.map((b) => esc(b.id)).join(', ') : 'the pull request (it names no bead)'
+        }.`
+      : `Goes on ${r.beads.length === 1 ? esc(r.beads[0].id) : 'the bead you pick'}, and an agent is sent to answer it.`;
+    return `<div class="demo-panel" data-number="${esc(r.number)}" data-kind="${esc(p.kind)}">
+      <p class="demo-meta">${said}</p>
+      ${beadPick}
+      <textarea class="demo-text" rows="3" placeholder="${decline ? 'Why it is declined' : 'What you want changed, or asked'}">${esc(
+        state.drafts[key] || ''
+      )}</textarea>
+      <div class="board-actions">
+        <button type="button" class="board-btn${decline ? ' revoke' : ' merge'}" data-send="${esc(p.kind)}"${
+          state.acting === r.number ? ' disabled' : ''
+        }>${decline ? `Decline #${esc(r.number)}` : 'Send comment'}</button>
+        <button type="button" class="board-btn link" data-cancel="1">Cancel</button>
+      </div>
+    </div>`;
+  }
+
+  function saidLine(r) {
+    const s = state.said[r.number];
+    if (!s) return '';
+    return `<p class="${s.ok ? 'pr-said pr-ok' : 'demo-refused'} demo-said-line">${esc(s.text)}</p>`;
+  }
+
+  function disarm() {
+    clearTimeout(armTimer);
+    armTimer = null;
+    state.armed = null;
+  }
+
+  async function post(url, body) {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'x-beadcause-token': token, ...(body ? { 'content-type': 'application/json' } : {}) },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const said = await res.json().catch(() => ({}));
+    if (!res.ok && said.ok === undefined) said.error = said.error || `HTTP ${res.status}`;
+    return { ok: res.ok && said.ok !== false && !said.error, said };
+  }
+
+  async function approve(number) {
+    if (state.armed !== number) {
+      disarm();
+      state.armed = number;
+      armTimer = setTimeout(() => {
+        disarm();
+        render();
+      }, ARM_MS);
+      render();
+      return;
+    }
+    disarm();
+    state.acting = number;
+    state.actingKind = 'approve';
+    delete state.said[number];
+    render();
+    try {
+      const { ok, said } = await post(`/api/demo/approve?number=${encodeURIComponent(number)}`);
+      state.said[number] = ok
+        ? {
+            ok: true,
+            text: said.alreadyMerged
+              ? `#${number} is already merged.`
+              : `Approved on ${said.gatesOn || 'its gates'} — ${said.queued ? `on the merge queue as ${said.id}` : `already queued as ${said.id}`}. ` +
+                'It merges, then deploys itself; this list drops it once it has landed.',
+          }
+        : { ok: false, text: said.error || 'refused' };
+      const row = state.data?.rows.find((r) => r.number === number);
+      if (!ok && said.behind && row?.candidate) row.candidate.behind = true;
+    } catch (err) {
+      state.said[number] = { ok: false, text: err.message };
+    }
+    state.acting = null;
+    render();
+  }
+
+  async function send(number, kind) {
+    const row = state.data?.rows.find((r) => r.number === number);
+    const text = String(state.drafts[`${kind}:${number}`] || '').trim();
+    if (!row) return;
+    if (!text) {
+      state.said[number] = { ok: false, text: kind === 'decline' ? 'Say why first — the reason goes on the bead.' : 'Write the comment first.' };
+      render();
+      return;
+    }
+    state.acting = number;
+    state.actingKind = kind;
+    delete state.said[number];
+    render();
+    try {
+      if (kind === 'decline') {
+        const { ok, said } = await post('/api/demo/decline', { number, reason: text });
+        state.said[number] = ok
+          ? { ok: true, text: `Declined — #${number} is closed${said.dropped ? ' and off green' : ''}${said.beads?.length ? `, and the reason is on ${said.beads.join(', ')}` : ''}.` }
+          : { ok: false, text: said.error || 'refused' };
+        if (ok) {
+          delete state.drafts[`decline:${number}`];
+          state.panel = null;
+          state.acting = null;
+          // Gone from the list: it is not an open pull request any more.
+          await load(true);
+          return;
+        }
+      } else {
+        const bead = row.beads.length > 1 ? state.drafts[`bead:${number}`] || row.beads[0].id : row.beads[0]?.id;
+        const { ok, said } = await post('/api/comment', { workspace: state.data.repo?.workspace || 'beadcause', id: bead, text });
+        state.said[number] = ok
+          ? { ok: true, text: `Commented on ${bead}${said.dispatched ? ' — an agent is answering it' : ''}.` }
+          : { ok: false, text: said.error || 'refused' };
+        if (ok) {
+          delete state.drafts[`comment:${number}`];
+          state.panel = null;
+        }
+      }
+    } catch (err) {
+      state.said[number] = { ok: false, text: err.message };
+    }
+    state.acting = null;
+    render();
   }
 
   /* ---- The card, expanded — bc-sj8k.4 ----------------------------------------------
@@ -353,7 +545,9 @@
     const row = state.data.rows.find((r) => r.number === number);
     if (!row) return;
     // Already standing: no need to ask the daemon anything, the router's link is the flip.
-    if (row.onGreen) {
+    // Unless main has moved since it was tried — then asking again is what re-records the
+    // main it was tried against, which Approve refuses without (bc-sj8k.3).
+    if (row.onGreen && !row.candidate?.behind) {
       location.href = `/__demo/green?id=${encodeURIComponent(row.candidate.id)}`;
       return;
     }
@@ -381,8 +575,44 @@
 
   out.addEventListener('click', (e) => {
     if (e.target.closest('a')) return; // the diff and the bead chips are links of their own
+    const verdict = e.target.closest('[data-verdict]');
+    if (verdict) {
+      if (verdict.disabled) return;
+      const number = Number(verdict.closest('.demo-verdicts').dataset.number);
+      const kind = verdict.dataset.verdict;
+      if (kind === 'approve') return approve(number);
+      disarm();
+      // The same button again closes its box; the other one swaps it.
+      const same = state.panel?.number === number && state.panel.kind === kind;
+      state.panel = same ? null : { number, kind };
+      delete state.said[number];
+      render();
+      if (!same) out.querySelector(`.demo-panel[data-number="${number}"] .demo-text`)?.focus();
+      return;
+    }
+    const sendBtn = e.target.closest('[data-send]');
+    if (sendBtn) {
+      if (!sendBtn.disabled) send(Number(sendBtn.closest('.demo-panel').dataset.number), sendBtn.dataset.send);
+      return;
+    }
+    if (e.target.closest('[data-cancel]')) {
+      state.panel = null;
+      render();
+      return;
+    }
+    if (e.target.closest('.demo-panel')) return; // typing in the box is not a tap on the card
     const el = e.target.closest('.demo-card');
     if (el) tryIt(Number(el.dataset.number));
+  });
+  // What is typed is kept per card and per box, so the list redrawing never eats it.
+  out.addEventListener('input', (e) => {
+    const p = e.target.closest?.('.demo-panel');
+    if (!p) return;
+    if (e.target.classList.contains('demo-text')) state.drafts[`${p.dataset.kind}:${p.dataset.number}`] = e.target.value;
+  });
+  out.addEventListener('change', (e) => {
+    const p = e.target.closest?.('.demo-panel');
+    if (p && e.target.classList.contains('demo-bead-pick')) state.drafts[`bead:${p.dataset.number}`] = e.target.value;
   });
   out.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter' && e.key !== ' ') return;

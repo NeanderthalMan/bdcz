@@ -204,7 +204,7 @@ const QUEUES = () => ({
 const deploy = (over) => ({
   id: 'd-abc',
   workspace: 'demo',
-  dir: '/Users/x/repos/demo',
+  dir: '/srv/x/repos/demo',
   base: 'main',
   bead: null,
   reason: '',
@@ -652,17 +652,15 @@ try {
   // every other view.
   console.log('\nthe same view, as a pane of the shell');
 
-  // Land on Home first, so the Releases pill is one you are *not* on — the pill for the
-  // pane already up is a `<span>` by design and would answer this question the wrong way.
-  await s.send('Page.navigate', { url: `${BASE}/` });
-  await sleep(1800);
+  // Land on Work first. Since bc-qzng7.3 there is no Releases pill: Releases is one of
+  // Work's details panes, reached from the `releases ›` link on Work's health line — a
+  // hash link into this document, not a document of its own.
+  await s.send('Page.navigate', { url: `${BASE}/?kind=epics` });
+  await sleep(3500);
 
-  // `data-pane` rather than an href is the whole of what filling the container changed at
-  // the row: viewbar.js asks `panes.has('releases')`, which was false for as long as the
-  // container carried `data-pending`, and answers differently the moment this bead lands.
   ok(
-    (await evalJs(s, `document.querySelector('.viewbar [data-pane="releases"]')?.tagName`)) === 'BUTTON',
-    'from Home, the Releases pill is a control rather than a link to a document'
+    (await evalJs(s, `document.querySelector('.work-health a[href="#releases"]')?.tagName`)) === 'A',
+    'from Work, the health line has a way into Releases'
   );
   ok(
     !(await evalJs(s, `!!document.querySelector('.viewbar a[href="/releases"]')`)),
@@ -673,7 +671,7 @@ try {
   // the proof and it has to be set before the first tap: a navigation takes it with the
   // window it was set on, so it surviving *is* the claim.
   await evalJs(s, `window.__stillHere = 'yes'`);
-  await evalJs(s, `document.querySelector('.viewbar [data-pane="releases"]').click()`);
+  await evalJs(s, `document.querySelector('.work-health a[href="#releases"]').click()`);
   await sleep(1500);
 
   ok(await evalJs(s, `window.__stillHere === 'yes'`), 'tapping it showed the pane without loading a document');
@@ -714,9 +712,9 @@ try {
   const room = await evalJs(s, `(() => { const sc = ${scroller}; return sc.scrollHeight - sc.clientHeight; })()`);
   ok(room > 40, `the release board is long enough at ${VP.width}x${SHORT} to have a scroll position at all — ${room}px of it`);
   const left = await evalJs(s, `(() => { const sc = ${scroller}; sc.scrollTop = Math.min(120, sc.scrollHeight - sc.clientHeight); return sc.scrollTop; })()`);
-  await evalJs(s, `document.querySelector('.viewbar [data-pane="epics"], .viewbar [data-kind="epics"]').click()`);
+  await evalJs(s, `document.querySelector('.viewbar [data-pill="epics"]').click()`);
   await sleep(600);
-  await evalJs(s, `document.querySelector('.viewbar [data-pane="releases"]').click()`);
+  await evalJs(s, `document.querySelector('.work-health a[href="#releases"]').click()`);
   await sleep(600);
   const back = await evalJs(s, scroller + '.scrollTop');
   ok(left > 0 && back === left, `where you were, when you come back — left at ${left}, returned to ${back}`);

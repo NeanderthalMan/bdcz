@@ -19,8 +19,10 @@ agent files a `human` bead ──► beadcause polls ──► ntfy push to phon
 
 ## Getting started
 
-macOS only — it runs as a launchd agent and drives iTerm2. You need
-[Homebrew](https://brew.sh); the installer uses it to install whatever else is missing.
+Runs on macOS (a launchd agent driving iTerm2) and on Ubuntu/Debian Linux (a systemd user
+unit driving tmux). On a Mac you need [Homebrew](https://brew.sh); the installer uses it to
+install whatever else is missing. On Linux it uses apt — see
+[docs/install.md](docs/install.md#on-linux--a-server-with-tmux-for-a-terminal).
 
 ```bash
 git clone <this repo> beadcause && cd beadcause
@@ -29,6 +31,9 @@ npm run install-service
 
 That answers on `http://127.0.0.1:4318`, on this Mac only. Phone support is off by
 default — `npm run install-service -- --phone` adds Tailscale and prints the pairing QR.
+
+Setup shows every default first and asks one thing: **simple installation** (keep those
+defaults) or **customized** (go through each setting). `-- --simple` skips even that.
 
 Everything else about setting up — the questions the installer asks, joining a tracker
 somebody else already has, the everyday commands, and why you never restart the
@@ -80,6 +85,13 @@ plus `docs/b7e/`, a file per `b7e-*` tool (bc-fmk4v) — and
 | [integrations.md](docs/integrations.md) | Signing in with Google, Slack, Confluence, and the access register |
 | [config.md](docs/config.md) | Every key in `~/.config/beadcause/config.json` |
 | [development.md](docs/development.md) | `npm test`, the gate, the suites, a second instance in observer mode, and notes on `bd` |
+
+**For the picture before the prose:** `node scripts/flowchart.mjs` writes `docs/flowchart.html`,
+and `/flow` in the app draws the same map live. It includes a bead's whole life with every
+gate and every place you are asked, built from the settings rather than drawn by hand, so
+switching on `autoShip` takes the Ship tap out of the picture. A workspace that declares its
+own departments and approval pipeline gets them drawn too —
+[the map](docs/agents.md#the-map--which-steps-are-code-and-which-are-an-agent).
 
 Three notes sit alongside them: a [UX review](docs/ux-review.md), the
 [IDE websocket spike](docs/ide-websocket-spike.md) and the

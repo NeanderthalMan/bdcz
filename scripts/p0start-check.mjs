@@ -31,9 +31,11 @@
 // a bead or iTerm. `--baseline` serves the committed app.js and style.css, which have no
 // picker at all, so it must fail.
 //
-// Everything below drives `#compose` — the ＋ in the bottom right — because on `My Epics`
-// that button *is* this create (bc-khoe.27.2). The page is left on the kind it lands on,
-// which is `My Epics`, so no pill is tapped to get there.
+// Everything below drives ＋ — on Work that button *is* this create (bc-khoe.27.2). Since
+// bc-qzng7.4 the ＋ a thumb presses is the bottom bar's, which forwards to the page's own
+// `#compose`; and since bc-qzng7.3 the panel it opens leads with "Start a chat session",
+// above the P0s. The page is left on the kind it lands on, which is Work (`kind=epics`),
+// so no pill is tapped to get there.
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -235,20 +237,27 @@ const shot = async (name) => {
 const VIEW = `(() => {
   const el = (sel) => document.querySelector(sel);
   const top = (e) => e ? Math.round(e.getBoundingClientRect().top) : null;
+  // Two buttons since bc-qzng7.4. \`#compose\` is still the page's create and still carries
+  // its label and aria state, but the ＋ a thumb presses is the bar's, which forwards to it
+  // (\`act\` in public/viewbar.js). So where it is and how big are read off the bar's, and
+  // what it says and whether it is open off the page's.
   const pick = el('#compose');
+  const plus = el('.viewbar [data-act="compose"]') || pick;
   const panel = el('#compose-epics');
+  // The panel's first row is a chat session since bc-qzng7.3; the P0s are the rest.
+  const p0s = [...document.querySelectorAll('#compose-epics:not([hidden]) .p0-cand[data-act="p0-start"]')];
   return {
     // .p0-pick is the button that used to be at the foot of the board. Counted so the
     // move is asserted rather than assumed: two controls doing one thing, with the lower
     // one out of a thumb's reach, is exactly what bc-khoe.27.2 undoes.
     stale: document.querySelectorAll('.p0-pick').length,
-    picks: pick && !pick.closest('[hidden]') ? 1 : 0,
-    pickTag: pick?.tagName || '',
+    picks: plus && !plus.closest('[hidden]') ? 1 : 0,
+    pickTag: plus?.tagName || '',
     pickLabel: pick?.getAttribute('aria-label') || '',
     pickControls: pick?.getAttribute('aria-controls') || '',
     pickExpanded: pick?.getAttribute('aria-expanded') || '',
-    pickTop: top(pick),
-    pickHeight: pick ? Math.round(pick.getBoundingClientRect().height) : 0,
+    pickTop: top(plus),
+    pickHeight: plus ? Math.round(plus.getBoundingClientRect().height) : 0,
     pickDisabled: pick ? !!pick.disabled : null,
     panelShut: panel ? !!panel.hidden : null,
     panelTop: panel && !panel.hidden ? top(panel) : null,
@@ -259,9 +268,10 @@ const VIEW = `(() => {
     // Scoped to the panel while it is open: the rows stay in the DOM behind a hidden
     // panel, the same way the repo chips next door do, so an unscoped query would report
     // a picker still offering an epic it has already shut on.
-    cands: [...document.querySelectorAll('#compose-epics:not([hidden]) .p0-cand')].map((e) => e.dataset.bead),
-    candHeight: Math.round(el('#compose-epics:not([hidden]) .p0-cand')?.getBoundingClientRect().height || 0),
-    candTop: top(el('#compose-epics:not([hidden]) .p0-cand')),
+    cands: p0s.map((e) => e.dataset.bead),
+    firstRow: (el('#compose-epics:not([hidden]) .p0-cand')?.textContent || '').trim(),
+    candHeight: Math.round(p0s[0]?.getBoundingClientRect().height || 0),
+    candTop: top(p0s[0]),
     offs: document.querySelectorAll('.p0-off').length,
     cards: [...document.querySelectorAll('.p0-card')].map((e) => e.dataset.key),
     // Every \`.pagescroll\` on the page, which is where the scrolling actually happens: since
@@ -271,7 +281,7 @@ const VIEW = `(() => {
     scrollY: [...document.querySelectorAll('.pagescroll')].map((e) => Math.round(e.scrollTop)).join('/'),
     toast: (el('.toast, #toast')?.textContent || '').replace(/\\s+/g, ' ').trim(),
     wide: document.documentElement.scrollWidth <= window.innerWidth,
-    widest: Math.max(0, ...[...document.querySelectorAll('.p0-cand, #compose, .p0-card')].map((e) => Math.round(e.getBoundingClientRect().right))),
+    widest: Math.max(0, ...[...document.querySelectorAll('.p0-cand, .viewbar [data-act="compose"], .p0-card')].map((e) => Math.round(e.getBoundingClientRect().right))),
   };
 })()`;
 
@@ -313,9 +323,10 @@ try {
 
   /* ---- the tap: the list opens, and the page does not run away with it ---- */
 
-  await press('#compose');
+  await press('.viewbar [data-act="compose"]');
   await waitFor(`document.querySelectorAll('.p0-cand').length > 0`, 4000);
   v = await evalJs(VIEW);
+  check('the first row starts a chat session, since chats live on Work', /Start a chat session/.test(v.firstRow), v.firstRow || '(no rows)');
   check('tapping it opens the list of P0s you could start', v.cands.length === 2, v.cands.join(', '));
   check('each one is a control a thumb can hit', v.candHeight >= 34, `${v.candHeight}px`);
   // THE ONE THIS CHECK EXISTS FOR, and it survived the move rather than being retired by

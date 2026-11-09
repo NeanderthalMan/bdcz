@@ -225,6 +225,12 @@ function board(roots, open = [], status = 'live') {
       // the screen, and the bar that draws them.
       lift(APP, 'function p0Progress(card)'),
       lift(APP, 'function p0ProgressHtml(card)'),
+      // Work's pipeline strip on each card (bc-qzng7.3). `prRows` is the pull request
+      // board, which this suite does not serve, so it is an empty board here.
+      'const prRows = () => [];',
+      lift(APP, 'const SHIPPING_RUNGS = '),
+      lift(APP, 'function workPipeline(c)'),
+      lift(APP, 'function workStripHtml(c)'),
       lift(APP, 'const p0RowKey = ('),
       lift(APP, 'const p0Step = ('),
       // bc-bmry.4's relay mark, and the clock it prints an age against. Lifted because
@@ -935,6 +941,12 @@ check('the three no-op cases are untouched: no `me`, no P0s, an old payload', ()
       // the screen, and the bar that draws them.
       lift(APP, 'function p0Progress(card)'),
       lift(APP, 'function p0ProgressHtml(card)'),
+      // Work's pipeline strip on each card (bc-qzng7.3). `prRows` is the pull request
+      // board, which this suite does not serve, so it is an empty board here.
+      'const prRows = () => [];',
+      lift(APP, 'const SHIPPING_RUNGS = '),
+      lift(APP, 'function workPipeline(c)'),
+      lift(APP, 'function workStripHtml(c)'),
       lift(APP, 'function p0RowHtml(card, row)'),
       lift(APP, 'function p0TreeHtml(card)'),
       // bc-d6yk's three-state control, which the acts row now calls rather than writing

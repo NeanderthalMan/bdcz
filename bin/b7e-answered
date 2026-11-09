@@ -183,10 +183,16 @@ function printVerdict(beadId, result) {
 if (beadIds.length === 1) {
   // The single-bead form, unchanged: a missing bead is refused outright (exit 4) rather
   // than folded into a batch report, and the header/verdict carry no bead-count noise.
+  //
+  // No pre-flight `bd show` here either (bc-xl7n.232). It read the bead that `beadAnswer`
+  // reads again straight after, which is two 3-6s calls against a real tracker for one
+  // answer. `beadAnswer`'s own read tells the three cases apart the same way: it throws
+  // on a missing bead or a tracker failure, and comes back with an empty chain when
+  // `showWithComments` finds nothing.
   const [beadId] = beadIds;
-  let first;
+  let result;
   try {
-    first = await bd.show(ws, beadId);
+    result = await beadAnswer(bd, ws, beadId, { family: FAMILY, answered });
   } catch (err) {
     const msg = String(err?.message || err).split('\n')[0];
     if (MISSING_RE.test(msg)) {
@@ -194,9 +200,7 @@ if (beadIds.length === 1) {
     }
     fail(`${ws.name} could not be read for ${beadId} — a tracker failure (lock/timeout?), not "not found": ${msg}`, 1);
   }
-  if (!first) fail(`${ws.name} has no bead ${beadId}`, 4);
-
-  const result = await beadAnswer(bd, ws, beadId, { family: FAMILY, answered });
+  if (!result.results.length) fail(`${ws.name} has no bead ${beadId}`, 4);
 
   if (JSON_MODE) {
     console.log(JSON.stringify(result, null, 2));

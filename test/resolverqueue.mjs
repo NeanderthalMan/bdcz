@@ -399,9 +399,11 @@ await check('reset empties the line as well as the map', async () => {
  * true. `test/focus.mjs` owns the rest of that script; this is the mode `sessionAlive`
  * asks for.
  */
-const sessionJs = fs.readFileSync(LIB('session.js'), 'utf8');
+// `sessionAlive` delegates to the terminal backend since bc-obucr.1; the argv is the
+// iTerm backend's `alive`.
+const sessionJs = fs.readFileSync(LIB('termbackend-iterm.js'), 'utf8');
 const focusScript = fs.readFileSync(path.join(HERE, '..', 'scripts', 'focus-session.applescript'), 'utf8');
-const aliveBody = sessionJs.slice(sessionJs.indexOf('export function sessionAlive'));
+const aliveBody = sessionJs.slice(sessionJs.indexOf('function alive(handle)'));
 
 await check('the liveness probe asks for no bounds and no focus', async () => {
   assert.match(

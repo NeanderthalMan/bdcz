@@ -132,7 +132,7 @@ await check('one spelling, and promote.js re-exports the endorse.js one', () => 
 await check('it is on the list the advocate passes, and only the list', () => {
   assert.ok(QUEUE_EXCLUDED.includes(PROMOTE_LABEL), 'an endorsed promotion bead would open a planner window');
   const adv = fs.readFileSync(LIB('advocate.js'), 'utf8');
-  assert.match(adv, /Five labels never reach my queue/, 'the survey brief still counts four');
+  assert.match(adv, /Six labels never reach my queue/, 'the survey brief still counts four');
   assert.match(adv, /`promote`|\\`promote\\`/, 'the survey brief never says what a promotion bead is to it');
 });
 

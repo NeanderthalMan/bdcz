@@ -187,7 +187,13 @@ const MORE_IDS = PILLS.filter((p) => p.more).map((p) => p.id);
 const IDS = [...PILLS.filter((p) => !p.more).map((p) => p.id), ...(MORE_IDS.length ? ['more'] : [])];
 /** Which drawn pill a view lights: its own, the Beads pill for the ledger, ⋯ for a tucked one. */
 const rowPillFor = (id) =>
-  id == null ? null : MORE_IDS.includes(id) ? 'more' : PILLS.find((p) => p.id === id || p.views?.includes(id))?.id ?? id;
+  id == null
+    ? null
+    : MORE_IDS.includes(id)
+      ? 'more'
+      : // A view no pill claims lights nothing: `config` since bc-qzng7.1, reached from the
+        // space picker rather than the row.
+        PILLS.find((p) => p.id === id || p.views?.includes(id) || p.kinds?.includes(id))?.id ?? null;
 
 /** The path a pill claims, normalised the way the row itself normalises `location`. */
 const norm = (p) => p.replace(/\/+$/, '') || '/';
@@ -287,7 +293,9 @@ const PRS = [
  * the board, and 0 cards is 0. The two used to be one pill and one number, which is how
  * a badge saying seven over a tracker holding no epics read as correct for months.
  */
-const WANT = { home: 7, epics: 0, question: 3, pr: 2, session: 2 };
+// Only Inbox carries a count since bc-qzng7.2: Questions and PRs are its Kind filter,
+// and the board and Chats are places rather than piles of things waiting on you.
+const WANT = { home: 5 };
 
 /*
   And the second state the same fixture can be in: **an epic of yours started** (bc-khoe.49).
@@ -348,7 +356,7 @@ const ROOTS = EPICS.map((p) => {
  * Home would draw are the same seven whether or not an epic of yours is started, because
  * starting one moves a card onto a board that is not Home's screen.
  */
-const WANT_BOARDED = { home: 7, epics: ROOTS.length, question: 3, pr: 2, session: 2 };
+const WANT_BOARDED = { home: 5 };
 
 const TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -372,6 +380,7 @@ const ROUTES = {
   '/admin': '/admin.html',
   '/sounds': '/sounds.html',
   '/audition': '/sounds.html',
+  '/demo': '/demo.html',
 };
 
 /* Every URL the fixture was asked for, in order. One assertion needs it: "tapping All
@@ -496,6 +505,7 @@ const PAGES = [
   { url: '/admin', file: 'admin.html' },
   { url: '/sounds', file: 'sounds.html' },
   { url: '/config', file: 'index.html' },
+  { url: '/demo', file: 'demo.html' },
 ];
 
 /**
@@ -583,10 +593,12 @@ const PROBE = `(() => {
      a Home pill that goes to the same place. A link home in the body of a page is prose
      and is nobody's duplicate, which is why the notice is asked of the top bar only. */
   const spare = homes.find((a) => a.closest('.topbar'));
-  /* The route to /admin. It is a row in the menu behind the mark (public/accountbar.js)
-     rather than a pill, which is the whole of bc-khoe.5's answer to where Admin went. */
+  /* The route to /admin. It was a row in the menu behind the mark (bc-khoe.5); since
+     bc-qzng7.1 it is a row of Settings → This machine, and Settings is the space
+     picker's first row (public/spacebar.js). So the door to ask about is that row. */
   const chip = document.querySelector('#account-chip');
-  const adminRow = document.querySelector('#account-admin');
+  const picker = document.querySelector('#space-pick');
+  const settingsDoor = document.querySelector('#space-pick option[value="go:settings"]');
   const hoisted = document.querySelector('#account-actions a[href="/admin"], #account-actions a[href="/admin.html"]');
   const plus = document.querySelector('#compose');
   const out = {
@@ -599,7 +611,8 @@ const PROBE = `(() => {
     home: home ? name(home) : null,
     spare: spare ? name(spare) : null,
     chip: !!chip,
-    admin: !chip ? null : hoisted ? 'hoisted' : adminRow && !adminRow.hidden ? 'menu' : null,
+    picker: !!picker,
+    admin: hoisted ? 'hoisted' : settingsDoor ? 'settings' : null,
     plus: null,
   };
   /* Is the scroller ever wider than the phone it is on (bc-khoe.21)? Every page marks
@@ -654,7 +667,9 @@ const PROBE = `(() => {
   if (!nav) return out;
   const cs = getComputedStyle(nav);
   const nr = nav.getBoundingClientRect();
-  const pills = [...nav.querySelectorAll('.viewpill')].map((el) => {
+  // The places only: ＋ and Find are actions on the bar since bc-qzng7.4 (.viewpill-act),
+  // asserted on their own below.
+  const pills = [...nav.querySelectorAll('.viewpill:not(.viewpill-act)')].map((el) => {
     const r = el.getBoundingClientRect();
     const from = Math.max(r.left, nr.left);
     const to = Math.min(r.right, nr.right);
@@ -714,6 +729,9 @@ const PROBE = `(() => {
     ...out,
     menuRows,
     rowH: Math.round(nr.height),
+    /** Where the bar sits: its bottom edge against the viewport's, on a phone (bc-qzng7.4). */
+    barBottom: Math.round(innerHeight - nr.bottom),
+    acts: [...nav.querySelectorAll('.viewpill-act')].map((el) => el.dataset.act),
     overflowX: cs.overflowX,
     overflowY: cs.overflowY,
     wrap: cs.flexWrap,
@@ -883,27 +901,29 @@ try {
         );
 
       // Sideways instead. The row is allowed to be wider than the phone; that is the trade.
-      if (/^(auto|scroll)$/.test(m.overflowX)) {
-        const over = m.scrollWidth - m.clientWidth;
-        ok(
-          `${at}: it scrolls sideways (overflow-x: ${m.overflowX}` +
-            (over > 0 ? `, ${over}px past the ${m.clientWidth}px screen` : ', and today it fits') +
-            ')'
-        );
-      } else bad(`${at}: the row scrolls sideways`, `overflow-x is ${m.overflowX} — a row that cannot scroll is a row that wraps or clips`);
+      // A tab bar since bc-qzng7.4: it fits the phone rather than scrolling sideways, and
+      // it sits at the foot of the screen, where a thumb is.
+      if (m.scrollWidth - m.clientWidth <= 0) ok(`${at}: the bar fits the screen — no sideways scroll`);
+      else bad(`${at}: the bar fits the screen`, `${m.scrollWidth - m.clientWidth}px of it is past the ${m.clientWidth}px screen`);
+      if (m.barBottom <= 40) ok(`${at}: and it is at the foot of the screen (${m.barBottom}px above the edge)`);
+      else bad(`${at}: the bar is at the foot of the screen`, `its bottom edge is ${m.barBottom}px above the screen's`);
+      if (m.acts.includes('find')) ok(`${at}: Find is on the bar`);
+      else bad(`${at}: Find is on the bar`, `the bar's actions are ${m.acts.join(', ') || 'none'}`);
 
       // Exactly what the view table's `paths` say is current, and nothing where they say nothing.
       const cur = m.pills.filter((p) => p.current === 'page');
       const wantRow = rowPillFor(want);
-      if (cur.length === (want ? 1 : 0) && cur[0]?.id === (wantRow ?? undefined))
+      // `wantRow` rather than `want`: a view no pill claims (`config`, since bc-qzng7.1)
+      // lights nothing, the same as a page that is no view at all.
+      if (cur.length === (wantRow ? 1 : 0) && cur[0]?.id === (wantRow ?? undefined))
         ok(
-          want
+          wantRow
             ? `${at}: "${want}" is the one current pill — public/hashroute.js's VIEWS say so`
             : `${at}: no pill is current, which is what the view table says for this page`
         );
       else
         bad(
-          want ? `${at}: "${want}" is the one current pill` : `${at}: no pill is current on this page`,
+          wantRow ? `${at}: "${want}" is the one current pill` : `${at}: no pill is current on this page`,
           `aria-current is on ${cur.length ? cur.map((p) => p.id).join(', ') : 'nothing'}; the view table says ${want ?? 'nothing'}`
         );
 
@@ -918,7 +938,13 @@ try {
           else bad(`${at}: ⋯ is lit and the menu marks "${want}" current`, `the menu marks ${inMenu.map((r) => `${r.id} <${r.tag.toLowerCase()}>`).join(', ') || 'nothing'}`);
           continue;
         }
-        if (p.tag === 'SPAN' && !p.href) ok(`${at}: the current pill is a <span> with no href — tapping it does nothing`);
+        /* Work lit on one of its details panes — the advocate console, Releases — is the
+           one current pill that stays a control (bc-qzng7.3): it is the way back to the
+           board. `back` on the pill in public/viewbar.js is what says so. */
+        const back = PILLS.find((q) => q.id === p.id)?.back && want !== p.id;
+        if (back && p.tag === 'BUTTON' && !p.href)
+          ok(`${at}: Work is lit on its details pane and is still a button back to the board`);
+        else if (!back && p.tag === 'SPAN' && !p.href) ok(`${at}: the current pill is a <span> with no href — tapping it does nothing`);
         else bad(`${at}: the current pill is a <span> with no href`, `"${p.id}" is a <${p.tag.toLowerCase()}>${p.href ? ` pointing at ${p.href}` : ''}`);
         // `aria-current` is the half of the mark that is not colour. The fill and the
         // border are the other half and they say the same thing to a different reader.
@@ -984,11 +1010,11 @@ try {
          rightmost tab reached is still reachable. A page with no mark's menu at all is not
          asked — it has no place to put the row — which is why the run ends by saying
          whether *any* page offered the route rather than trusting that some page did. */
-      if (m.chip && page.url !== '/admin') {
+      if (m.picker && page.url !== '/admin') {
         if (m.admin) {
           adminFrom.set(page.url, m.admin);
-          ok(`${at}: /admin is reachable from here — ${m.admin === 'hoisted' ? "the page's own ⚙, hoisted into the mark's menu" : "the Admin row in the mark's menu"}`);
-        } else bad(`${at}: /admin is reachable from here`, 'no Admin row in the mark\'s menu and no ⚙ of its own — the rightmost tab\'s destination is stranded');
+          ok(`${at}: /admin is reachable from here — ${m.admin === 'hoisted' ? "the page's own ⚙, hoisted into the mark's menu" : 'Settings → This machine, from the space picker'}`);
+        } else bad(`${at}: /admin is reachable from here`, 'the space picker has no ⚙ Settings row and the page has no ⚙ of its own — the rightmost tab\'s destination is stranded');
       }
 
       /* ＋ is the one control on Home that creates rather than answers, and the bottom
@@ -1035,7 +1061,7 @@ try {
           bad(
             `${at}: each count is the rows that pill would leave you with`,
             wrong.map(([id, n]) => `${id} says ${said[id] ?? '(no badge)'} and the fixture holds ${n}`).join('; ') +
-              ' — PRs is counted through its own status sub-filter, so the merged one is deliberately not in it'
+              ' — Inbox is the three questions and the two unmerged pull requests; the chats are on Work'
           );
       }
 
@@ -1111,21 +1137,20 @@ try {
     const held = await evalJs(
       s,
       `(() => {
-        const pill = document.querySelector('.viewpill[data-pill="question"]');
+        const pill = document.querySelector('.viewpill[data-pill="home"]');
         const badge = pill && pill.querySelector('.viewpill-count');
-        if (!badge) return { ok: false, why: 'no badge on Questions' };
-        const focusable = document.querySelector('button.viewpill[data-pill="pr"]');
+        if (!badge) return { ok: false, why: 'no badge on Inbox' };
+        const focusable = document.querySelector('button.viewpill[data-pill="epics"], a.viewpill[data-pill="epics"]');
         focusable && focusable.focus();
         const before = badge.textContent;
-        window.beadcause.views.counts({ home: 555, epics: 421, question: 128, pr: 999, session: 7 });
-        const after = document.querySelector('.viewpill[data-pill="question"] .viewpill-count');
+        window.beadcause.views.counts({ home: 128 });
+        const after = document.querySelector('.viewpill[data-pill="home"] .viewpill-count');
         return {
           ok: true,
           before,
           after: after ? after.textContent : null,
           same: after === badge,
           focused: document.activeElement === focusable,
-          pr: document.querySelector('.viewpill[data-pill="pr"] .viewpill-count')?.textContent ?? null,
         };
       })()`
     );
@@ -1148,7 +1173,7 @@ try {
   for (const size of SIZES) {
     await s.send('Emulation.setDeviceMetricsOverride', { ...size, deviceScaleFactor: 2, mobile: true });
     await sleep(150);
-    await evalJs(s, `window.beadcause.views.counts({ home: 999, epics: 999, question: 999, pr: 999, session: 999 }), 1`);
+    await evalJs(s, `window.beadcause.views.counts({ home: 999 }), 1`);
     await sleep(150);
     const m = await evalJs(s, PROBE);
     const three = m.pills.filter((p) => p.count !== null).every((p) => p.count === '999');
@@ -1163,100 +1188,85 @@ try {
       );
   }
 
-  /* ------------------------------------------- a pill the scope cannot fetch */
+  /* ------------------------------------------- a pill the Inbox cannot fetch */
 
   /*
-    The one pill on the row that is not simply a narrowing of what is already in hand.
+    Beads is the one pill that is not a narrowing of what is already in hand.
 
-    `bead` is the only kind with a `side` (public/inboxfilter.js), and the scope decides
-    which sweep runs — so under `Human`, the default and the scope nearly every phone is
-    on, the beads have not been fetched and could not be shown. The row does not know
-    that: viewbar.js draws all seven pills on all twelve pages, which is what lets one
-    row say the same thing everywhere. So for a while `All Beads` under `Human` was a
-    pill whose tap was swallowed — `set()` dropped the selection, `current()` fell back
-    and the row lit `My Epics` (bc-khoe.25).
-
-    Driven here rather than only in `test/inboxkinds.mjs` because everything that suite
-    can reach is the *filter*: this is three files agreeing across a real tap — the row's
-    click handler, the filter's widen seam, and public/app.js answering it with the scope
-    switch beside the row. The refetch is asserted off the fixture's own request log,
-    because a page read afterwards cannot tell you whether one went out.
+    Since bc-qzng7.2 the Inbox is always the `human` sweep — the Human / Both / Agent
+    switch is gone — and the beads are not in that sweep. So tapping Beads has to fetch
+    the wider one itself (the filter's widen seam, answered by public/app.js), and going
+    back to Inbox has to put the sweep back. Driven here rather than only in
+    test/inboxkinds.mjs because this is three files agreeing across a real tap; the
+    refetch is asserted off the fixture's own request log.
   */
-  console.log(`\n\x1b[1mAll Beads, from the scope that cannot fetch one\x1b[0m`);
+  console.log(`\n\x1b[1mBeads, from an Inbox that cannot fetch one\x1b[0m`);
   {
     await s.send('Emulation.setDeviceMetricsOverride', { ...SIZES[1], deviceScaleFactor: 2, mobile: true });
-    /* Once to have an origin to write in, then again so the page boots with the scope
-       parked where the pill was dead. The stored kinds go too — a previous run of this
-       file leaves `bead` in there, which would be the check passing on its own history. */
+    /* Once to have an origin to write in, then again so the page boots clean. A stale
+       `beadcause.scope` is left set to `both` on purpose: the Inbox must ignore it. */
     await s.send('Page.navigate', { url: `http://127.0.0.1:${port}/?t=viewbar-check-scope` });
     await sleep(900);
-    await evalJs(s, `localStorage.setItem('beadcause.scope', 'human'), localStorage.removeItem('beadcause.kinds'), localStorage.removeItem('beadcause.beadsSide'), 1`);
+    await evalJs(s, `localStorage.setItem('beadcause.scope', 'both'), localStorage.removeItem('beadcause.kinds'), localStorage.removeItem('beadcause.beadsSide'), 1`);
+    const booted = HITS.length;
     await s.send('Page.navigate', { url: `http://127.0.0.1:${port}/?t=viewbar-check-scope-2` });
     await sleep(1200);
 
     const STATE = `(() => {
-      const armed = document.querySelector('.filterpills .chip-row.scopes .chip[aria-pressed="true"]');
       const cur = document.querySelector('.viewbar [aria-current="page"]');
       const bead = document.querySelector('.viewbar [data-pill="beads"]');
       return {
-        scope: armed ? armed.dataset.chip : null,
+        scopes: !!document.querySelector('.filterpills .chip-row.scopes'),
         lit: cur ? cur.dataset.pill : null,
         beadTag: bead ? bead.tagName.toLowerCase() : null,
-        stored: localStorage.getItem('beadcause.scope'),
       };
     })()`;
 
     const before = await evalJs(s, STATE);
-    if (before.scope === 'human') ok('Home comes up on Human, which is the scope the beads are not fetched on');
-    else bad('Home comes up on Human', `the armed scope chip says ${before.scope ?? 'nothing'} — the rest of this section is measuring something else`);
-    if (before.lit === 'home') ok('and Home is lit, which is Home with nothing narrowed');
-    else bad('Home is lit before the tap', `the row says ${before.lit ?? 'nothing'}`);
-    if (before.beadTag === 'button') ok('All Beads is drawn as a tappable button on this scope, not hidden and not inert');
-    else bad('All Beads is a tappable button on Human', `it is a <${before.beadTag ?? 'nothing'}> — a pill you cannot tap is the other way to make this bug`);
+    if (!before.scopes) ok('Inbox draws no scope switch');
+    else bad('Inbox draws no scope switch', 'the Human / Both / Agent chips are back on the filter row');
+    if (before.lit === 'home') ok('and Inbox is lit, which is Inbox with nothing narrowed');
+    else bad('Inbox is lit before the tap', `the row says ${before.lit ?? 'nothing'}`);
+    const wide = HITS.slice(booted).filter((u) => u.startsWith('/api/questions?scope=') && !u.startsWith('/api/questions?scope=human'));
+    if (!wide.length) ok('and a stored "both" from before the redesign is ignored — the Inbox asked for the human sweep only');
+    else bad('the Inbox ignores a stored scope', `it asked for ${[...new Set(wide)].join(', ')}`);
+    if (before.beadTag === 'button') ok('Beads is drawn as a tappable button, not hidden and not inert');
+    else bad('Beads is a tappable button on Inbox', `it is a <${before.beadTag ?? 'nothing'}>`);
 
     const asked = HITS.length;
-    const hit = await evalJs(s, `!!document.querySelector('.viewbar button.viewpill[data-pill="beads"]')?.click() || true`);
+    await evalJs(s, `!!document.querySelector('.viewbar button.viewpill[data-pill="beads"]')?.click() || true`);
     await sleep(1400);
     const after = await evalJs(s, STATE);
 
-    if (after.lit === 'beads') ok('tapping it leaves Beads lit, on its Open side — All Beads since bc-yjekg.3');
+    if (after.lit === 'beads') ok('tapping it leaves Beads lit, on its Open side');
     else
       bad(
-        'tapping All Beads leaves All Beads lit',
+        'tapping Beads leaves Beads lit',
         after.lit === 'home'
-          ? 'the row bounced back to Home — the selection was dropped rather than reached, which is bc-khoe.25 exactly'
+          ? 'the row bounced back to Inbox — the selection was dropped rather than reached, which is bc-khoe.25 exactly'
           : `the row lights ${after.lit ?? 'nothing'}`
       );
-    if (after.scope === 'both') ok('and the scope switch beside it has moved to Both, where the beads are fetched');
-    else bad('the scope switch moves to Both', `it says ${after.scope ?? 'nothing'} — the widening is invisible, or did not happen`);
-    // bc-yjekg reversed this: a stored widening left Home and Questions on Both for good
-    // after one visit to All Beads. The widening is the pill's, not yours.
-    if (after.stored === 'human') ok('and it is not stored — the scope you chose is still Human');
-    else bad('the widened scope is not stored', `beadcause.scope is ${after.stored ?? 'unset'} — one visit to All Beads re-scopes every view for good`);
-
     const refetched = HITS.slice(asked).filter((u) => u.startsWith('/api/questions?scope=both'));
     if (refetched.length) ok(`and the beads were actually asked for (${refetched[0]})`);
     else
       bad(
-        'the tap refetches on the wider scope',
+        'the tap refetches on the wider sweep',
         `nothing asked for /api/questions?scope=both — the pill lit a slice of a payload that was never fetched. Since the tap: ${HITS.slice(asked).join(', ') || 'no requests at all'}`
       );
-    /* The other half of the bead, and the one a green check above could hide: the widening
-       is a request *on a tap*, and the Human poll it left behind must not have grown one.
-       bc-w156.4 refused paying for a per-workspace bead query on every Human poll and that
-       refusal stands. */
-    const onHuman = HITS.slice(0, asked).filter((u) => u.startsWith('/api/questions?scope=') && !u.startsWith('/api/questions?scope=human'));
-    if (!onHuman.length) ok('and nothing went out on a wider scope before the tap — the Human poll is unchanged');
-    else bad('the Human poll asks for nothing wider', `it asked for ${[...new Set(onHuman)].join(', ')}`);
 
-    // And leaving it hands the scope back (bc-yjekg): Questions is reachable on Human.
-    await evalJs(s, `!!document.querySelector('.viewbar button.viewpill[data-pill="question"]')?.click() || true`);
+    // And leaving it hands the sweep back.
+    const left = HITS.length;
+    await evalJs(s, `!!document.querySelector('.viewbar button.viewpill[data-pill="home"]')?.click() || true`);
     await sleep(1400);
     const back = await evalJs(s, STATE);
-    if (back.scope === 'human') ok('leaving All Beads for Questions puts the scope switch back on Human');
-    else bad('leaving All Beads restores the scope you chose', `the switch says ${back.scope ?? 'nothing'} after tapping Questions`);
-    if (back.stored === 'human') ok('and Human is what is stored');
-    else bad('Human is still stored after leaving All Beads', `beadcause.scope is ${back.stored ?? 'unset'}`);
+    if (back.lit === 'home') ok('tapping Inbox again lights Inbox');
+    else bad('leaving Beads for Inbox lights Inbox', `the row lights ${back.lit ?? 'nothing'}`);
+    if (!back.scopes) ok('and still draws no scope switch');
+    else bad('Inbox draws no scope switch after Beads', 'the widening left the chips on screen');
+    const stillWide = HITS.slice(left).filter((u) => u.startsWith('/api/questions?scope=both'));
+    const human = HITS.slice(left).filter((u) => u.startsWith('/api/questions?scope=human'));
+    if (human.length || !stillWide.length) ok('and the Inbox is back on the human sweep');
+    else bad('Inbox goes back to the human sweep', `since the tap: ${HITS.slice(left).join(', ')}`);
   }
 
   /* ------------------------------------------------- the row that does not fit */
@@ -1284,12 +1294,11 @@ try {
       bad(`${at}: the page draws the pill row`, 'it does not draw one at this width');
       continue;
     }
+    // The bar shrinks to fit rather than scrolling (bc-qzng7.4), so at the narrowest width
+    // the claim is that it still fits, and still says where you are.
     const over = m.scrollWidth - m.clientWidth;
-    if (over <= 0) {
-      bad(
-        `${at}: the row overflows at ${PINCH.width}px`,
-        `it fits in ${m.clientWidth}px with ${IDS.length} pills — this pass exists to put the row in the state the reveal is about, and it is not in it`
-      );
+    if (over > 0) {
+      bad(`${at}: the bar still fits at ${PINCH.width}px`, `${over}px of it is past the screen`);
       continue;
     }
     const cur = m.pills.find((p) => p.current === 'page');
@@ -1297,13 +1306,8 @@ try {
       bad(`${at}: "${litFor(page.url)}" is current`, 'nothing carries aria-current at this width');
       continue;
     }
-    if (cur.seen)
-      ok(`${at}: "${cur.id}" is scrolled into view on load — the row is ${over}px wider than the screen and starts at ${m.scrollLeft}px`);
-    else
-      bad(
-        `${at}: "${cur.id}" is scrolled into view on load`,
-        `the row is ${over}px wider than its ${m.clientWidth}px of screen and sits at scrollLeft ${m.scrollLeft} — the pill saying where you are is off the edge`
-      );
+    if (cur.seen) ok(`${at}: "${cur.id}" is on screen, and the bar fits in ${m.clientWidth}px`);
+    else bad(`${at}: "${cur.id}" is on screen`, `the pill saying where you are is off the edge at scrollLeft ${m.scrollLeft}`);
     // Still one line, at the width where wrapping would be most tempting.
     if (m.lines.length === 1 && m.downBy <= 0) ok(`${at}: and it is still one line`);
     else bad(`${at}: the row is still one line`, `${m.lines.length} lines, ${m.downBy}px clipped downwards`);
@@ -1395,31 +1399,21 @@ try {
         `it drew ${m.cards} — the fixture's roots did not reach the screen, so the badge below is being asked about a board that is not there`
       );
 
-    if (m.rows === 0) ok('and there is no list under it at all, which is what the badge has to be about');
+    // Since bc-qzng7.3 Work draws the chats under the board and nothing else: the fixture's
+    // two conversations, and none of its questions or pull requests.
+    if (m.rows === CONSOLES.length) ok(`and under it only the ${m.rows} chat(s) — no questions, no pull requests`);
     else
       bad(
-        'nothing is listed under the board',
-        `${m.rows} row(s) are drawn — bc-khoe.28's gate is off, and the old sum would be the right answer again`
+        'only the chats are listed under the board',
+        `${m.rows} row(s) are drawn where the fixture holds ${CONSOLES.length} chat(s) — bc-khoe.28's gate is off`
       );
 
-    if (said.epics === String(WANT_BOARDED.epics))
-      ok(`so "My Epics" says ${said.epics} — the cards on the board, not the ${WANT.epics} rows it no longer draws`);
-    else
-      bad(
-        `"My Epics" counts the board it opens`,
-        `the badge says ${said.epics ?? '(none)'} and the board holds ${m.cards} card(s)` +
-          (said.epics === String(WANT.epics) ? ' — that is the sum of the four slices, which is bc-khoe.49 exactly' : '')
-      );
-
-    const moved = ['question', 'pr', 'session'].filter((id) => said[id] !== String(WANT_BOARDED[id]));
-    if (!moved.length)
-      ok(`and the other three are where they were — ${['question', 'pr', 'session'].map((id) => `${id} ${said[id]}`).join(' · ')}`);
-    else
-      bad(
-        'the other three badges are untouched by the board',
-        moved.map((id) => `${id} says ${said[id] ?? '(no badge)'} and the fixture holds ${WANT_BOARDED[id]}`).join('; ') +
-          ' — they are counted ahead of the board gate and each still opens its own slice'
-      );
+    // My Efforts carries no badge since bc-qzng7.2 — only Inbox counts — so what is left
+    // to assert is that starting an epic does not move the Inbox's number.
+    if (said.epics === undefined) ok('and My Efforts carries no badge — a place, not a pile');
+    else bad('My Efforts carries no badge', `it says ${said.epics}`);
+    if (said.home === String(WANT_BOARDED.home)) ok(`and Inbox still says ${said.home} — starting an epic moved a card, not a question`);
+    else bad('Inbox is untouched by the board', `it says ${said.home ?? '(no badge)'} and the fixture holds ${WANT_BOARDED.home}`);
   }
 
 } finally {

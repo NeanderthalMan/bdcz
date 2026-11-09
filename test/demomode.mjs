@@ -13,7 +13,16 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
 
-import { askRouter, demoHistory, demoRows, slugOfBranch, standOnGreen } from '../lib/demomode.js';
+import {
+  approvedOn,
+  approveRefusal,
+  askRouter,
+  demoHistory,
+  demoRows,
+  dropGreen,
+  slugOfBranch,
+  standOnGreen,
+} from '../lib/demomode.js';
 
 let failures = 0;
 let ran = 0;
@@ -336,6 +345,77 @@ await check('the branch slug is what lib/gaterun.js files a run under', () => {
   assert.equal(slugOfBranch('worktree-candidate-history-sj8k4-w2r'), 'candidate-history-sj8k4-w2r');
   assert.equal(slugOfBranch('main'), '');
   assert.equal(slugOfBranch(''), '');
+});
+
+console.log('\napprove — bc-sj8k.3');
+
+const base1 = sha('a');
+const base2 = sha('b');
+const tried = (number, over = {}) => record(number, sha(String(number % 10)), { baseSha: base1, ...over });
+const cleanRun = (head, over = {}) => ({ runId: 'r1', running: false, status: 'ok', sha: head, ...over });
+
+await check('a tried candidate with green CI on the main it was tried against may be approved', () => {
+  assert.equal(approveRefusal({ row: pr(5), record: tried(5), baseTip: base1 }), null);
+  assert.equal(approvedOn({ row: pr(5) }), 'CI');
+});
+
+await check('a head nobody tried on green is refused — approving is approving what you tried', () => {
+  assert.match(approveRefusal({ row: pr(5), record: null, baseTip: base1 }), /not been tried on green/);
+  // A candidate for an older head is not this head's.
+  assert.match(approveRefusal({ row: pr(5), record: tried(5, { headSha: sha('9') }), baseTip: base1 }), /not been tried on green/);
+});
+
+await check('failing, running or absent CI is refused, and the sentence names what failed', () => {
+  const failing = pr(5, { checks: { state: 'failing', total: 4, failed: ['test (2)'] } });
+  assert.match(approveRefusal({ row: failing, record: tried(5), baseTip: base1 }), /gates have not passed: CI is failing \(test \(2\)\)/);
+  const running = pr(5, { checks: { state: 'pending', total: 4, failed: [] } });
+  assert.match(approveRefusal({ row: running, record: tried(5), baseTip: base1 }), /still running/);
+  const none = pr(5, { checks: null });
+  assert.match(approveRefusal({ row: none, record: tried(5), baseTip: base1 }), /no CI check ran/);
+});
+
+await check('a clean b7e-gate run on this very head answers for red or absent CI, and nothing else does', () => {
+  const head = sha('5');
+  const failing = pr(5, { checks: { state: 'failing', total: 4, failed: ['test (0)'] } });
+  assert.equal(approveRefusal({ row: failing, record: tried(5), baseTip: base1, runs: [cleanRun(head)] }), null);
+  assert.equal(approvedOn({ row: failing, runs: [cleanRun(head)] }), 'b7e-gate run r1');
+  // On an earlier commit, still running, or failed: none of them is this head passing.
+  for (const run of [cleanRun(sha('4')), cleanRun(head, { running: true }), cleanRun(head, { status: 'fail' })]) {
+    assert.match(approveRefusal({ row: failing, record: tried(5), baseTip: base1, runs: [run] }), /gates have not passed/);
+  }
+  // And it never outvotes CI that is still speaking.
+  const running = pr(5, { checks: { state: 'pending', total: 4, failed: [] } });
+  assert.match(approveRefusal({ row: running, record: tried(5), baseTip: base1, runs: [cleanRun(head)] }), /still running/);
+});
+
+await check('main moving since it was tried is refused, and so is not knowing either end', () => {
+  assert.match(approveRefusal({ row: pr(5), record: tried(5), baseTip: base2 }), /main has moved under #5 since it was built \(aaaaaaaaaaaa → bbbbbbbbbbbb\)/);
+  assert.match(approveRefusal({ row: pr(5), record: tried(5), baseTip: null }), /could not read where main is now/);
+  assert.match(approveRefusal({ row: pr(5), record: tried(5, { baseSha: null }), baseTip: base1 }), /does not record which main/);
+});
+
+await check('a draft, a merged or a closed pull request is refused before anything else is asked', () => {
+  assert.match(approveRefusal({ row: pr(5, { draft: true }), record: tried(5), baseTip: base1 }), /draft/);
+  assert.match(approveRefusal({ row: pr(5, { state: 'CLOSED' }), record: tried(5), baseTip: base1 }), /closed, so there is nothing/);
+  assert.match(approveRefusal({ row: pr(5, { merged: true, state: 'MERGED' }), record: tried(5), baseTip: base1 }), /merged/);
+  assert.match(approveRefusal({ row: null }), /not on the board/);
+});
+
+await check('dropping green is a POST to the router, and says which candidate it took down', async () => {
+  const seen = [];
+  const server = http.createServer((req, res) => {
+    seen.push(`${req.method} ${req.url} ${req.headers['x-beadcause-token']}`);
+    res.end(JSON.stringify({ ok: true, dropped: 'beadcause.pr5.555555555555' }));
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  try {
+    const cfg = { port: server.address().port, token: 'tok' };
+    assert.equal(await dropGreen(cfg), 'beadcause.pr5.555555555555');
+    assert.deepEqual(seen, ['POST /internal/router/green/drop tok']);
+  } finally {
+    server.close();
+  }
+  assert.equal(await dropGreen({ port: 1, token: 'x' }), null);
 });
 
 console.log(`\n${ran - failures}/${ran} passed`);

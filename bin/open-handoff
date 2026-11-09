@@ -23,9 +23,22 @@
 # inherited from $PWD) is resolved to the checkout it belongs to, and the redirect
 # is printed — see bc-tstol below.
 #
-# Every daemon refusal — no daemon, wrong workspace, OBSERVING, 409, 400 — falls
-# through to path 2 and says so on one line. A handoff that silently opens nothing
-# is the failure this whole thing exists to avoid.
+# Every daemon refusal — no daemon, wrong workspace, OBSERVING, a 409 that is not
+# "already has one", 400 — falls through to path 2 and says so on one line. A handoff
+# that silently opens nothing is the failure this whole thing exists to avoid.
+#
+# Two answers are *not* refusals, and opening iTerm on them is how one handoff got two
+# successors (bc-t5inx: dv-q52fe and dv-pa8h5 on 2026-10-31):
+#
+#   - **A timeout.** The daemon got the POST and is still launching — it took 44 s on a
+#     busy evening, against a 20 s client limit. The script asks once more; the daemon
+#     marks a handoff "opening" before it launches, so the second ask is a quick 409
+#     `already`. If that times out too, nothing is opened and the exit is 4, with the
+#     kickoff printed, because a second window is worse than a pasted prompt.
+#   - **A 409 carrying `already: true`.** A session has this handoff, or is coming up on
+#     it. That is the guard working; exit 0.
+#
+# OPEN_HANDOFF_TIMEOUT (seconds, default 90) is how long each ask waits.
 #
 # Exits non-zero with a message when the fallback itself cannot run, so the caller
 # can fall back to telling the user to paste the kickoff prompt themselves.
@@ -41,7 +54,7 @@ while [ $# -gt 0 ]; do
     --window)        WHERE="window"; shift ;;
     --no-daemon)     USE_DAEMON=0; shift ;;
     --dry-run)       DRY=1; shift ;;
-    -h|--help)       sed -n '2,27p' "$0"; exit 0 ;;
+    -h|--help)       sed -n '2,44p' "$0"; exit 0 ;;
     -*)              echo "open-handoff: unknown flag $1" >&2; exit 2 ;;
     *)               ID="$1"; shift ;;
   esac
@@ -79,7 +92,7 @@ if [ -n "$COMMON" ] && [ -n "$GITDIR" ] && [ "$GITDIR" != "$COMMON" ]; then
 fi
 
 CFG="${BEADCAUSE_CONFIG_DIR:-$HOME/.config/beadcause}/config.json"
-DAEMON_BODY=""; DAEMON_CODE=""
+DAEMON_BODY=""; DAEMON_CODE=""; DAEMON_RC=0
 
 # Which beads workspace this handoff lives in: whatever graph `bd` resolves in <dir>,
 # named the way this daemon's config names it. That is what actually decided which graph
@@ -143,7 +156,7 @@ daemon_says() {
 }
 
 post_handoff() {
-  local port="$1" body out code token
+  local port="$1" body out code token rc=0
   # Re-read rather than reuse `daemon_says`'s TOKEN: that function runs in a command
   # substitution — it has to, its stdout is the port — so every variable it sets dies
   # with the subshell, and an empty token here is a 401 that reads like a refusal.
@@ -151,14 +164,32 @@ post_handoff() {
   body="$(jq -nc --arg w "$WS" --arg i "$ID" '{workspace:$w, id:$i}')"
   # Body and status in one call: the refusals carry a sentence worth printing, and
   # a 409 discarded in favour of "it didn't work" is a fall-back nobody can debug.
-  out="$(curl -sS -m 20 -o /dev/stdout -w '\n%{http_code}' \
+  #
+  # curl's own exit status is kept, because `000` alone cannot tell "never reached the
+  # daemon" (7, refused: safe to fall back) from "the daemon has it and is slow" (28,
+  # timed out: falling back is the second window). bc-t5inx.
+  out="$(curl -sS -m "${OPEN_HANDOFF_TIMEOUT:-90}" -o /dev/stdout -w '\n%{http_code}' \
           -H 'Content-Type: application/json' \
           -H "x-beadcause-token: ${token}" \
-          -d "$body" "http://127.0.0.1:${port}/api/handoff" 2>/dev/null || true)"
+          -d "$body" "http://127.0.0.1:${port}/api/handoff" 2>/dev/null)" || rc=$?
   code="$(printf '%s' "$out" | tail -n1)"
   DAEMON_BODY="$(printf '%s' "$out" | sed '$d')"
   DAEMON_CODE="${code:-000}"
+  DAEMON_RC="$rc"
   [ "$code" = "200" ]
+}
+
+# Did the daemon say somebody already has this handoff? Its "already" 409s carry
+# `already: true`; every other 409 (not a handoff) is a real refusal.
+daemon_has_it() {
+  [ "$DAEMON_CODE" = 409 ] &&
+    printf '%s' "$DAEMON_BODY" | jq -e '.already == true' >/dev/null 2>&1
+}
+
+# A timeout, or the connection dropping after the request went out: the daemon may be
+# acting on it. 7 (refused) and 6 (no such host) mean it never arrived, and are refusals.
+in_flight() {
+  [ "$DAEMON_CODE" = 000 ] && case "$DAEMON_RC" in 28|52|56) true ;; *) false ;; esac
 }
 
 # ------------------------------------------------------------- path 2: the iTerm
@@ -166,8 +197,20 @@ post_handoff() {
 # The kickoff prompt lives here, byte-exact, and the daemon's `handoffPromptFor`
 # (lib/session.js in beadcause) says the same four things in markdown. They have to
 # agree: which path opened the successor must not change what the successor does.
+# The claim is bin/claim.js beside this script, by absolute path: the successor runs in
+# another workspace's directory, where nothing of beadcause is on PATH. ~/.claude/open-
+# handoff.sh is a symlink to this file, so resolve it before taking the directory.
+SELF="$0"
+if [ -L "$SELF" ]; then
+  LINK="$(readlink "$SELF")"
+  case "$LINK" in /*) SELF="$LINK" ;; *) SELF="$(dirname "$SELF")/$LINK" ;; esac
+fi
+CLAIM_BIN="$(cd "$(dirname "$SELF")" && pwd)/claim.js"
+
 PROMPT="Read handoff ${ID}. Run: bd show ${ID} --json | jq -r '.[0].description'
-Then run: bd update ${ID} --claim
+Then claim it for this session: node ${CLAIM_BIN} ${ID}
+If that exits 3, another live session is already working this handoff: stop, do not do
+the work here as well, say which session has it and end the turn.
 Then continue from that handoff's \"Next action\". Do not re-derive context that
 the handoff already states; if something it claims is UNVERIFIED, verify it before
 relying on it.
@@ -177,6 +220,12 @@ things stand, and file every question for Adam as its own bead — bd create --t
 --priority=1 --assignee=adam --labels=human,author-decision — then bd dep add ${ID} <it>."
 
 open_iterm() {
+  if [ "$(uname -s)" != Darwin ]; then
+    # osascript and iTerm exist only on a Mac: say so once and hand the prompt over.
+    echo "open-handoff: no beadcause could open it and this host is not macOS (no iTerm/Terminal) — paste this into a new claude session in $DIR:" >&2
+    printf '%s\n' "$PROMPT" >&2
+    return 4
+  fi
   command -v claude >/dev/null || { echo "open-handoff: claude not on PATH" >&2; exit 3; }
 
   # The command is written to a runner file rather than typed into AppleScript, so
@@ -195,11 +244,17 @@ open_iterm() {
     echo "--- would open a new $WHERE and run:"; cat "$RUNNER"; rm -f "$RUNNER"; return 0
   fi
 
+  # bc-9qnd7: don't keep the keyboard. iTerm jumps to the front on create window/tab
+  # whatever we say, so no `activate`, and the app Adam was in gets it back afterwards.
+  # lsappinfo, not System Events: it needs no Automation grant. Both output formats
+  # (`"CFBundleIdentifier"=` and Darwin 27's `bundleID=`) — see parseBundleId in lib/iterm.js.
+  PRIOR="$(/usr/bin/lsappinfo info -only bundleid "$(/usr/bin/lsappinfo front 2>/dev/null)" 2>/dev/null \
+    | sed -nE 's/.*("CFBundleIdentifier"|bundleID)="([^"]*)".*/\2/p' | head -1)"
+
   if [ -d /Applications/iTerm.app ]; then
     if [ "$WHERE" = tab ]; then
       osascript <<APPLESCRIPT >/dev/null
 tell application "iTerm2"
-  activate
   if (count of windows) = 0 then
     set t to (create window with default profile)
     tell current session of t to write text "$TYPED"
@@ -214,7 +269,6 @@ APPLESCRIPT
     else
       osascript <<APPLESCRIPT >/dev/null
 tell application "iTerm2"
-  activate
   set w to (create window with default profile)
   tell current session of w to write text "$TYPED"
 end tell
@@ -223,11 +277,15 @@ APPLESCRIPT
   else
     osascript <<APPLESCRIPT >/dev/null
 tell application "Terminal"
-  activate
   do script "$TYPED"
 end tell
 APPLESCRIPT
   fi
+
+  case "$PRIOR" in
+    ''|com.googlecode.iterm2|com.apple.Terminal) ;;
+    *) /usr/bin/open -b "$PRIOR" >/dev/null 2>&1 || true ;;
+  esac
 
   echo "open-handoff: opened $ID in a new iTerm $WHERE (dir: $DIR, permission-mode auto)"
 }
@@ -242,10 +300,28 @@ if PORT="$(daemon_says)"; then
     open_iterm
     exit 0
   fi
-  if post_handoff "$PORT"; then
+  opened() {
     OPENED_IN="$(printf '%s' "$DAEMON_BODY" | jq -r '.dir // empty' 2>/dev/null || true)"
     echo "open-handoff: beadcause opened $WS/$ID${OPENED_IN:+ in $OPENED_IN}"
     exit 0
+  }
+  taken() {
+    WHY="$(printf '%s' "$DAEMON_BODY" | jq -r '.error // empty' 2>/dev/null || true)"
+    echo "open-handoff: beadcause already has $WS/$ID${WHY:+ — $WHY} — not opening another" >&2
+    exit 0
+  }
+  if post_handoff "$PORT"; then opened; fi
+  if daemon_has_it; then taken; fi
+  if in_flight; then
+    echo "open-handoff: beadcause took longer than ${OPEN_HANDOFF_TIMEOUT:-90}s (curl $DAEMON_RC) — it may still be opening $ID; asking again rather than opening a second window" >&2
+    if post_handoff "$PORT"; then opened; fi
+    if daemon_has_it; then taken; fi
+    if in_flight; then
+      echo "open-handoff: beadcause did not answer twice, and may still be opening $ID — NOT opening an iTerm window, because that would be a second successor." >&2
+      echo "open-handoff: if no window comes up, paste this into a new claude session in $DIR:" >&2
+      printf '%s\n' "$PROMPT" >&2
+      exit 4
+    fi
   fi
   WHY="$(printf '%s' "$DAEMON_BODY" | jq -r '.error // empty' 2>/dev/null || true)"
   echo "open-handoff: beadcause refused (${DAEMON_CODE}${WHY:+ — $WHY}) — opening an iTerm window instead" >&2

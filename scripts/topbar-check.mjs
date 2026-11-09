@@ -385,6 +385,7 @@ const SHELLPROBE = `(() => {
     barBottom: Math.round(br.bottom),
     rowTop: rr ? Math.round(rr.top) : null,
     rowBottom: rr ? Math.round(rr.bottom) : null,
+    vh: innerHeight,
     pinned,
   };
 })()`;
@@ -768,15 +769,18 @@ try {
         await evalJs(s, SCROLLIT);
         await sleep(250);
         const st = await evalJs(s, SHELLPROBE);
-        /* The pill row sits against the picker-less bar, and stays there through a scroll.
-           A hole between the two is what a hardcoded offset used to buy on the day the
-           picker hid itself, and it is still the shape of the mistake worth catching. */
-        if (st.rowTop === st.barBottom && st.rowTop === before.rowTop)
-          ok(`${at}: the pill row sits against the bar at ${st.rowTop}px and stays there`);
+        /* The pill row sits against an edge of the screen, and stays there through a scroll.
+           Until bc-qzng7.4 that edge was the foot of the picker-less bar; since then the row
+           is the bottom bar on a phone, so the edge is the foot of the window. A hole either
+           way is what a hardcoded offset used to buy on the day the picker hid itself, and it
+           is still the shape of the mistake worth catching. */
+        const against = st.rowTop === st.barBottom || st.rowBottom === st.vh;
+        if (against && st.rowTop === before.rowTop)
+          ok(`${at}: the pill row sits against ${st.rowTop === st.barBottom ? 'the bar' : 'the foot of the screen'} at ${st.rowTop}–${st.rowBottom}px and stays there`);
         else
           bad(
-            `${at}: the pill row sits against the bar and stays there`,
-            `the bar ends at ${st.barBottom}px, the row starts at ${st.rowTop}px (was ${before.rowTop}px before the scroll)`
+            `${at}: the pill row sits against the bar or the foot of the screen and stays there`,
+            `the bar ends at ${st.barBottom}px, the row is ${st.rowTop}–${st.rowBottom}px in a ${st.vh}px window (was ${before.rowTop}px before the scroll)`
           );
         const off = st.pinned || [];
         if (off.length) bad(`${at}: nothing pins itself to the window`, misfits(st, off));

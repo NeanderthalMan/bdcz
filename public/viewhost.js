@@ -562,7 +562,20 @@
     };
     ctx.onData(() => entry.ready());
 
-    bc.views?.add?.({ id: v.view, icon: v.icon, label: v.label, href: v.path });
+    /*
+      The pill. `workspace` is the one field here the row does not draw: it is what lets
+      the row ask the space picker whether you are looking at this repo at all, and drop
+      the pill while you are not (bc-7j5yz). The pane, the grammar and the script above
+      are unconditional on purpose — a view stays addressable from every space, and only
+      its pill follows the picker. See `visible` in public/viewbar.js.
+    */
+    bc.views?.add?.({
+      id: v.view,
+      workspace: v.workspace,
+      icon: v.icon,
+      label: v.label,
+      href: v.path,
+    });
 
     el.querySelector('[data-refresh]')?.addEventListener('click', () => ctx.refresh());
 

@@ -275,6 +275,7 @@ const SINGLETONS = [
   'jiraResolved',
   'jiraIngest',
   'runMergeQueue',
+  'runMergeQueueFor',
 ];
 
 const SERVER = fs.readFileSync(LIB('server.js'), 'utf8');

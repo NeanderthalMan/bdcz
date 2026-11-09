@@ -51,6 +51,7 @@ import { fileURLToPath } from 'node:url';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(HERE, '..');
 const PAGE = fs.readFileSync(path.join(ROOT, 'public', 'config.js'), 'utf8');
+const ROUTE = fs.readFileSync(path.join(ROOT, 'public', 'hashroute.js'), 'utf8');
 
 const { SETTINGS, spaceDetail } = await import(path.join(ROOT, 'lib', 'spaces.js'));
 
@@ -90,12 +91,13 @@ console.log('\nthe space card carries a row for every setting');
  *
  *   - **`querySelectorAll` answers empty.** The only thing the page asks it for is the
  *     observer's read-only pass, which does nothing on an instance that acts.
- *   - **The Settings panel is opened through `localStorage`.** Which sections are unfolded
- *     lives in `beadcause.mon.open` — the console's key, kept when the card moved — and
- *     survives reloads, so a stored key is the same state a thumb reaches by tapping the
- *     summary, which is what space-check does.
+ *   - **The card is on a page of its own.** Since bc-qzng7.1 the pane is the Settings
+ *     screen, and `#config` alone is its list of pages; the space's rows are on
+ *     `#config?p=space`. So the real public/hashroute.js runs first — it is what reads the
+ *     page out of the hash — and the address handed in is that page's, which is the state
+ *     a tap on the list's "This space" row reaches.
  */
-async function drawCard(detail) {
+async function drawCard(detail, hash = '#config?p=space') {
   const node = () => ({
     innerHTML: '',
     textContent: '',
@@ -131,7 +133,7 @@ async function drawCard(detail) {
       },
     },
     document: { getElementById: (id) => nodes[id] || null, addEventListener() {}, activeElement: null },
-    location: { search: '', pathname: '/config', hash: '' },
+    location: { search: '', pathname: '/', hash },
     history: { replaceState() {} },
     localStorage: { getItem: (k) => store[k] ?? null, setItem(k, v) { store[k] = v; } },
     URLSearchParams,
@@ -150,6 +152,7 @@ async function drawCard(detail) {
       return { ok: true, status: 200, json: async () => body };
     },
   });
+  vm.runInContext(ROUTE, ctx, { filename: 'hashroute.js' });
   vm.runInContext(PAGE, ctx, { filename: 'config.js' });
 
   // The boot is async and the IIFE hands nothing back, so settle on the stubs' own
@@ -250,9 +253,10 @@ const unsetHtml = await drawCard(unset);
 
 /* ------------------------------------------------------------------------ the claims */
 
-await check('the card is drawn for the space, with its settings panel open', async () => {
+await check('the card is drawn for the space, on Settings → This space', async () => {
   assert.match(setHtml, /class="[^"]*\bspace-card\b/, 'no card on the rendered page');
-  assert.ok(setHtml.includes('<div class="space-row">'), 'the settings panel drew no rows — is it still folded?');
+  assert.ok(setHtml.includes('<div class="space-row">'), 'the This space page drew no rows');
+  assert.ok(setHtml.includes('class="settings-back"'), 'the page has no way back to the Settings list');
 });
 
 await check('a row for every setting in SETTINGS, and no row for anything else', async () => {

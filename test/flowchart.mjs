@@ -36,7 +36,21 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { AGENTS, baseline } from '../lib/foundation.js';
-import { ANY_AGENT, KINDS, agents, flowchart, mermaidFor, problems, sourcePaths } from '../lib/flowchart.js';
+import {
+  ANY_AGENT,
+  EXAMPLE_CONFIG,
+  EXAMPLE_WORKSPACE,
+  KINDS,
+  agents,
+  flowchart,
+  lifecycleFlow,
+  mermaidFor,
+  problems,
+  relayFlows,
+  sourcePaths,
+} from '../lib/flowchart.js';
+import { MAX_ATTEMPTS } from '../lib/mergebead.js';
+import { UNENDORSED } from '../lib/endorse.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -54,7 +68,8 @@ function check(name, fn) {
 
 console.log('the map of the system\n');
 
-const map = flowchart();
+// The committed page's case: the built flows at the shipped defaults and the made-up studio.
+const map = flowchart({ example: true });
 
 /* ------------------------------------------------------- the model's own rules */
 
@@ -212,6 +227,81 @@ check('no node is called something mermaid already means', () => {
 
 check('an unknown flow is an error rather than an empty diagram', () => {
   assert.throws(() => mermaidFor('no-such-flow'), /unknown flow/);
+});
+
+/* ------------------------------------------------- the flows built from settings */
+//
+// bc-c0c3u. The point of these two flows is that nobody keeps them up to date, so what is
+// pinned is that they *move*: each switch takes its tap out of the drawing or puts it in,
+// and the numbers and labels are the code's own constants rather than copies.
+
+const node = (flow, id) => flow.nodes.find((n) => n.id === id);
+const taps = (flow) => flow.nodes.filter((n) => n.kind === 'human').map((n) => n.id).sort();
+
+check('the lifecycle at the shipped defaults asks for every tap the defaults leave in', () => {
+  const f = lifecycleFlow();
+  assert.equal(node(f, 'endorse').kind, 'human', 'autoEndorse ships off, so endorsing is a tap');
+  assert.equal(node(f, 'ship').kind, 'human', 'autoShip ships off, so shipping is a tap');
+  assert.equal(node(f, 'review'), undefined, 'reviewRequired ships off, so no reviewer is drawn');
+  assert.equal(node(f, 'closegate'), undefined, 'no workspace declares a gate by default');
+  assert.ok(f.edges.some((e) => e.from === 'deliver' && e.to === 'queue'), 'auto-merge ships on');
+});
+
+check('each switch takes its tap out of the drawing, or puts one in', () => {
+  const ws = EXAMPLE_WORKSPACE;
+  const on = lifecycleFlow({ cfg: { autoEndorse: true, release: { autoShip: true } }, workspace: ws });
+  assert.equal(node(on, 'endorse').kind, 'code');
+  assert.equal(node(on, 'ship').kind, 'code');
+  assert.equal(taps(on).length, taps(lifecycleFlow()).length - 2);
+
+  const held = lifecycleFlow({ cfg: { pr: { autoMerge: false } }, workspace: ws });
+  assert.ok(held.edges.some((e) => e.from === 'deliver' && e.to === 'card'), 'auto-merge off sends every delivery to the card');
+  assert.ok(!held.edges.some((e) => e.from === 'deliver' && e.to === 'queue'), 'and nothing goes straight to the queue');
+
+  const reviewed = lifecycleFlow({ cfg: { pr: { reviewRequired: true } }, workspace: ws });
+  assert.equal(node(reviewed, 'review').agent, 'review-advocate');
+
+  const gated = lifecycleFlow({ cfg: EXAMPLE_CONFIG, workspace: ws });
+  assert.match(node(gated, 'closegate').label, /milestone · sign-off/, 'the gate is drawn with the workspace’s own labels');
+});
+
+check('a per-workspace answer outranks the global one, as it does for the daemon', () => {
+  const cfg = { release: { autoShip: true }, autoShipPerWorkspace: { [EXAMPLE_WORKSPACE]: false } };
+  assert.equal(node(lifecycleFlow({ cfg, workspace: EXAMPLE_WORKSPACE }), 'ship').kind, 'human');
+});
+
+check('the numbers and labels are the code’s, not copies', () => {
+  const f = lifecycleFlow();
+  assert.ok(node(f, 'queue').label.includes(`${MAX_ATTEMPTS} attempts`), 'MAX_ATTEMPTS is not what the queue box says');
+  assert.ok(node(f, 'ready').label.includes(UNENDORSED), 'the ready filter does not name the endorsement marker');
+});
+
+check('a relay is drawn as chainIn derives it, so a new checker appears without an edit here', () => {
+  const [flow] = relayFlows({ cfg: EXAMPLE_CONFIG, workspace: EXAMPLE_WORKSPACE });
+  const story = flow.nodes.filter((n) => n.label.startsWith('Story:')).map((n) => n.label.replace(/\n/g, ' '));
+  assert.deepEqual(story, [
+    'Story: draft author',
+    'Story: check editor',
+    'Story: check critic',
+    'Story: revise author',
+    'Story: file steward',
+  ]);
+  // Design's lead is one of its own checkers, and an agent never checks its own draft.
+  const design = flow.nodes.filter((n) => n.label.startsWith('Design:')).map((n) => n.label.split('\n')[1]);
+  assert.deepEqual(design, ['illustrator', 'editor', 'letterer', 'illustrator', 'steward']);
+
+  const cfg = structuredClone(EXAMPLE_CONFIG);
+  cfg.relays[EXAMPLE_WORKSPACE].departments['dept:story'].check.push('plotter');
+  const [grown] = relayFlows({ cfg, workspace: EXAMPLE_WORKSPACE });
+  assert.ok(grown.nodes.some((n) => n.label === 'Story: check\nplotter'), 'a checker added to the config is not in the chain');
+});
+
+check('a workspace that declares nothing gets no relay flow, and nothing names a real one', () => {
+  assert.deepEqual(relayFlows({ cfg: {}, workspace: 'nothing-declared' }), []);
+  assert.deepEqual(relayFlows({ cfg: EXAMPLE_CONFIG, workspace: '' }), []);
+  // The committed page is about the repo, so its built flows may only draw the made-up studio.
+  const src = fs.readFileSync(path.join(ROOT, 'lib', 'flowchart.js'), 'utf8');
+  assert.ok(!/delmar|sorrel|ehden/i.test(src), 'lib/flowchart.js names a real workspace');
 });
 
 /* ----------------------------------------------------------------- the two hosts */

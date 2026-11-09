@@ -103,7 +103,31 @@
 
   // Up before any subscriber registers, so each one is called with the answer straight
   // away and public/prs.js, which loads after this file, needs no first-paint special case.
-  show(known(stored()) ? stored() : chips[0]?.dataset.sub || '');
+  /*
+    In the shell the subtab row is hidden (bc-qzng7.9) — Work's details have no tab rows — so
+    which list is up is the address's `sub=`, beside montabs' `tab=`: `merge queue ›` on Work
+    links to `#advocates?tab=prs&sub=queue`, and a bare `tab=prs` (what `/prs`, `/pulls` and
+    every notification about the board hop to) is Open PRs, the board those links mean.
+  */
+  const asked = () => {
+    if (!inShell) return '';
+    try {
+      return new URLSearchParams(window.beadcause.route.parse(location.hash).query).get('sub') || '';
+    } catch {
+      return '';
+    }
+  };
+  const fromAddress = () => (known(asked()) ? asked() : chips[0]?.dataset.sub || '');
+  show(inShell ? fromAddress() : known(stored()) ? stored() : chips[0]?.dataset.sub || '');
+  if (inShell) {
+    // Re-read whenever the PRs section comes up, and when the address moves under it.
+    window.beadcause?.monTabs?.onChange?.((which) => {
+      if (which === 'prs') show(fromAddress());
+    });
+    panes.onQuery?.((view) => {
+      if (view === 'advocates') show(fromAddress());
+    });
+  }
 
   window.beadcause = window.beadcause || {};
   window.beadcause.prsTabs = {

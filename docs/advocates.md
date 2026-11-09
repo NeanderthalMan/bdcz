@@ -1,5 +1,15 @@
 # Advocates — an agent per repo
 
+> **Where the console is now (bc-qzng7.3).** The Advocates pill is gone. **Work** opens
+> on one health line ("N sessions running · M ready · K blocked"), and its "details ›"
+> opens this console. launchd and router trouble surfaces on that line only when
+> something is wrong. Each advocate's controls are on the Settings screen (bc-qzng7.1).
+> `/monitor`, `/advocates`, `/sessions`, `/work` and `/console`-era addresses still
+> answer, and light Work.
+> Since bc-qzng7.9 the console draws no chips of its own: `details ›` on Work is the
+> roster, `mirror ›` is Mirror, and `merge queue ›` over Work's In review stage is the
+> merge queue.
+
 ## Advocates — an agent per repo, whose job is the queue reaching zero
 
 Everything above is a **channel**. A question reaches your phone, an answer reaches
@@ -1674,6 +1684,57 @@ these two paragraphs a reader should distrust.
 - **The launchd log** (`~/Library/Logs/beadcause.log`) carries the same events as
   `[advocate] <repo>: …` lines, and the startup banner names every repo that has one
   with the number of sessions it may open.
+
+### Parking a workspace's tabs — Consolidate, Close all, Reopen (bc-4olsx)
+
+Every card on the advocates view — advocated repo or not — carries an **iTerm tabs** row
+with three buttons, for the day the Mac is drowning in Claude windows (bc-4olsx was filed
+after 17 GB of swap and a frozen iTerm with ~14 sessions open). The logic is
+`lib/tabpark.js`; the endpoints are `POST /api/tabs/close`, `/api/tabs/reopen` and
+`/api/tabs/consolidate`, each taking `{ workspace }` and answering
+`{ done, skipped: [{ sessionId, name, reason, why }], parked }`.
+
+- **Close all (N)** — two taps, the first arms it. Every *idle* Claude session of the
+  workspace is stopped (SIGTERM, then its tab closed by tty) and written to state as
+  `parkedTabs[workspace]`: `{ sessionId, cwd, name, configDir, parkedAt }`. It covers
+  sessions started by hand, not just the advocate's — the list is `liveSessions` and the
+  tab is found by `pid → tty → iTerm` (`sessionReach`). **A busy session is never
+  closed**, and one with no iTerm tab cannot be; both come back in `skipped` with the
+  reason, and the card lists them.
+- **Reopen (N)** — `claude --resume <id>` for each parked session, as a tab in the
+  workspace's home window, titled with the session's name; then the list is forgotten.
+  A conversation already running, or whose directory is gone, is skipped and dropped; one
+  whose open failed stays parked for the next press. Disabled at zero.
+- **Consolidate (N)** — gathers the tabs into the workspace's one home window; tabs
+  already home are left alone. Two methods, and the answer's `method` says which ran:
+  - **`move`** — the tabs themselves are moved, through iTerm2's Python API
+    (`Window.async_set_tabs`, scripts/iterm-consolidate.py, the backend's optional
+    `consolidate` capability). Nothing is interrupted and scrollback survives, so busy
+    sessions move too. The daemon authenticates with AppleScript's `request cookie and
+    key for app named "beadcause"` and runs the helper under `.venv-iterm/bin/python3`
+    if that exists, else `python3` — see [install](install.md) for the one-time setup.
+  - **`park-resume`**, the fallback when the API, the `iterm2` package or the cookie is
+    unavailable (`fallbackWhy` says which) — AppleScript cannot move a tab, so each idle
+    tab outside home is parked and resumed into it; busy ones are skipped.
+
+  Home is the recorded `itermWindows` window **only while one of its tabs still carries
+  the workspace's `user.beadcauseWorkspace` variable** — the same test the open script
+  makes. With no such window, `move` adopts the window already holding most of the
+  workspace's sessions, stamps every session in it with the variable (so the open script
+  honours it from then on) and records it; `park-resume` cannot stamp a window, so every
+  idle tab moves and the first resume makes one. Which window a tab is in comes from the
+  optional backend capability `tabWindows` (scripts/iterm-tab-windows.applescript).
+
+**The resume carries the login.** `configDir` is the session's `CLAUDE_CONFIG_DIR`,
+read off the live process with `ps -E` (`configDirForPid` in lib/claude.js) — the
+session record's directory cannot say, since `~/.claude-personal/sessions` is a symlink
+to `~/.claude/sessions`. The resume line exports it *after* the `cd`, because the `cd`
+fires the `chpwd` hook that would otherwise reset it; the default `~/.claude` is said as
+`unset CLAUDE_CONFIG_DIR`. Unknown (the `ps` failed) leaves it to the hook, as a reboot
+resume always has. See `configDirClause` in lib/session.js.
+
+Reopened tabs go through `openResumedWindow`, so they are registered as `resumed` like a
+reboot-resumed window — and the park sweep's `parkHandIdleMinutes` rule applies to them.
 
 ### How a session starts: iTerm runs the command, nothing is typed
 

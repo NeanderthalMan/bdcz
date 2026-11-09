@@ -313,8 +313,12 @@ try {
   // test/montabs.mjs's, and it is still covered there.
   await s.send('Page.navigate', { url: `${BASE}/?t=${TOKEN}` });
   await waitFor(s, `localStorage.getItem('beadcause.token') === ${JSON.stringify(TOKEN)}`);
+  // Since bc-qzng7.9 the console has no chips on screen and the address picks the section
+  // (`mirror ›` on Work links to `#advocates?tab=mirror`), so the stored key alone no longer
+  // brings the mirror up. It is still set, for a build that reads it; the address is what
+  // the redesigned shell reads.
   await evalJs(s, `localStorage.setItem('beadcause.mon.tab', 'mirror')`);
-  await s.send('Page.navigate', { url: `${BASE}/advocates` });
+  await s.send('Page.navigate', { url: `${BASE}/#advocates?tab=mirror` });
 
   /* ---- it draws the session the phone is holding ---- */
 

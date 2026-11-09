@@ -165,6 +165,10 @@ const runCli = (args) => execFileSync(process.execPath, [CLI, ...args], { encodi
   }
   const script = body.join('\n');
   check('the narrowing step reads its shas from env, not from an interpolation inside the script', at > 0 && runAt > at && /BASE_SHA/.test(script) && !/\$\{\{/.test(script), script.slice(0, 200));
+  // bc-xl7n.227: push: main narrows, and the whole roster moved to a nightly schedule.
+  const stepIf = wf.slice(at, runAt).join('\n');
+  check('the narrowing step runs on a push as well as a pull request', /github\.event_name == 'push'/.test(stepIf) && /github\.event\.before/.test(stepIf), stepIf);
+  check('a nightly schedule runs the whole roster', /^\s*schedule:\s*$/m.test(wf.join('\n')) && /cron: '[^']+'/.test(wf.join('\n')), 'no schedule trigger');
 
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'beadcause-shard-downmerge-'));
   const g = (...a) =>
@@ -235,6 +239,17 @@ const runCli = (args) => execFileSync(process.execPath, [CLI, ...args], { encodi
     check('a branch that downmerged earlier and committed since narrows on all its own commits', after.exit === 0 && after.narrowed === true && after.changed.join(' ') === 'b.txt d.txt', JSON.stringify(after));
     const unknown = step('0'.repeat(40), own);
     check('a sha the clone does not have is not narrowed, and does not fail the step', unknown.exit === 0 && unknown.narrowed === false, JSON.stringify(unknown));
+
+    // bc-xl7n.227: a push to main narrows too, with BASE_SHA = `before` and HEAD_SHA = the
+    // pushed sha, so the diff is exactly what the merge landed — not what main already had.
+    g('checkout', '-q', 'main');
+    g('merge', '-q', '--no-ff', '-m', 'Merge pull request #1', later);
+    const landed = g('rev-parse', 'HEAD');
+    g('checkout', '-q', '--detach', landed);
+    const push = step(moved, landed);
+    check('a push to main narrows on what the merge landed', push.exit === 0 && push.narrowed === true && push.changed.join(' ') === 'b.txt d.txt', JSON.stringify(push));
+    const firstPush = step('0'.repeat(40), landed);
+    check('a first push (before is all zeros) runs the whole roster', firstPush.exit === 0 && firstPush.narrowed === false, JSON.stringify(firstPush));
   } finally {
     fs.rmSync(repo, { recursive: true, force: true });
   }

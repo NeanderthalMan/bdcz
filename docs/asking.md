@@ -251,10 +251,13 @@ other account's questions, pull requests, chats, tickets, advocates and spaces a
 behind a filter you can widen — they are not on the screen, and the picker does not offer
 them.
 
-**The mark is the control.** It sits at the left-hand end of the top bar on every page,
-wrapped in a gear; tapping it opens a menu holding that page's own actions — refresh,
-foundations, open-in-Chrome — plus **Admin** and **Switch account**, which opens the
-picker. The picker has a ＋ for adding one: an address, a name, and a tick per workspace.
+**Settings → This machine → Account is the control** (bc-qzng7.1). It shows the address
+you are in and opens the picker; the picker has a ＋ for adding one: an address, a name,
+and a tick per workspace. Until bc-qzng7.1 this was **Switch account** in the menu behind
+the mark, beside Admin — both are rows of the
+[Settings screen](navigating.md#settings--the-space-its-advocate-and-everything-else) now, and
+the mark's menu (⋮) holds only what the page you are on can do: refresh, open in Chrome.
+The diagram below is that older menu, kept for the shape of the picker it opened.
 
 ```
 ┌────────────────────────────────────────────────┐
@@ -887,8 +890,11 @@ and whether that merge then deploys itself (`autoShip`) — because the moment y
 of those is set wrong is the moment you are looking at what it did, on a phone, at the
 weekend.
 
-So a space's settings are **`/config`**, a standing view with a pill of its own — the
-ninth on the row, and the rightmost, because it is the one you reach least often:
+So a space's settings are **`/config`**, which is now the **This space** page of the
+[Settings screen](navigating.md#settings--the-space-its-advocate-and-everything-else)
+(bc-qzng7.1) — reached by tapping the space name, whose first row is ⚙ Settings, and no
+longer a pill. The per-repo rows below became their own page, **Repos in this space**. The
+diagram is the card as it was when it had a pill, the ninth on the row:
 
 ```
 ┌──────────────────────────────────────────────┐
