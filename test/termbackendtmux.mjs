@@ -126,7 +126,7 @@ await check('the socket: env first; a name is -L, a path is -S, nothing is the d
 
 await check('a workspace becomes a session name tmux can target — no `.` or `:`', () => {
   assert.equal(sessionName('beadcause'), 'bc-beadcause');
-  assert.equal(sessionName('ada.log'), 'bc-adam_life');
+  assert.equal(sessionName('ada.log'), 'bc-ada_log');
   assert.equal(sessionName('a:b c'), 'bc-a_b_c');
   assert.equal(sessionName(''), 'bc-default');
 });

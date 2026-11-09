@@ -12,10 +12,11 @@
 // test/blame.mjs and test/b7eworktree.mjs already use for their own tools — because
 // `git log --grep`'s boundary behaviour (POSIX ERE has no `\b`, which is the whole
 // reason for the hand-rolled one) is exactly the thing worth proving against the real
-// command rather than assumed. The last section runs against this repo's own real,
-// immutable history: bc-42ow.4's landing under bc-42ow.3's PR #435 already happened and
-// can never un-happen, so pinning it here is not the kind of assertion that flakes with
-// main the way a suite's pass/fail would.
+// command rather than assumed. The last section rebuilds, in a scratch repo and under
+// made-up ids, the shape of a real landing — bc-42ow.4 delivered inside its sibling
+// bc-42ow.3's PR #435 — and does not read this repo's own history: the public snapshot (bdcz), a shallow clone
+// or a rewrite has none of those commits, so pinning a hash failed everywhere but here
+// (bc-ybgs2).
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -379,19 +380,29 @@ check('--help prints usage and exits 0', () => {
   assert.match(r.stdout, /b7e-landed/);
 });
 
-/* ------------------------------------------------------- 9. against this repo's own history */
+/* ---------------------------------------------------- 9. the shape of a real sibling landing */
 
-console.log("\nagainst this repo's own real, immutable history\n");
+console.log('\nthe shape of a real landing: one bead delivered inside its sibling\'s PR\n');
 
-await checkAsync('bc-42ow.4 landed under bc-42ow.3\'s PR #435, with the sibling in the family', async () => {
-  const r = await lc.checkLanded(ROOT, 'bc-42ow.4', { base: 'main' });
+await checkAsync('bc-7m4.4 landed under bc-7m4.3\'s PR #435, with the sibling in the family', async () => {
+  const work = makeRepo('landed-sibling-pr');
+  // The squash-merge subject names only the sibling; the bead itself is named in the
+  // body, as bc-42ow.3's real merge did for bc-42ow.4. The ids are made up so the
+  // bead lookup behind checkLanded finds nothing in the live tracker either.
+  const msg = 'bc-7m4.3: A plan may not give the same file to two groups (#435)\n\n'
+    + 'This is bc-7m4.3 and bc-7m4.4, delivered together on one branch\n'
+    + 'because the plan grouped them that way.\n';
+  fs.writeFileSync(path.join(work, 'plan.txt'), 'x\n');
+  git(work, 'add', '-A');
+  git(work, 'commit', '-q', '-m', msg);
+  push(work);
+  const r = await lc.checkLanded(work, 'bc-7m4.4', { base: 'main' });
   assert.equal(r.ok, true);
   assert.equal(r.verdict, 'landed');
-  const withPr = r.commits.find((c) => c.sha.startsWith('f8d4b710'));
-  assert.ok(withPr, 'f8d4b710 is among the commits naming bc-42ow.4');
-  assert.equal(withPr.pr, 435);
-  const siblingNamed = r.family.some((c) => c.ids.includes('bc-42ow.3'));
-  assert.ok(siblingNamed, 'bc-42ow.3 shows up in the family search');
+  const withPr = r.commits.find((c) => c.pr === 435);
+  assert.ok(withPr, 'the #435 commit is among the commits naming bc-7m4.4');
+  const siblingNamed = r.family.some((c) => c.ids.includes('bc-7m4.3'));
+  assert.ok(siblingNamed, 'bc-7m4.3 shows up in the family search');
 });
 
 /* ---------------------------------------------------------------------- verdict */
