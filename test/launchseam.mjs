@@ -199,22 +199,40 @@ await check('and it refuses before it writes anything — the spool is still emp
  * `assertMayLaunch`. A third door added without one fails here, which is what the original
  * line was actually protecting.
  */
-await check('every way to the AppleScript has the guard above it', () => {
-  const src = read('lib/session.js');
-  const sites = [...src.matchAll(/\[SCRIPT,/g)].map((m) => m.index);
-  assert.ok(sites.length >= 1, 'lib/session.js no longer opens a window at all');
+/**
+ * Since bc-obucr.1 the open script is called from the terminal backend
+ * (lib/termbackend-*.js), not from lib/session.js — so the property is checked in every
+ * backend file, and in lib/session.js for the backend's `open`, which is the door's last
+ * step on this side of the seam. A new backend file is covered by being named like one.
+ */
+const guarded = (file, pattern, what) => {
+  const src = read(file);
+  const sites = [...src.matchAll(pattern)].map((m) => m.index);
   for (const at of sites) {
     const before = src.slice(0, at);
     // The top of the function this call sits in — the last one declared before it.
     const starts = [...before.matchAll(/^(?:export\s+)?(?:async\s+)?function\s+\w+\(/gm)].map((m) => m.index);
     const top = starts.length ? starts[starts.length - 1] : 0;
     const guard = before.lastIndexOf('assertMayLaunch(');
-    assert.ok(guard !== -1, 'lib/session.js does not consult the launch guard at all');
+    assert.ok(guard !== -1, `${file} does not consult the launch guard at all`);
     assert.ok(
       guard > top,
-      `the call site at ${at} is in a function that never asks the guard — a window a test run can open`
+      `the ${what} at ${at} in ${file} is in a function that never asks the guard — a window a test run can open`
     );
   }
+  return sites.length;
+};
+
+await check('every way to the AppleScript has the guard above it', () => {
+  const backends = fs.readdirSync(path.join(ROOT, 'lib')).filter((f) => /^termbackend-.+\.js$/.test(f));
+  assert.ok(backends.includes('termbackend-iterm.js'), 'the iTerm backend has moved');
+  let sites = 0;
+  for (const f of backends) sites += guarded(`lib/${f}`, /\[SCRIPT,/g, 'open-script call');
+  assert.ok(sites >= 1, 'no terminal backend opens a window at all');
+  // And the door's own hand-off to the backend: lib/session.js reaches `.open(` through
+  // `terminal(cfg)` only, and every such call has the guard in its function too.
+  assert.ok(!/\[SCRIPT,/.test(read('lib/session.js')), 'lib/session.js calls the open script directly again');
+  assert.ok(guarded('lib/session.js', /terminal\(cfg\)\.open\(/g, 'backend open') >= 1, 'lib/session.js no longer opens a window at all');
 });
 
 /* ========================= 3. the brief is the row's, given a bare id (bc-xl7n.43) */
@@ -295,7 +313,7 @@ await check('the runner sets it for every child it spawns', () => {
   // closing brace made a correct addition to that object read as a removed guard, which
   // is a check that fails for the one change it should not care about. The comma or the
   // brace is what says `NO_LAUNCH` is a complete entry and not the prefix of a longer name.
-  assert.match(src, /env: \{ \.\.\.process\.env, \[NO_LAUNCH\]: '1'\s*[,}]/, 'suites are spawned without the guard set');
+  assert.match(src, /env: \{ \.\.\.(?:process\.env|suiteEnv\(\)), \[NO_LAUNCH\]: '1'\s*[,}]/, 'suites are spawned without the guard set');
 });
 
 await check('exactly one suite opts out, and it has a stub AppleScript to justify it', () => {

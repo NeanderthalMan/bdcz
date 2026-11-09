@@ -13,6 +13,33 @@ set -euo pipefail
 LABEL="n12n.beadcause"
 LEGACY_LABELS=("com.neo.beadcause" "com.beadcause" "n8l.beadcause" "m4m.beadcause")
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# The Claude Code allow rules install.sh merged in for bd (bc-eg9tj) — only the ones it
+# added, from its ledger in ~/.config/beadcause; rules you had already are kept. First,
+# because the systemd branch below exits early. Never fatal.
+( cd "$ROOT" && node scripts/claude-permissions.mjs --uninstall ) || \
+  echo " warn could not remove the Claude Code allow rules for bd — carrying on." >&2
+
+# Linux: a systemd user unit (bc-obucr.3), chosen the way install.sh chooses it.
+SERVICE_MANAGER="${BEADCAUSE_SERVICE_MANAGER:-}"
+if [ -z "$SERVICE_MANAGER" ]; then
+  case "$(uname -s)" in Linux) SERVICE_MANAGER=systemd ;; *) SERVICE_MANAGER=launchd ;; esac
+fi
+if [ "$SERVICE_MANAGER" = systemd ]; then
+  unit="beadcause.service"
+  unit_file="$HOME/.config/systemd/user/$unit"
+  echo "==> stopping $unit"
+  systemctl --user disable --now "$unit" 2>/dev/null || true
+  [ -f "$unit_file" ] && { echo "==> removing $unit_file"; rm -f "$unit_file"; }
+  systemctl --user daemon-reload 2>/dev/null || true
+  # Lingering is left on: it is a per-user setting other services may rely on, and
+  # install.sh may not have been what turned it on. `loginctl disable-linger` undoes it.
+  echo "==> done. Config and token kept at ~/.config/beadcause (delete it by hand to fully reset)."
+  echo "    lingering was left as it is; 'loginctl disable-linger' turns it off."
+  exit 0
+fi
+
 # The monitor agent goes first: it is a child of this install, and leaving it loaded
 # would open a window at every login for a daemon that is no longer there. The same
 # holds for each legacy label's monitor.

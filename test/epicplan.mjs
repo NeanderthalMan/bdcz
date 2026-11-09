@@ -419,6 +419,20 @@ await check('a sub-epic held by its own children is not loose work (bc-xl7n.204)
   assert.deepEqual(unplanned(plan, [bead('x-1.8'), bead('x-1.8.3')]).map((b) => b.id), ['x-1.8.3']);
 });
 
+await check('a sub-epic whose only open child is a promotion bead is held (bc-xl7n.206)', () => {
+  const plan = validatePlan(planSpec([group('one', ['x-1.8.1'])]), { epic: 'x-1', children: null });
+  const queue = [bead('x-1.9')];
+  const beads = new Map([
+    ['x-1.9', { id: 'x-1.9', status: 'open' }],
+    ['x-1.9.1', { id: 'x-1.9.1', status: 'closed' }],
+    ['x-1.9.2', { id: 'x-1.9.2', status: 'open', labels: ['promote'] }],
+  ]);
+  assert.deepEqual(unplanned(plan, queue).map((b) => b.id), ['x-1.9'], 'without the rows it still reads loose');
+  assert.deepEqual(unplanned(plan, queue, null, beads), [], 'an unclosed descendant the queue filtered out holds it');
+  beads.set('x-1.9.2', { id: 'x-1.9.2', status: 'closed' });
+  assert.deepEqual(unplanned(plan, queue, null, beads).map((b) => b.id), ['x-1.9'], 'all closed: genuinely loose');
+});
+
 /**
  * The adopted child. `bd update <bead> --parent=<epic>` moves the edge and renumbers
  * nothing, so a real child of `x-1` can be called `z-9` — and every id-shaped answer to
@@ -613,6 +627,54 @@ await check('a planned epic dispatches one window per group', async () => {
   assert.match(heldWhy(r.card, 'x-1.2'), /grouped under x-1\.1 in x-1's plan/);
   assert.match(heldWhy(r.card, 'x-1'), /its plan is being worked in groups/);
   assert.deepEqual(r.calls.comments, ['x-1'], 'one comment read, for the one planned epic');
+});
+
+/**
+ * A parent grouped with its own children — bc-xl7n.224, seen on dv-2uu.100. With the
+ * children deferred or claimed the parent is the only ready member, so it becomes the lead,
+ * and a lead used to skip `heldByChildren` entirely: a window every tick with nothing in it.
+ */
+const parentGroup = () => ({
+  plan: validatePlan(planSpec([group('glimpses', ['x-1.1', 'x-1.1.1', 'x-1.1.2', 'x-1.1.3'])]), { epic: 'x-1', children: null }),
+  parents: [
+    ['x-1.1', 'x-1'],
+    ['x-1.1.1', 'x-1.1'],
+    ['x-1.1.2', 'x-1.1'],
+    ['x-1.1.3', 'x-1.1'],
+  ],
+  children: {
+    'x-1.1': [
+      { id: 'x-1.1.1', status: 'deferred' },
+      { id: 'x-1.1.2', status: 'in_progress' },
+      { id: 'x-1.1.3', status: 'open' },
+    ],
+  },
+});
+
+await check('a group lead alone with open children of its own is held, not dispatched (bc-xl7n.224)', async () => {
+  const { plan, parents, children } = parentGroup();
+  const r = await tick({
+    ready: [epic('x-1', { priority: 1, labels: [PLANNED_LABEL] }), bead('x-1.1')],
+    comments: { 'x-1': [{ text: formatPlan(plan) }] },
+    children,
+    parents,
+  });
+  assert.deepEqual(openedIds(r), [], 'no window on a parent with nothing of its own to do');
+  assert.match(heldWhy(r.card, 'x-1.1'), /a parent with 3 open child issues — its group has nothing else ready/);
+});
+
+await check('the same group with a child ready still dispatches the parent as lead (bc-xl7n.224)', async () => {
+  const { plan, parents, children } = parentGroup();
+  const r = await tick({
+    ready: [epic('x-1', { priority: 1, labels: [PLANNED_LABEL] }), bead('x-1.1'), bead('x-1.1.3')],
+    comments: { 'x-1': [{ text: formatPlan(plan) }] },
+    children,
+    parents,
+  });
+  assert.deepEqual(openedIds(r), ['x-1.1']);
+  const lead = r.opened.find((o) => o.id === 'x-1.1');
+  assert.deepEqual(lead.group, { name: 'glimpses', epic: 'x-1', with: ['x-1.1.3'] });
+  assert.match(heldWhy(r.card, 'x-1.1.3'), /grouped under x-1\.1 in x-1's plan/);
 });
 
 /**

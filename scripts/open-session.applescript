@@ -94,7 +94,14 @@ on run argv
 	set theWorkspace to ""
 	if (count of argv) > 2 then set theProfile to item 3 of argv
 	if (count of argv) > 3 then set theHome to item 4 of argv
-	if (count of argv) > 4 then set returnFocus to (item 5 of argv is "return-focus")
+	-- "return-app" (bc-9qnd7): Adam was in another app, which the caller hands the
+	-- keyboard back to the moment this returns. So skip the beat and the iTerm-side
+	-- selects below: every moment spent here is iTerm sitting over what he was typing in.
+	set otherApp to false
+	if (count of argv) > 4 then
+		set returnFocus to ((item 5 of argv is "return-focus") or (item 5 of argv is "return-app"))
+		set otherApp to (item 5 of argv is "return-app")
+	end if
 	if (count of argv) > 5 then set theWorkspace to item 6 of argv
 
 	-- Coerced out here, before the tell block, for the reason the old bounds were parsed
@@ -208,7 +215,7 @@ on run argv
 			try
 				select home
 			end try
-		else if priorWindowId is not missing value then
+		else if priorWindowId is not missing value and not otherApp then
 			-- The beat is load-bearing. Without it `select` loses the race against
 			-- iTerm's own activation and the new tab simply keeps the keyboard;
 			-- measured at 0.4s, which is comfortably clear of it.

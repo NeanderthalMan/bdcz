@@ -1,5 +1,13 @@
 # The inbox
 
+> **Since bc-qzng7.2 the inbox is always the `human` scope.** The Human / Both / Agent
+> setting described below is no longer on screen: Inbox is what is waiting on you, and
+> the live beads agents are working on are under the Beads pill. Questions and PRs are a
+> Kind filter on Inbox rather than pills, and beads held for endorsement are one row at
+> the top linking to `/endorse`. See [the pill row](navigating.md#getting-around--the-pill-row).
+> What follows is kept as the record of how the scopes work, since Beads still widens
+> to `both` for its own load.
+
 ## What the inbox shows
 
 The inbox is `bd human list` filtered to open, and that is the app's whole premise:

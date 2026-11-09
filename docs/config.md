@@ -199,6 +199,8 @@
 | `jiraSeconds` | how often the daemon asks JIRA what is assigned to you (default 60, floor 15) — one HTTP call per workspace with JIRA on, one memoised `bd config get jira.url` per ten minutes for a workspace on auto whose bd points at no site, and **nothing at all** for one switched off. Beside `pollSeconds` rather than inside `jira`, because that block is keyed by workspace name and a number in it would be a setting for a workspace called "seconds". See [the tickets, on a clock](#the-tickets-on-a-clock--and-a-failure-that-is-never-an-empty-list) |
 | `checkoutRefreshMinutes` | how often every configured workspace's **main checkout** is fast-forwarded to its trunk, in minutes (default 15, floor 1) — `git fetch` plus a `--ff-only` merge, and only of a clean tree already on trunk; anything else is left alone and tried again next tick. A workspace with a `deploys` entry is skipped, because its checkout is already kept current by that deploy's own pull. Fixes `/api/asset` and a repo's own CI gates resolving a card's `docs:`/`images:` path against a checkout nobody had ever refreshed by hand in days. See `lib/checkoutfresh.js` |
 | `pollSeconds` | how often the daemon *sweeps* — one `bd human list` per workspace, plus a `bd comments` per conversation you are waiting on (default 30). A cost, not a latency: `detectSeconds` is what decides how quickly a change is noticed, and this is the backstop under it |
+| `mergeQueue.seconds` | how often each workspace's merge queue makes a pass when its last one moved nothing (default 30). **Per workspace and never awaited by the poller** — each workspace has its own clock and its own in-flight guard, so a hung tracker or a long advocate tick delays only itself; a pass that merged or downmerged something goes again on the next beat, and a merge pulls the release sweep forward so its settle window starts from the merge. See `lib/mqclock.js` (bc-7vvgj) |
+| `mergeQueue.concurrency` | how many workspaces' merge-queue passes may be in flight at once (default 4) — the cap on concurrent `gh` and `bd` writes now that the passes no longer run in series. A workspace that finds it full is taken on a later beat |
 | `staleClaimHours` | how long a claimed bead may go untouched, with no live session, process or advocate window naming it, before the daemon comments and puts it back in the queue (default 72; `0` turns the sweep off). Three days rather than hours because the cheapest wrong answer is freeing a bead somebody is still on — see [a claim this daemon never made](advocates.md#and-a-claim-this-daemon-never-made--libclaimsweepjs) |
 | `detectSeconds` | how often it asks *whether anything moved*, which is a ~150-byte read per workspace and spawns nothing (default 5). Setting it equal to `pollSeconds` turns the mechanism off and restores the single-clock cycle — see [noticing in five seconds](android.md#noticing-in-five-seconds--and-not-sweeping-to-find-out) |
 | `agentLogRetentionMonths` | how long an archived agent run's **body** is kept, in months (default 24). Not a free number: 24 is `RETENTION_FLOOR_MONTHS` in `lib/evidence.js`, set from the report — a Type II window is twelve months and the report is relied on for about twelve months after issuance. **Raising it is a setting; lowering it is ignored**, because a shorter period is a disk decision with a retention rule written beside it. The chained record of each run is permanent either way. See [the run that survives its own reset](development.md#the-run-that-survives-its-own-reset--libagentarchivejs-testagentarchivemjs) |
@@ -206,6 +208,7 @@
 | `slowRequestMs` | a request past this is named in the log with where its time went (default `1000` — the page-load budget itself, so a line means "this missed the budget" rather than "this was slower than its neighbours"). `0` turns **the log** off and nothing else: the per-route figures behind `/api/timings` are always collected. See [timing every request](operations.md#timing-every-request--which-routes-are-actually-slow) |
 | `sync.enabled` | keep a shared tracker shared — `bd dolt pull` then `bd dolt push`, per workspace, on a timer (default `true`). It is on for everybody and it does nothing at all on a workspace with no Dolt remote, which is every workspace until you add one. See [A tracker two Macs share](operations.md#a-tracker-two-macs-share) |
 | `sync.seconds` | how often (default 120, floor 30). **Not a performance knob** — it is the width of the window in which two machines can act on stale information, which is why it is a setting and not a constant. There is deliberately no list of *which* workspaces sync: a Dolt remote is that list |
+| `sync.overrides` | one workspace's own clock, by name — `{ "architecture": { "seconds": 60 } }` for a tracker a whole team shares, `{ "scratch": { "enabled": false } }` to stop one syncing (default `{}`). A workspace not named here keeps `sync.seconds`, so this is never a list of which workspaces sync, and an override cannot turn one back on under `sync.enabled: false`. The sync runs on its own clock, not at the end of the poll cycle, so each is a real interval rather than a minimum |
 | `compliance.subjects` | whose compliance programme this install runs: `{ "<org-id>": "<absolute path to a subject file>" }` (unset by default, which reads as `{}` — there is **no default subject**, and the key is read only if set, so `lib/config.js` carries no `compliance` default for anything to flip). A subject file is the organisation's own record — the system boundary its SOC 2 report describes, its gap assessment rows, its service commitments — kept in that organisation's repository and read by `lib/boundary.js`. With none configured, `beadcause-boundary`, `beadcause-gaps`, `beadcause-description`, `beadcause-engagement` and `beadcause-recovery` say so in one line and exit 0; a file that is missing, unreadable or fails validation is reported by name and nothing from it is used. `~/` is expanded, a relative path is read against the config directory, and the file is read once per process. See [The system boundary](compliance.md#the-system-boundary-as-data--beadcause-boundary) |
 | `publication.seconds` | how often the daemon publishes what this install can say about itself (default 3600, floor 60). It does nothing at all on an install with the management system off, which is every install by default. There is deliberately **no `publication.enabled`** beside it: a cadence is a setting, and whether an install with the layer on publishes at all is not — see [Publishing on a clock nobody has to remember](development.md#publishing-on-a-clock-nobody-has-to-remember--libpublishsweepjs-testpublishsweepmjs) |
 | `monitor.enabled` | generate the LaunchAgent that opens the [activity monitor](operations.md#the-monitor--what-it-is-doing-right-now) at login (default `false`; `npm run monitor` works either way) |
@@ -230,6 +233,63 @@
 
 `host` falls back to `127.0.0.1` if Tailscale was down when the config was
 written — fix the IP in the file if the phone can't connect.
+
+### All settings — every key from the app
+
+Settings → **All settings** (`#config?p=all`, bc-qzng7.5) shows every key in the table
+above, grouped the way the table runs (This machine, Advocates, Pull requests, Slack, ntfy
+…) and searchable by key name and by description. Each key shows its current value, its
+default, its source — in the file or not, the file's value when the running daemon has not
+loaded it yet, the spaces and repos that override it, and for the `…PerWorkspace` family
+what every repo resolves to and from which level — and this table's description of it.
+
+**The page's list is this table.** `GET /api/config` parses the rows above (and the
+`jira.<workspace>.enabled` table below) on every request, so a key documented here is on the
+page without a change anywhere else. lib/configkeys.js adds only what prose cannot say: the
+type (from `configDefaults()` in lib/config.js, the defaults `loadConfig` merges, and
+lib/advocate.js's `options()` for `advocates.*`), the clamps the rows above document, and
+which keys are secrets, file-only or wait for a restart. **A row whose key has no default
+and no entry in `SPECS` fails `test/configkeys.mjs`** — that is the guard against a key
+this table documents and the page cannot show.
+
+**One write, one key.** `POST /api/config` takes `{key, value}`, `{key, reset: true}` (take
+it out of the file so the default applies), `{revert: <log id>}`, or `{action: "restart"}`.
+A write is validated against the same spec the page was drawn from — the type, the
+documented clamps (refused with the bound, never silently clamped), the enum — and then
+edits **one path of the stored JSON**, exactly as a hand edit would, and the same path of
+the running daemon's config. It never rewrites the file from the merged config, so a
+hand-kept nine-line file stays nine lines plus one. An observer is refused.
+
+**Every write is logged** to `config-changes.jsonl` beside this file: an id, when, who (the
+signed-in address, or *a paired device* for a token caller), the old and the new — `{set:
+false}` meaning the key was absent and the default applied. The last 50 are at the foot of
+the page, each with **Revert**, which writes the old side back through the same validation
+and is a log line of its own.
+
+**Secrets never reach the browser.** `token` and `ntfy.topic` are sent as set or not set and
+nothing else; any field inside an object value whose name ends in token, secret, password,
+apiKey or credential is replaced with a placeholder, and that object is drawn read-only so a
+Save cannot write the placeholder back. A write whose value would put such a field into this
+file is refused, for the reason `clientSecret` is not a field here.
+
+**What a browser may not write**, drawn with its value and the reason instead of an editor:
+the two secrets; `auth.*`, because sign-in decides who reaches the page at all; where a
+credential is read from (`*TokenFile`, `*SecretFile`); the programs this Mac runs (`bdBin`,
+`deploys`, `promoteDrivers`); what an agent may do unattended (`sessionPermissionMode`,
+`terminalPermissionMode`, `agents`, `agentToolsAcknowledged`); `terminal` and `openSessions`,
+whose whole point is to limit a paired device; and `workspaces`, which is rediscovered on
+every start. The per-entry rows (`jira.<workspace>.…`, `agents[].tools`) are edited inside
+their parent.
+
+**Restart.** Most keys are read on each use and take effect the moment they are written. The
+ones read once — the listener (`port`, `host`, `tls.*`), the clocks (`pollSeconds`,
+`detectSeconds`, `jiraSeconds`, `sync.*`, …), the trackers (`workspaceRoots`,
+`workspaceDirs`, `repos`), `spaces`, `accounts` and a few more, listed as `RESTART` in
+lib/configkeys.js — carry a `↻ restart` badge, and a write to one puts a **Restart the
+daemon** button at the top of the page. It runs the service manager's restart
+(`launchctl kickstart -k`, or systemd's), after the reply is sent. The list is the keys
+known to be read at startup, not an audit of every reader; the button is also at the foot of
+the page for a change that does not show.
 
 ### JIRA, per workspace — read-only, and one setting
 

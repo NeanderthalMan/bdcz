@@ -14,6 +14,10 @@
     <div class="brand">
       <span class="dot" id="pulse"></span>
       <h1>Admin</h1>
+      <!-- This page is a row of the Settings screen (bc-qzng7.1), and this is the way
+           back to the page of Settings that holds it. /settings hops to the shell's
+           Settings pane; ?p= names the page. -->
+      <a class="settings-up" href="/settings?p=machine" aria-label="Back to Settings">‹ Settings</a>
       <!-- An observer may read this screen and may not press anything on it: its
            advocate state is the real daemon's, so a kill from here would reach
            across. See the OBSERVING guard on POST /api/admin. -->

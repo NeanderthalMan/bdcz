@@ -1,5 +1,13 @@
 # Pull requests and the endorsement queue
 
+> **Where the board is now (bc-qzng7.3).** The PR board is no longer a screen of its own.
+> On **Work**, each effort card's pipeline strip names the pull requests in review and
+> the ones merged but not shipped. The **Stage** filter on Work (In review, Shipping)
+> lists every pull request at that stage, using the same cards and the same full-screen
+> view, so merging, shipping and commenting work as before. Pull requests waiting on
+> your merge are also in **Inbox** under the Kind filter's PRs. `/prs`, `/pulls` and
+> `/prs.html` still answer, and land on Work's details.
+
 ## Pull requests — review, merged, pushed, deployed, live
 
 A delivery question asks *may I merge this?* and is gone the moment you answer it — and

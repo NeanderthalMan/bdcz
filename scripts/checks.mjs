@@ -58,6 +58,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { audit, discover } from '../lib/checkaudit.js';
 import { onExit, killAndRemoveSync } from '../lib/teardown.js';
+import { suiteEnv } from '../lib/launchguard.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -217,7 +218,7 @@ const run = (rel) =>
     const child = spawn(process.execPath, [path.join(ROOT, rel)], {
       cwd: ROOT,
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, TMPDIR: scratch },
+      env: { ...suiteEnv(), TMPDIR: scratch },
     });
     live.add(child);
     let out = '';

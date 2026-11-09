@@ -159,6 +159,28 @@
      would have to know about. Prefixed so it can never collide with `space:`/`ws:`. */
   const ADD = 'add:beadspace';
 
+  /**
+   * The picker's door to Settings (bc-qzng7.1) — the other row that is an action rather
+   * than a place, and the reason "tap the space name" is how Settings is reached.
+   *
+   * The space name *is* this `<select>`, so tapping it already opens a list, and the
+   * settings of the space you are looking at belong at the top of that list rather than
+   * behind a second control beside it. It is first rather than last because it is about
+   * the selection the list opens on; the add row stays last because it is about a space
+   * that does not exist yet.
+   *
+   * Where it goes depends on the page: the shell shows its own `config` pane, every
+   * other page loads `/settings`, which the daemon hops to that same pane.
+   */
+  const SETTINGS = 'go:settings';
+
+  /** Open Settings — the shell's pane where there is one, the document everywhere else. */
+  function openSettings() {
+    const panes = window.beadcause?.panes;
+    if (panes?.has?.('config')) panes.go('config');
+    else location.href = '/settings';
+  }
+
   /* The name of the group for repos in no configured space. Not a space — there is no
      entry for it in `spaces` and nothing to set on it (`GET /api/space` 404s on it by
      design) — but it is a value the filter can hold, so it needs a name in one place.
@@ -541,7 +563,7 @@
          to end. It is also what `label()` has always answered here, so the bar and the
          row it is selected in finally say the same thing. Ten characters either way,
          which is what `scripts/topbar-check.mjs` measures the bar against. */
-      const rows = [option(ALL, 'Everything', now === ALL)];
+      const rows = [option(SETTINGS, '⚙ Settings', false), option(ALL, 'Everything', now === ALL)];
 
       for (const s of state.spaces) {
         // The synthetic group is drawn once, below, and not here. `summarise()` emits a
@@ -774,6 +796,12 @@
       // same mechanism: a value that moved without a `change` we honoured.
       paint();
       window.beadcause?.addSpace?.open?.();
+      return;
+    }
+    // Settings is the same shape: put the control back on the real selection, then go.
+    if (sel.value === SETTINGS) {
+      paint();
+      openSettings();
       return;
     }
     set(filterOf(sel.value));

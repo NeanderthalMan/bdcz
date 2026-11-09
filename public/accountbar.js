@@ -42,13 +42,14 @@
   it is two taps from here. That was the trade the bead asked for and it is worth saying
   out loud rather than burying — the bar it bought is one row on every screen.
 
-  **Admin is a row this file draws rather than one it hoists**, because only the advocate
-  console ever had a door to it up there. It is skipped on /admin itself and on any page
-  that hoisted an `/admin` link of its own — see `admin()`.
+  **Admin, Notification settings and Switch account were rows this file drew**, and since
+  bc-qzng7.1 they are not: they are places rather than things this page can do, and they
+  live on the Settings screen (public/config.js), which is reached from the space name.
+  The trigger is ⋮ now rather than ⚙ for the same reason — the gear is Settings.
 
   ## Switching, and adding
 
-  "Switch account" opens the picker: one row per account, the active one ticked, and a
+  The account row on Settings → This machine opens the picker (`account.open()`): one row per account, the active one ticked, and a
   ＋ that opens the form behind it — an address, a name, and the workspaces (and, for the
   one workspace that is forty checkouts, the repos) that account can see. Both write to
   the server: the selection to `state.json` beside the inbox filter, the accounts to
@@ -143,19 +144,15 @@
   el.innerHTML = `
     <div class="accountmenu" id="account-menu" role="menu" hidden>
       <div class="accountmenu-actions" id="account-actions"></div>
-      <a class="accountmenu-row" id="account-admin" role="menuitem" href="/admin" hidden>
-        <span class="accountmenu-glyph" aria-hidden="true">⏸</span>
-        <span class="accountmenu-label">Admin</span>
-      </a>
-      <button type="button" class="accountmenu-row" id="account-notifications" role="menuitem" hidden>
-        <span class="accountmenu-glyph" aria-hidden="true">🔔</span>
-        <span class="accountmenu-label">Notification settings</span>
-      </button>
-      <button type="button" class="accountmenu-row accountmenu-switch" id="account-switch" role="menuitem">
-        <span class="accountmenu-glyph" aria-hidden="true">⇄</span>
-        <span class="accountmenu-label">Switch account<span class="accountmenu-sub" id="account-who">…</span></span>
-      </button>
     </div>`;
+  /* Admin, Notification settings and Switch account were rows here, under the page's
+     own actions, and they are not any more (bc-qzng7.1). All three are *places*, and
+     they are rows of the Settings screen now — Admin and the account under "This
+     machine", Android's channel settings under "Notifications" (public/config.js). What
+     is left in this menu is what the page you are on can do: refresh it, open it in
+     Chrome. No navigation stays behind the mark, which is the acceptance line the bead
+     was written against. The picker dialog below is still drawn by this file, because
+     it is the same dialog whichever screen opens it; Settings calls `account.open()`. */
 
   /** The mark's own heading, on the one page that has one. */
   const markHead = brand.querySelector('h1.mark');
@@ -165,17 +162,20 @@
   chip.id = 'account-chip';
   chip.setAttribute('aria-haspopup', 'menu');
   chip.setAttribute('aria-expanded', 'false');
-  chip.setAttribute('aria-label', 'Menu — accounts, admin, and what this page can do');
+  chip.setAttribute('aria-label', 'Page actions — what this page can do');
   if (markHead) {
     // The image itself, moved into the button and the button left inside the heading, so
     // the alt text is still what the `<h1>` says the page is.
     const img = markHead.querySelector('img');
     if (img) chip.append(img);
-    chip.insertAdjacentHTML('beforeend', '<span class="markmenu-gear" aria-hidden="true">⚙</span>');
+    /* ⋮ rather than the ⚙ it was: a gear is where Settings is on every phone, and the
+       Settings screen is not behind this button any more (bc-qzng7.1) — it is behind the
+       space name. A gear opening "Refresh" would be a promise this menu stopped keeping. */
+    chip.insertAdjacentHTML('beforeend', '<span class="markmenu-gear" aria-hidden="true">⋮</span>');
     markHead.append(chip);
     el.insertBefore(markHead, el.firstChild);
   } else {
-    chip.textContent = '⚙';
+    chip.textContent = '⋮';
     el.insertBefore(chip, el.firstChild);
   }
 
@@ -186,11 +186,8 @@
   if (dot && dot.parentNode === brand) dot.after(el);
   else brand.insertBefore(el, brand.firstChild);
 
-  const who = el.querySelector('#account-who');
   const menu = el.querySelector('#account-menu');
   const actions = el.querySelector('#account-actions');
-  const adminRow = el.querySelector('#account-admin');
-  const notificationsRow = el.querySelector('#account-notifications');
 
   /**
    * Move the page's own top-right buttons into the menu.
@@ -254,39 +251,28 @@
   }
 
   /**
-   * Whether the standing **Admin** row is drawn.
+   * A page with nothing to do has no menu (bc-qzng7.1).
    *
-   * Two pages answer no, for different reasons. On /admin it would be a row that goes
-   * where you already are. And on a page carrying a door of its own — the advocate
-   * console's ⚙, which is an `<a href="/admin">` and has been hoisted into this very menu
-   * a moment ago — it would be the second Admin row in one menu, which reads as two
-   * different places. The page's own wins because it is the one with the longer label and
-   * the one every existing check names.
+   * Until the account rows left, every menu had at least Switch account in it. Now a page
+   * whose top bar carried no buttons — the bead sheet, the doc, the docket, the graph,
+   * the session — would open an empty box, so the bare ⋮ is not drawn there at all. The
+   * inbox keeps its trigger whatever the menu holds, because there the trigger is also
+   * the mark and the mark is not optional.
    */
-  function admin() {
-    const here = /^\/admin(\.html)?\/?$/.test(location.pathname);
-    const already = actions.querySelector('a[href="/admin"], a[href="/admin.html"]');
-    adminRow.hidden = Boolean(here || already);
+  function emptyMenu() {
+    if (markHead || actions.children.length) return;
+    chip.hidden = true;
   }
 
   /**
-   * Android's own per-channel notification settings, one tap from this menu.
+   * Can this device open Android's own per-channel notification settings?
    *
-   * Hidden by default and revealed only by feature-detecting the bridge method, the
-   * same way public/app.js reveals **Open in Chrome** — a PWA in a browser has nowhere
-   * for this to go, and a userAgent sniff would draw the row on a browser that merely
-   * claims to be one. An APK built before this shipped has no `openNotificationSettings`
-   * on its `BeadcauseNative`, so the row stays hidden there too rather than doing
-   * nothing when tapped.
+   * Feature-detected off the bridge, the same way public/app.js reveals **Open in
+   * Chrome**: a PWA in a browser has nowhere for this to go, and an APK built before
+   * `openNotificationSettings` existed has no method to call. The row that uses it is on
+   * the Settings screen's Notifications page now (public/config.js), not in this menu.
    */
-  function notifications() {
-    if (typeof window.BeadcauseNative?.openNotificationSettings !== 'function') return;
-    notificationsRow.hidden = false;
-    notificationsRow.addEventListener('click', () => {
-      close();
-      window.BeadcauseNative.openNotificationSettings();
-    });
-  }
+  const nativeNotifications = () => typeof window.BeadcauseNative?.openNotificationSettings === 'function';
 
   /* -------------------------------------------------------------------- the menu */
 
@@ -516,28 +502,34 @@
   };
   const remove = (email) => post('/api/accounts', 'DELETE', { email });
 
-  el.querySelector('#account-switch').addEventListener('click', () => {
-    close();
-    showPicker();
-  });
 
   /* --------------------------------------------------------------- coming in */
 
+  /** Who listens for the account changing — the Settings screen's "This machine" row. */
+  const listeners = [];
+
   function paint() {
-    /* The address is the second line of **Switch account** rather than a chip on the bar
-       (see the header). Which means it is one tap from every screen instead of nought, and
-       the row it is on is the row that changes it — the two things you want the address
-       for are "which am I" and "not this one", and they are now the same target. */
     const label = state.account || state.me || 'no account yet';
-    /* "not set" leads, because with nothing configured what is drawn is the address this
-       Mac already files as rather than a choice anybody made, and the line ellipsises from
-       the right — so the half that says which it is has to be the half that survives. The
-       chip that used to draw this said the same thing by going grey, which is a distinction
-       nobody has ever read off a colour. */
-    who.textContent = state.account ? label : `not set · ${label}`;
-    chip.title = state.account
-      ? `${label} — accounts, admin, and what this page can do`
-      : 'No account configured — every workspace is in scope';
+    /* The address used to be the second line of a Switch account row in this menu. That
+       row is on the Settings screen now, and it asks `who()` below for the same words. */
+    chip.title = state.account ? `${label} — what this page can do` : 'What this page can do';
+    for (const fn of listeners) {
+      try {
+        fn();
+      } catch {
+        /* one listener's bug is not every listener's */
+      }
+    }
+  }
+
+  /**
+   * The words for the account row: the label, and "not set" leading when nothing is
+   * configured — the line ellipsises from the right, so the half that says which it is
+   * has to be the half that survives.
+   */
+  function who() {
+    const label = state.account || state.me || 'no account yet';
+    return state.account ? label : `not set · ${label}`;
   }
 
   /**
@@ -584,8 +576,7 @@
   }
 
   hoist();
-  admin();
-  notifications();
+  emptyMenu();
   paint();
   load();
 
@@ -599,6 +590,17 @@
     current: () => state.account,
     accounts: () => state.accounts.slice(),
     open: showPicker,
+    /** The words the Settings screen's account row shows. */
+    who,
+    /** Called whenever the roster or the active account moves. */
+    onChange(fn) {
+      if (typeof fn === 'function') listeners.push(fn);
+    },
+    /** Whether Android's channel settings can be opened from here, and the way to. */
+    nativeNotifications,
+    openNotifications() {
+      if (nativeNotifications()) window.BeadcauseNative.openNotificationSettings();
+    },
     /**
      * Open the menu without a tap.
      *

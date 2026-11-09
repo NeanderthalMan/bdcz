@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Install beadcause as a login-time background service on macOS.
+# Install beadcause as a background service: a launchd agent on macOS, a systemd user unit on Linux.
 #
 #   npm run install-service
 #   npm run install-service -- --non-interactive    # ask nothing; keep the answers on file
@@ -24,6 +24,22 @@ PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 MONITOR_LABEL="$LABEL.monitor"
 MONITOR_PLIST="$HOME/Library/LaunchAgents/$MONITOR_LABEL.plist"
 LOG="$HOME/Library/Logs/beadcause.log"
+# Which service manager installs it: launchd on macOS, a systemd *user* unit on Linux
+# (bc-obucr.3). BEADCAUSE_SERVICE_MANAGER overrides the platform — it is how
+# test/install.mjs runs the systemd half on a Mac — and lib/service.js reads the same
+# variable, so the daemon and its installer can never disagree about which one it is.
+SERVICE_MANAGER="${BEADCAUSE_SERVICE_MANAGER:-}"
+if [ -z "$SERVICE_MANAGER" ]; then
+  case "$(uname -s)" in Linux) SERVICE_MANAGER=systemd ;; *) SERVICE_MANAGER=launchd ;; esac
+fi
+UNIT_NAME="beadcause.service"
+UNIT_FILE="$HOME/.config/systemd/user/$UNIT_NAME"
+if [ "$SERVICE_MANAGER" = systemd ]; then
+  LOG="${XDG_STATE_HOME:-$HOME/.local/state}/beadcause/beadcause.log"
+  RESTART_HINT="systemctl --user restart $UNIT_NAME"
+else
+  RESTART_HINT="launchctl kickstart -k gui/$USER_ID/$LABEL"
+fi
 LEGACY_LABELS=("com.neo.beadcause" "com.beadcause" "n8l.beadcause" "m4m.beadcause")
 
 say()  { printf '\033[1m==>\033[0m %s\n' "$*"; }
@@ -39,9 +55,10 @@ trap 'rm -rf "$WORK"' EXIT
 
 usage() {
   cat <<USAGE
-Install beadcause as a launchd agent (macOS).
+Install beadcause as a launchd agent (macOS) or a systemd user unit (Linux).
 
-  npm run install-service                        ask the setup questions
+  npm run install-service                        show the defaults, then simple or customized
+  npm run install-service -- --simple            take every default, ask nothing
   npm run install-service -- --non-interactive   ask nothing, keep the answers on file
   bash scripts/install.sh --non-interactive
 
@@ -50,14 +67,17 @@ Install beadcause as a launchd agent (macOS).
                          change it later with 'npm run configure' in a terminal.
                          With --phone, Tailscale is not installed either: its
                          installer asks for an admin password.
+      --simple           take every setting's default without asking — the same as
+                         choosing "simple installation" at the setup screen. On a
+                         re-run the defaults are what is configured, so it keeps them.
       --interactive      ask even when the environment looks unattended.
       --phone            turn on phone support: install Tailscale if it is missing,
                          listen on this Mac's tailnet address as well as 127.0.0.1,
                          and print the pairing QR. Without it beadcause answers on
                          this Mac only — run this again with --phone any time.
-      --no-deps          install nothing. Node, bd, gh, jq, iTerm2, Claude Code (and
-                         Tailscale, with --phone) are still checked for and what is
-                         missing is named, but brew is never run.
+      --no-deps          install nothing. Node, bd, gh, jq, iTerm2 (tmux on Linux),
+                         Claude Code (and Tailscale, with --phone) are still checked
+                         for and what is missing is named, but brew and apt are never run.
   -h, --help             this.
 
 SKIP_CONFIGURE=1 in the environment means the same as --non-interactive, and an
@@ -69,6 +89,7 @@ USAGE
 
 NON_INTERACTIVE=0
 FORCE_INTERACTIVE=0
+SIMPLE=0
 INSTALL_DEPS=1
 [ -z "${BEADCAUSE_NO_DEPS:-}" ] || INSTALL_DEPS=0
 PHONE=0
@@ -77,6 +98,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     -n|--non-interactive) NON_INTERACTIVE=1 ;;
     --interactive)        FORCE_INTERACTIVE=1 ;;
+    --simple|--defaults)  SIMPLE=1 ;;
     --no-deps)            INSTALL_DEPS=0 ;;
     --phone)              PHONE=1 ;;
     -h|--help)            usage; exit 0 ;;
@@ -112,7 +134,10 @@ if [ "$FORCE_INTERACTIVE" = 1 ]; then UNATTENDED_WHY=""; fi
 
 # ---------------------------------------------------------------- prerequisites
 
-[ "$(uname -s)" = "Darwin" ] || die "this installer is macOS-only (it uses launchd)."
+case "$(uname -s)" in
+  Darwin|Linux) ;;
+  *) die "this installer supports macOS (launchd) and Linux (a systemd user unit) only." ;;
+esac
 
 # Everything below that Homebrew can install is installed when it is missing, rather than
 # only complained about: a second engineer's Mac should get from `git clone` to a running
@@ -129,7 +154,17 @@ if [ "$FORCE_INTERACTIVE" = 1 ]; then UNATTENDED_WHY=""; fi
 # Homebrew on the Mac it runs on.
 BD_MIN="1.2.1"
 BREW=""
-if [ "$INSTALL_DEPS" = 1 ]; then
+# On Linux the package manager is apt (bc-obucr.4), keyed off the service manager so the
+# test suite can run this half on a Mac. Everything above about Homebrew is the macOS half;
+# the Linux half is the apt_* functions below, in the same never-fatal style.
+APT=""
+if [ "$INSTALL_DEPS" = 1 ] && [ "$SERVICE_MANAGER" = systemd ]; then
+  APT="$(command -v apt-get || true)"
+  if [ -z "$APT" ]; then
+    warn "apt-get not found, so nothing missing can be installed for you (this installer's Linux path is for Debian and Ubuntu)."
+  fi
+fi
+if [ "$INSTALL_DEPS" = 1 ] && [ "$SERVICE_MANAGER" != systemd ]; then
   BREW="$(command -v brew || true)"
   if [ -z "$BREW" ]; then
     for candidate in ${BEADCAUSE_BREW_SEARCH-/opt/homebrew/bin/brew /usr/local/bin/brew}; do
@@ -151,6 +186,71 @@ brew_get() {
   say "installing $what — brew $*"
   if NONINTERACTIVE=1 "$BREW" "$@"; then return 0; fi
   warn "brew $* failed."
+  return 1
+}
+
+# apt_get <what> <packages…> — install packages with apt, say so, never fatal. apt needs root:
+# run as root directly, else through sudo -n, which never prompts — an unattended install
+# must fail with the command to run, not sit on a password prompt.
+apt_get() {
+  local what="$1"
+  shift
+  if [ -z "$APT" ]; then return 1; fi
+  local -a sudo=()
+  if [ "$(id -u)" != 0 ]; then
+    if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+      sudo=(sudo -n)
+    else
+      warn "installing $what needs root, and sudo would ask for a password — run: sudo apt-get install -y $*"
+      return 1
+    fi
+  fi
+  say "installing $what — apt-get install -y $*"
+  if "${sudo[@]}" env DEBIAN_FRONTEND=noninteractive "$APT" install -y "$@"; then return 0; fi
+  warn "apt-get install -y $* failed."
+  return 1
+}
+
+# The major version apt would install for nodejs, empty when apt has none. Ubuntu 24.04's
+# own is 18, which is too old; NodeSource's repo, if the machine has it, is newer.
+apt_node_major() {
+  command -v apt-cache >/dev/null 2>&1 || return 0
+  apt-cache policy nodejs 2>/dev/null | sed -n 's/^ *Candidate: *\([0-9][0-9]*\)\..*/\1/p' | sed -n 1p
+}
+
+# bd on Linux: the release tarball from github.com/gastownhall/beads, checksum-verified,
+# into ~/.local/bin (which the unit's PATH covers). Not a remote script piped into bash.
+# BEADCAUSE_BD_RELEASE_API replaces the releases endpoint.
+bd_release_get() {
+  local arch tag asset base tmp want got
+  case "$(uname -m)" in
+    x86_64|amd64) arch=amd64 ;;
+    aarch64|arm64) arch=arm64 ;;
+    *) warn "no beads release for $(uname -m)."; return 1 ;;
+  esac
+  command -v curl >/dev/null 2>&1 || { warn "curl not found, so bd cannot be downloaded — sudo apt-get install -y curl"; return 1; }
+  tag="$(curl -fsS "${BEADCAUSE_BD_RELEASE_API:-https://api.github.com/repos/gastownhall/beads/releases/latest}" 2>/dev/null | sed -n 's/.*"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p' | sed -n 1p)"
+  if [ -z "$tag" ]; then warn "could not read the latest beads release from GitHub."; return 1; fi
+  asset="beads_${tag}_linux_${arch}.tar.gz"
+  base="https://github.com/gastownhall/beads/releases/download/v${tag}"
+  tmp="$(mktemp -d)"
+  say "installing beads (bd) — $asset into $HOME/.local/bin"
+  if curl -fsSL -o "$tmp/$asset" "$base/$asset" && curl -fsSL -o "$tmp/checksums.txt" "$base/checksums.txt"; then
+    want="$(awk -v a="$asset" '$2==a{print $1}' "$tmp/checksums.txt")"
+    got="$( (sha256sum "$tmp/$asset" 2>/dev/null || shasum -a 256 "$tmp/$asset" 2>/dev/null) | awk '{print $1}')"
+    if [ -z "$want" ] || [ "$want" != "$got" ]; then
+      warn "checksum of $asset does not match checksums.txt — not installed."
+      rm -rf "$tmp"
+      return 1
+    fi
+    if tar -xzf "$tmp/$asset" -C "$tmp" bd && mkdir -p "$HOME/.local/bin" && install -m 755 "$tmp/bd" "$HOME/.local/bin/bd"; then
+      PATH="$HOME/.local/bin:$PATH"; export PATH
+      rm -rf "$tmp"
+      return 0
+    fi
+  fi
+  rm -rf "$tmp"
+  warn "downloading beads from $base failed."
   return 1
 }
 
@@ -191,10 +291,29 @@ have_tailscale() {
   return 1
 }
 
-if ! command -v node >/dev/null 2>&1; then brew_get "Node" install node || true; fi
+# Node from apt only when apt's own is 20+; otherwise say where a new one comes from.
+apt_node() {
+  local major
+  major="$(apt_node_major || true)"
+  if [ "${major:-0}" -ge 20 ]; then
+    apt_get "Node" nodejs npm || true
+  else
+    warn "apt's nodejs is ${major:-absent} and beadcause needs 20+. Add NodeSource (https://github.com/nodesource/distributions) or use nvm, then re-run."
+  fi
+}
+if ! command -v node >/dev/null 2>&1; then
+  if [ -n "$APT" ]; then apt_node; else brew_get "Node" install node || true; fi
+fi
 NODE="$(command -v node || true)"
-[ -n "$NODE" ] || die "node not found. Install Node 20+ (brew install node) and re-run."
+if [ -z "$NODE" ]; then
+  if [ "$SERVICE_MANAGER" = systemd ]; then die "node not found. Install Node 20+ (NodeSource or nvm; Ubuntu's own is too old) and re-run."; fi
+  die "node not found. Install Node 20+ (brew install node) and re-run."
+fi
 NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
+if [ "$NODE_MAJOR" -lt 20 ] && [ -n "$APT" ] && [ "$NODE" = /usr/bin/node ]; then
+  apt_node
+  NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
+fi
 # Upgraded only when it is Homebrew's own node. One from nvm or asdf is somebody's choice,
 # and a second node installed beside it would lose to it on PATH anyway.
 if [ "$NODE_MAJOR" -lt 20 ] && [ -n "$BREW" ] && [ "$NODE" = "$(dirname "$BREW")/node" ]; then
@@ -205,35 +324,63 @@ fi
 
 # launchd starts with a bare PATH, so `bd` has to be found by absolute path or live
 # somewhere the plist's PATH covers. Fail now rather than at the first poll.
-if ! command -v bd >/dev/null 2>&1; then brew_get "beads (bd)" install beads || true; fi
+if ! command -v bd >/dev/null 2>&1; then
+  if [ "$INSTALL_DEPS" = 1 ] && [ "$SERVICE_MANAGER" = systemd ]; then bd_release_get || true; else brew_get "beads (bd)" install beads || true; fi
+fi
 BD="$(command -v bd || true)"
-[ -n "$BD" ] || die "the beads CLI (bd) is not on your PATH. Install it first (brew install beads) — beadcause is a front-end for it."
+if [ -z "$BD" ]; then
+  if [ "$SERVICE_MANAGER" = systemd ]; then die "the beads CLI (bd) is not on your PATH. Install it first (a release from github.com/gastownhall/beads/releases into ~/.local/bin) — beadcause is a front-end for it."; fi
+  die "the beads CLI (bd) is not on your PATH. Install it first (brew install beads) — beadcause is a front-end for it."
+fi
 
 # 1.2.1 is where cross-type blocking dependencies arrived. A version that cannot be read
 # is left alone rather than upgraded on a guess.
 BD_VERSION="$(bd --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | sed -n 1p || true)"
 if [ -n "$BD_VERSION" ] && version_lt "$BD_VERSION" "$BD_MIN"; then
-  brew_get "a newer beads (bd $BD_VERSION is older than $BD_MIN)" upgrade beads || \
-    warn "bd $BD_VERSION is older than $BD_MIN, which beadcause needs — brew upgrade beads."
+  if [ "$SERVICE_MANAGER" = systemd ]; then
+    if [ "$INSTALL_DEPS" = 1 ] && bd_release_get; then :; else
+      warn "bd $BD_VERSION is older than $BD_MIN, which beadcause needs — install a newer release from github.com/gastownhall/beads/releases."
+    fi
+  else
+    brew_get "a newer beads (bd $BD_VERSION is older than $BD_MIN)" upgrade beads || \
+      warn "bd $BD_VERSION is older than $BD_MIN, which beadcause needs — brew upgrade beads."
+  fi
 fi
 
 # The rest are not needed for the service to come up, so each one missing is a warning.
 # Each is here because something runs it (lib/suppliers.js keeps that list): gh opens and
 # reads pull requests, jq is how scripts/claim-guard.sh reads a hook payload, iTerm2 is
 # the terminal every agent window opens in, and every agent is a `claude` subprocess.
-for tool in gh jq; do
-  if ! command -v "$tool" >/dev/null 2>&1; then
-    brew_get "$tool" install "$tool" || warn "$tool not found — brew install $tool"
-  fi
-done
+if [ "$SERVICE_MANAGER" = systemd ]; then
+  # Linux: no iTerm2. Agent windows are tmux panes (lib/termbackend-tmux.js), so tmux is
+  # required here; git and curl are what the scripts run, expect is the pty relay's.
+  for tool in gh jq tmux git curl expect; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      apt_get "$tool" "$tool" || warn "$tool not found — sudo apt-get install -y $tool"
+    fi
+  done
+else
+  for tool in gh jq; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      brew_get "$tool" install "$tool" || warn "$tool not found — brew install $tool"
+    fi
+  done
 
-if ! have_app iTerm.app; then
-  brew_get "iTerm2" install --cask iterm2 || \
-    warn "iTerm2 not found, and agent windows open in it — brew install --cask iterm2"
+  if ! have_app iTerm.app; then
+    brew_get "iTerm2" install --cask iterm2 || \
+      warn "iTerm2 not found, and agent windows open in it — brew install --cask iterm2"
+  fi
 fi
 
 if ! command -v claude >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/claude" ]; then
-  if brew_get "Claude Code" install --cask claude-code; then
+  if [ "$SERVICE_MANAGER" = systemd ]; then
+    # No cask on Linux: Claude Code's npm package, into ~/.local so no root is needed.
+    if [ "$INSTALL_DEPS" = 1 ] && command -v npm >/dev/null 2>&1 && npm install -g --prefix "$HOME/.local" @anthropic-ai/claude-code; then
+      say "run \`claude\` once in a terminal to sign it in."
+    else
+      warn "claude not found, so no agent can run — npm install -g --prefix ~/.local @anthropic-ai/claude-code"
+    fi
+  elif brew_get "Claude Code" install --cask claude-code; then
     say "run \`claude\` once in a terminal to sign it in."
   else
     warn "claude not found, so no agent can run — brew install --cask claude-code"
@@ -242,7 +389,10 @@ fi
 
 # Tailscale only with --phone. Everything but the phone works on loopback, and a first
 # install should not stop for an admin password over a feature nobody has asked for yet.
-if [ "$PHONE" = 1 ] && ! have_tailscale; then
+if [ "$PHONE" = 1 ] && ! have_tailscale && [ "$SERVICE_MANAGER" = systemd ]; then
+  # tailscale.com's installer is a script to pipe into bash, which this one will not do.
+  warn "Tailscale not found, so a phone cannot reach this machine — see https://tailscale.com/download/linux"
+elif [ "$PHONE" = 1 ] && ! have_tailscale; then
   if [ -n "$BREW" ] && [ -n "$UNATTENDED_WHY" ]; then
     warn "Tailscale not found, and not installed now: its installer asks for an admin password"
     warn "and nobody is here to type one ($UNATTENDED_WHY). From a terminal:"
@@ -327,7 +477,12 @@ fi
 # cannot be guessed. Fed from /dev/tty rather than stdin because `npm run` pipes stdin,
 # and an installer that silently skipped its own questions was the original bug. Not
 # asked at all when nobody is there — see where UNATTENDED_WHY is decided, near the top.
-if [ -n "$UNATTENDED_WHY" ]; then
+if [ "$SIMPLE" = 1 ]; then
+  # bc-p2z77: needs no terminal — configure.js --simple answers every question with its
+  # default — so it is honoured even where the questions themselves would not be asked.
+  ( cd "$ROOT" && node scripts/configure.js --simple < /dev/null ) || \
+    warn "could not write the default configuration — run 'npm run configure' later."
+elif [ -n "$UNATTENDED_WHY" ]; then
   say "not asking the setup questions ($UNATTENDED_WHY)"
   # Fed /dev/null deliberately: with no TTY configure.js prints what is currently
   # configured and changes nothing, which is the useful half of it when nobody can
@@ -357,6 +512,21 @@ if [ "$DOLT_RC" = 1 ]; then
   warn "a workspace was left on the embedded engine — see above. 'npm run dolt-mode' re-runs this."
 elif [ "$DOLT_RC" != 0 ]; then
   warn "the Dolt engine step did not finish (npm run dolt-mode, exit $DOLT_RC) — carrying on."
+fi
+
+# --------------------------------------------------- Claude Code allow rules for bd
+
+# The sessions beadcause opens run `bd create`, `bd update` and `bd comments add` with
+# nobody at the screen, and each one stopped on a permission prompt (bc-eg9tj). This
+# merges allow rules for those into the user-scope Claude Code settings — appending to
+# permissions.allow and touching nothing else, through symlinks rather than over them.
+# `bd delete`, `bd jira`, `bd dolt push` and `bd init` are left gated on purpose; see
+# lib/claudeperms.js. Asks nothing, adds nothing on a re-run, and never fatal: a prompt is
+# an annoyance, not an outage. uninstall.sh takes back exactly what this added.
+PERMS_RC=0
+( cd "$ROOT" && node scripts/claude-permissions.mjs ) || PERMS_RC=$?
+if [ "$PERMS_RC" != 0 ]; then
+  warn "Claude Code allow rules for bd were not all written (exit $PERMS_RC) — carrying on."
 fi
 
 # ----------------------------------------------------------------- phone support
@@ -394,9 +564,14 @@ fi
 # daemons fighting over port 4318 — the loser exits, but which one loses is a race.
 # Each one's opt-in monitor agent goes too: left loaded, it opens a second window at
 # every login beside the one the new label's monitor opens.
+#
+# launchd only: every one of those labels predates the systemd unit, so a Linux box has
+# none of them to remove.
 LEGACY_AGENTS=()
-for legacy in "${LEGACY_LABELS[@]}"; do LEGACY_AGENTS+=("$legacy.monitor" "$legacy"); done
-for legacy in "${LEGACY_AGENTS[@]}"; do
+if [ "$SERVICE_MANAGER" = launchd ]; then
+  for legacy in "${LEGACY_LABELS[@]}"; do LEGACY_AGENTS+=("$legacy.monitor" "$legacy"); done
+fi
+for legacy in ${LEGACY_AGENTS[@]+"${LEGACY_AGENTS[@]}"}; do
   legacy_plist="$HOME/Library/LaunchAgents/$legacy.plist"
   # Here-string, not a pipe: `set -o pipefail` above turns `… | grep -q` into a trap.
   # grep exits at its first match, the writer takes SIGPIPE while it is still writing,
@@ -417,6 +592,115 @@ MONITOR_ENABLED="$(cd "$ROOT" && node -e '
     .then((m) => process.stdout.write(m.loadConfig().monitor?.enabled ? "1" : "0"))
     .catch(() => process.stdout.write("0"));
 ' 2>/dev/null || echo 0)"
+
+# -------------------------------------------------------- the systemd user unit
+
+# Linux: the same service as a systemd *user* unit (bc-obucr.3). The ordering is the
+# launchd path's, for the same reasons — ask whether the manager will take a job before
+# anything is stopped, keep what was installed so a refused unit can be put back, and
+# prove what got loaded by asking the manager rather than re-reading the file.
+#
+# The unit text is rendered by lib/service.js (renderSystemdUnit) rather than by a
+# heredoc here, so the one copy of it is the one test/service.mjs parses back.
+#
+# Reboot survival with nobody logged in is not in the unit: it is lingering, which
+# `loginctl enable-linger` turns on for this user. Without it the user manager — and so
+# the daemon — only runs while the user has a session open.
+install_systemd_service() {
+  command -v systemctl >/dev/null 2>&1 || \
+    die "systemctl not found. On Linux beadcause installs as a systemd user unit, and this machine has no systemd."
+
+  # The user manager is reachable only from a session that has one: an ssh login does,
+  # `su` and a bare cron job usually do not (no XDG_RUNTIME_DIR). Asked first, for the
+  # reason can_bootstrap is on macOS: nothing has been stopped yet.
+  if ! systemctl --user show-environment >/dev/null 2>&1; then
+    warn "this shell cannot reach the systemd user manager (systemctl --user), so nothing"
+    warn "was changed. Log in as $(id -un) directly — ssh works, su does not — and re-run."
+    die "not loaded. This is what a shell with no user session gets; it is not your unit."
+  fi
+
+  say "writing $UNIT_FILE"
+  mkdir -p "$(dirname "$UNIT_FILE")" "$(dirname "$LOG")"
+  local prev="" rendered="$WORK/$UNIT_NAME"
+  if [ -f "$UNIT_FILE" ]; then
+    prev="$WORK/previous.service"
+    cp "$UNIT_FILE" "$prev"
+  fi
+  ( cd "$ROOT" && "$NODE" scripts/service-unit.mjs --node "$NODE" --root "$ROOT" --log "$LOG" ) > "$rendered" || \
+    die "could not render the systemd unit (scripts/service-unit.mjs)."
+  [ -s "$rendered" ] || die "scripts/service-unit.mjs printed nothing."
+  cp "$rendered" "$UNIT_FILE"
+
+  say "loading the service"
+  systemctl --user daemon-reload || warn "daemon-reload failed; enable below decides."
+  if ! systemctl --user enable "$UNIT_NAME"; then
+    warn "systemd refused $UNIT_FILE."
+    mv "$UNIT_FILE" "$UNIT_FILE.rejected"
+    warn "kept as $UNIT_FILE.rejected, so it can be diffed against one that works."
+    if [ -n "$prev" ]; then
+      cp "$prev" "$UNIT_FILE"
+      systemctl --user daemon-reload || true
+      warn "the unit that was installed before is back in place; whatever was running still is."
+    fi
+    die "enable failed — see above."
+  fi
+  # restart, not start: it starts a stopped unit and replaces a running one with what
+  # daemon-reload just read — the kickstart -k of this side.
+  systemctl --user restart "$UNIT_NAME" || \
+    warn "restart failed; the wait below decides. Check: systemctl --user status $UNIT_NAME"
+
+  # Lingering is what keeps the user manager running with nobody logged in, which is
+  # what makes this a service rather than a login item. Polkit lets a user enable it for
+  # themselves on Ubuntu; where it does not, it needs root once, and saying so is enough.
+  local me; me="$(id -un)"
+  # Here-string, not a pipe: under pipefail `… | grep -q` can report 141 on a match.
+  if grep -q '^Linger=yes' <<<"$(loginctl show-user "$me" --property=Linger 2>/dev/null || true)"; then
+    say "lingering is already on for $me — the service runs with nobody logged in"
+  elif loginctl enable-linger "$me" 2>/dev/null; then
+    say "lingering turned on for $me — the service now survives a reboot with nobody logged in"
+  else
+    warn "could not turn lingering on, so the service stops when $me logs out. Once, as root:"
+    warn "  sudo loginctl enable-linger $me"
+  fi
+
+  for _ in $(seq 1 20); do
+    sleep 0.5
+    if curl -fsS -m 2 http://127.0.0.1:4318/api/health >/dev/null 2>&1; then READY=1; break; fi
+  done
+  [ "${READY:-}" = "1" ] || die "the service did not come up. Check $LOG and: systemctl --user status $UNIT_NAME"
+
+  WORKSPACES="$(curl -fsS -m 5 http://127.0.0.1:4318/api/health | sed 's/.*"workspaces":\[//;s/\].*//')"
+  say "running — workspaces: ${WORKSPACES:-none}"
+
+  # What systemd is holding, not what the file says — the same read-back as launchctl
+  # print below, and the same reason: a unit rewritten without a daemon-reload runs on.
+  # Here-string, not a pipe, for the pipefail reason noted at the legacy loop.
+  local shown loaded
+  shown="$(systemctl --user show --property=ExecStart "$UNIT_NAME" 2>/dev/null || true)"
+  loaded="$(grep -oE '[^[:space:]";]+/bin/[A-Za-z0-9._-]+\.js' <<<"$shown" | sed -n 1p || true)"
+  if [ "$loaded" = "$ROOT/bin/router.js" ]; then
+    say "systemd is running bin/router.js — editing lib/ swaps under the port, no restart"
+  elif [ -n "$loaded" ]; then
+    warn "systemd is running $loaded, not $ROOT/bin/router.js"
+    warn "the hot-swap is NOT live — edits to lib/ will need a restart. Re-run this script."
+  else
+    warn "could not read back what systemd loaded for $UNIT_NAME; check with:"
+    warn "  systemctl --user show --property=ExecStart $UNIT_NAME"
+  fi
+
+  # The login-time console is a macOS LaunchAgent that opens a browser window with
+  # open(1). A Linux server has no desktop session to open it in, so there is no
+  # systemd counterpart — a decision, not an omission (bc-obucr.3).
+  if [ "$MONITOR_ENABLED" = "1" ]; then
+    say "the console-at-login window is macOS-only — open http://127.0.0.1:4318/monitor yourself"
+  fi
+}
+
+if [ "$SERVICE_MANAGER" = systemd ]; then
+install_systemd_service
+else
+# Everything from here to the matching `fi` after the monitor agent is the launchd path,
+# left unindented so its history (and `git blame`) stays where it was.
 
 # --------------------------------------------------------------------- the plist
 
@@ -678,6 +962,8 @@ else
   say "console not opened at login — visit /monitor when you want it"
 fi
 
+fi # end of the launchd path; the systemd one is install_systemd_service above
+
 # The pairing code only means something to a phone that can reach this Mac — that is, when
 # the daemon listens on a tailnet address. On loopback it would encode http://127.0.0.1,
 # which on the phone opens the phone.
@@ -703,7 +989,7 @@ Useful from here:
   npm run monitor                                # the same thing in a terminal, roughly
   npm run swap:status                            # which build is actually answering
   npm run swap                                   # swap now, without waiting
-  launchctl kickstart -k gui/$USER_ID/$LABEL     # only needed for bin/router.js itself
+  $RESTART_HINT     # only needed for bin/router.js itself
 
 Editing lib/ no longer needs a restart: the router notices within a few seconds and
 swaps the backend under the port, draining the old one. The exception is

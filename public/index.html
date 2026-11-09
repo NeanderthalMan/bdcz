@@ -91,10 +91,12 @@
            The page itself is still there and still reachable: the `N held for endorsement`
            pill on the advocate console links to it, and so does every held card in the
            inbox. What it stopped being is a destination in the chrome. -->
-      <!-- The badge is the channel's presence in the chrome: a request never appears
-           in the list below, so without this the only sign one is waiting would be a
-           notification you may have already swiped away. -->
-      <a href="/foundations" class="icon-btn" id="foundations-link" aria-label="Foundations — what each agent kind is, and what it may do">⚖️<span class="badge" id="req-badge" hidden></span></a>
+      <!-- A ⚖️ link to Foundations hung here, with a badge counting foundation requests.
+           It is gone (bc-qzng7.1): Foundations is a row on the Settings screen, under
+           This machine, and the requests themselves are a section at the top of the
+           inbox list (`requestsHtml` in app.js), so the badge was counting something
+           already in front of you. `paintRequestBadge` finds no badge and returns. -->
+
       <!-- The way out to a real browser, and the only one there is: a link to our own
            host is kept inside the app's WebView on purpose, so nothing short of the
            native bridge can leave. Hidden unless that bridge is on the page — in a
@@ -433,10 +435,15 @@
          public/presence.js it is looking at; public/montabs.js reads both and owns the
          swap. Mirror's is empty on purpose — you are looking at *another* device there,
          so this one is nowhere. -->
-    <nav class="chip-row mon-tabs" id="mon-tabs" aria-label="Views">
-      <button class="chip" data-tab="advocates" data-pane="mon" data-view="sessions" aria-pressed="true">Advocates</button>
-      <button class="chip" data-tab="prs" data-pane="prs" data-view="prs" aria-pressed="false">PRs</button>
-      <button class="chip" data-tab="mirror" data-pane="mirror" data-view="" aria-pressed="false">Mirror<span class="tab-dot" id="mirror-dot" hidden></span></button>
+    <!-- No chips on screen since bc-qzng7.9: this pane is Work's details, and a row of
+         tabs under the pill row was a second navigation. The three are still here, hidden,
+         because public/montabs.js keeps its sections by them — which one is up is the
+         address's `?tab=` now, set by the links on Work (`details ›`, `merge queue ›`,
+         `mirror ›`). What is left on screen is this line's status text. -->
+    <nav class="chip-row mon-tabs" id="mon-tabs" aria-label="Advocate console">
+      <button class="chip" data-tab="advocates" data-pane="mon" data-view="sessions" aria-pressed="true" hidden>Advocates</button>
+      <button class="chip" data-tab="prs" data-pane="prs" data-view="prs" aria-pressed="false" hidden>PRs</button>
+      <button class="chip" data-tab="mirror" data-pane="mirror" data-view="" aria-pressed="false" hidden>Mirror<span class="tab-dot" id="mirror-dot" hidden></span></button>
       <!-- Pushed to the far end by one rule in style.css. Neither is a control and neither
            is a chip: the observer mark is which daemon this is, and the tally is the
            roster's own count, both written by the scripts below and both empty on most
@@ -457,7 +464,9 @@
          queue in the order it will try them (mergeboard.js, which owns the switch).
          `data-section` is the list a subtab shows. -->
     <section id="prs" class="prs-pane" hidden>
-      <nav class="chip-row scopes prs-tabs" id="prs-tabs" aria-label="Pull requests">
+      <!-- Hidden since bc-qzng7.9: Open PRs is Work's Stage filter (In review), so this
+           section is the merge queue alone. public/mergeboard.js still owns the switch. -->
+      <nav class="chip-row scopes prs-tabs" id="prs-tabs" aria-label="Pull requests" hidden>
         <button class="chip" data-sub="open" data-section="prs-open" aria-pressed="true">Open PRs</button>
         <button class="chip" data-sub="queue" data-section="prs-queue" aria-pressed="false">Merge queue<span class="prs-tab-count" id="prs-queue-count" hidden></span></button>
       </nav>

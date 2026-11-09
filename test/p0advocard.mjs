@@ -474,7 +474,7 @@ check('the section draws the sheet, from a card that is still on the board', () 
 check('the tap is a state write and a repaint, and it fetches three things', () => {
   const at = APP.indexOf("if (act === 'p0-adv' || act === 'p0-adv-close')");
   assert.notEqual(at, -1, 'the advocate sheet has no tap');
-  const body = APP.slice(at, APP.indexOf('\n      return;\n    }', at));
+  const body = APP.slice(at, APP.indexOf('\n  }\n', at));
   assert.match(body, /state\.p0adv = want;/);
   assert.match(body, /render\(true\);/);
   assert.match(body, /loadBeadDetail\(want, card\.workspace, card\.id\);/);
@@ -492,8 +492,8 @@ check('and the sheet is over the layer it can be opened from', () => {
 });
 
 check('answering puts the sheet away first, or the card opens underneath it', () => {
-  const at = APP.indexOf("if (act === 'p0-answer') {");
-  const body = APP.slice(at, APP.indexOf('\n      return;\n    }', at));
+  const at = APP.indexOf('async function p0OpenQuestion(key) {');
+  const body = APP.slice(at, APP.indexOf('\n  }\n', at));
   assert.match(body, /state\.p0adv = null;/);
 });
 

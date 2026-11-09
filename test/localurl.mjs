@@ -81,7 +81,7 @@ console.log('\nthe lines a person reads in a terminal here');
   check('the waiting-questions line uses localBaseUrl', /localBaseUrl\(cfg\)/.test(waiting), waiting.trim());
   check('and so does the foundation-requests line', /localBaseUrl\(cfg\)/.test(foundation), foundation.trim());
   check('neither still names cfg.baseUrl', !/cfg\.baseUrl/.test(waiting + foundation), (waiting + foundation).trim());
-  check('and server.js imports it rather than rebuilding the string', /localBaseUrl/.test(server.split('\n').slice(0, 260).join('\n')), 'no import found in the first 260 lines');
+  check('and server.js imports it rather than rebuilding the string', /^import \{[^}]*\blocalBaseUrl\b[^}]*\} from '[^']+';$/m.test(server), 'no import statement names localBaseUrl');
 }
 
 {

@@ -419,12 +419,22 @@ check('the pill ids and the view ids are the same words', () => {
   // to keep in step, and it is what `lit = route.HOME` above depends on.
   const src = read('public/viewbar.js');
   const pills = [...src.matchAll(/\{ id: '([a-z]+)'/g)].map((m) => m[1]);
-  assert.ok(pills.length >= 7, `could not read the pill list out of viewbar.js: ${pills.join(', ')}`);
+  assert.ok(pills.length >= 3, `could not read the pill list out of viewbar.js: ${pills.join(', ')}`);
   // Since bc-yjekg.3 one view is drawn by a pill of another name: `history` is the
   // Beads pill's ledger side, declared on that pill as `views: ['history']` — the one
   // place the row says so, and `pillOf` in viewbar.js is what reads it.
-  const claimed = [...src.matchAll(/views: \[([^\]]*)\]/g)].flatMap((m) => [...m[1].matchAll(/'([a-z.]+)'/g)].map((x) => x[1]));
-  for (const v of route.VIEWS) {
+  // Since bc-qzng7.2 the Questions and PRs views are narrowings of Inbox, declared on
+  // the Inbox pill as `kinds: ['question', 'pr']` and drawn as its Kind filter.
+  const claimed = [...src.matchAll(/(?:views|kinds): \[([^\]]*)\]/g)].flatMap((m) => [...m[1].matchAll(/'([a-z.]+)'/g)].map((x) => x[1]));
+  // And one view has no pill on purpose: `config` is the Settings screen since
+  // bc-qzng7.1, reached by tapping the space name (the picker's ⚙ Settings row in
+  // public/spacebar.js) rather than from the row. Named here so a *second* pill-less view
+  // still fails this check — it is the exception, not a loosening.
+  const NO_PILL = { config: 'public/spacebar.js' };
+  for (const [view, door] of Object.entries(NO_PILL)) {
+    assert.ok(read(door).includes(`'go:settings'`), `${view} has no pill and ${door} no longer opens it`);
+  }
+  for (const v of route.VIEWS.filter((one) => !NO_PILL[one.id])) {
     assert.ok(pills.includes(v.id) || claimed.includes(v.id), `the view ${v.id} has no pill of that name`);
   }
 });

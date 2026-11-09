@@ -4,7 +4,7 @@
  * would otherwise refuse as "too complex to verify that it stays inside the worktree".
  *
  *     b7e-sh script.sh
- *     b7e-sh script.sh --allow /tmp/some-tracker --allow /Users/me/scratch
+ *     b7e-sh script.sh --allow /tmp/some-tracker --allow <home>/scratch
  *     b7e-sh -c 'for f in a b c; do echo "$f"; done'
  *     b7e-sh script.sh --dry
  *     b7e-sh script.sh --cwd /path/to/some/other/worktree

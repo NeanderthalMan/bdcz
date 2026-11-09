@@ -249,7 +249,26 @@ const rawPR = (over = {}) => ({
   ...over,
 });
 
-const env = () => ({ ...process.env, PATH: `${BIN_DIR}${path.delimiter}${process.env.PATH}`, GH_FAKE_STATE: STATE });
+// **Never the real tracker (bc-xl7n.218).** Without a config of its own, every CLI case
+// resolved this checkout to the real beadcause workspace and ran the real `bd list
+// --limit 1` (lib/beadref.js prefixFor) against the shared Dolt database, with no
+// timeout: ~0.3s alone, minutes of wall time on ~26s of CPU when other gates held the
+// database, which put the suite past the gate's 300s cap. The default config points
+// `bdBin` at a fake that answers instantly; cases that care write their own config.
+const DEFAULT_CONFIG_DIR = path.join(tmp, 'config-default');
+fs.mkdirSync(DEFAULT_CONFIG_DIR, { recursive: true });
+const DEFAULT_BD = path.join(tmp, 'bd-default');
+fs.writeFileSync(DEFAULT_BD, '#!/bin/sh\necho "[]"\n', { mode: 0o755 });
+fs.writeFileSync(
+  path.join(DEFAULT_CONFIG_DIR, 'config.json'),
+  JSON.stringify({ bdBin: DEFAULT_BD, actor: 'beadcause-test', workspaces: [] }, null, 2)
+);
+const env = () => ({
+  ...process.env,
+  PATH: `${BIN_DIR}${path.delimiter}${process.env.PATH}`,
+  GH_FAKE_STATE: STATE,
+  BEADCAUSE_CONFIG_DIR: DEFAULT_CONFIG_DIR,
+});
 
 /**
  * The rows out of a `--json` run, without the scope envelope.

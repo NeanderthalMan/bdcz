@@ -225,24 +225,18 @@ console.log('\nthe tab that went, and the pill that came back');
    scrolls sideways and holds roughly nine pills, so a view costs one of them rather than
    a fifth of the screen's width. What is asserted here is the shape either way — one
    entry, in one table, pointing at all three of the board's paths. */
-await check('the row still has a PRs pill, and the board’s three paths are still on it', () => {
-  // Both halves of this moved in bc-khoe.2 and the check is about the half that did not.
-  // `PRs` is a *kind* pill now — the pull requests and the finished branches in Home,
-  // not the board page — and the board's three paths went to the Advocates pill, which
-  // is the pill that points at the page they actually serve. What must not happen is
-  // either of them going missing: a `PRs` label with nothing behind it, or three paths
-  // that light no pill at all on a page you are plainly looking at.
-  const bar = read('public/viewbar.js');
-  const ids = [...bar.matchAll(/^\s*\{?\s*id: '(\w+)'/gm)].map((m) => m[1]);
-  assert.ok(ids.includes('pr'), `the row has no PRs pill: ${ids.join(', ')}`);
-  assert.ok(ids.includes('epics'), `the row lost Home: ${ids.join(', ')}`);
-  // The paths moved to public/hashroute.js with bc-khoe.30.2 — which view an address
-  // names is the same question as which view a hash names, and that file is where it is
-  // answered. Still the same claim: the board's three are on the Advocates view.
+await check('PRs is still reachable, and the board’s three paths still light a pill', () => {
+  // bc-qzng7.2 and .3: there is no PRs pill any more. The pull requests waiting on you are
+  // Inbox's Kind filter (`kinds: ['question', 'pr']` on the Inbox pill keeps it lit), and
+  // the board is Work's Stage filter, with its three paths lighting Work through `views`.
+  const row = read('public/viewbar.js');
+  assert.match(row, /id: 'home',[^\n]*kinds: \['question', 'pr'\]/, 'nothing on the row is lit under the PRs narrowing');
+  assert.match(row, /id: 'epics',[^\n]*views: \['advocates', 'releases'\]/, 'the board’s paths light no pill');
+  assert.match(read('public/inboxfilter.js'), /const STAGES = \[/, 'Work has no Stage filter to list the pull requests');
   assert.match(
     read('public/hashroute.js'),
-    /'\/prs', '\/pulls', '\/prs\.html'/,
-    'the board’s three paths light no pill'
+    /id: 'advocates',[\s\S]{0,120}paths: \[[^\]]*'\/prs', '\/pulls', '\/prs\.html'\]/,
+    'the board’s three paths are no longer on the Advocates view'
   );
   // And nothing is left of the bar that used to hold it.
   assert.ok(!fs.existsSync(path.join(ROOT, 'public/tabbar.js')), 'public/tabbar.js is back');

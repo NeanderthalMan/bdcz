@@ -808,29 +808,37 @@ function row(panes, opts) {
   return { ...b, nav: b.body.querySelector('.viewbar') };
 }
 
-await check('a pill whose container is still pending is a link to the document it is', () => {
+await check('Settings, Advocates and Releases have no pill at all', () => {
   const { nav } = row(withPending());
-  assert.equal(pill(nav, 'config').tag, 'a');
-  assert.equal(pill(nav, 'config').href, '/config');
+  // Config was the pill this check used to be about — the one whose container was still
+  // pending, drawn as a link. bc-qzng7.1 took the pill off the row: the pane is the
+  // Settings screen now, reached from the space name (public/spacebar.js), so a view with
+  // no pill is the thing to assert. Its addresses are untouched — see hashgrammar.mjs.
+  assert.equal(pill(nav, 'config'), undefined, 'the Config pill is back on the row');
   // And the other three are not, because bc-khoe.30.5, bc-khoe.4 and bc-khoe.30.14 filled
   // theirs. This is the whole of what filling a container changes at the row: nothing in
   // viewbar.js moved for any of them, and the `href` in `PILLS` stays — nine pages that
   // have no panes still draw this row and still need the link.
   // History is not in the list since bc-yjekg.3: it is the Beads pill's ledger side,
   // and the checks on that pill are below.
-  for (const id of ['advocates', 'releases']) {
-    assert.equal(pill(nav, id).tag, 'button', `${id} still loads a document this page has open`);
-    assert.equal(pill(nav, id).pane, id);
-    assert.equal(pill(nav, id).href, null);
-  }
+  // Advocates and Releases went the same way with bc-qzng7.3: both panes are Work's
+  // details now, reached from the health line and the Shipping stage on Work.
+  for (const id of ['advocates', 'releases']) assert.equal(pill(nav, id), undefined, `the ${id} pill is back on the row`);
 });
 
-await check('once a pane is built, its pill stops being a link', () => {
-  const { nav } = row(whenBuilt());
-  const p = pill(nav, 'releases');
-  assert.equal(p.tag, 'button', 'a pill still loads a document the app already has open');
-  assert.equal(p.href, null);
-  assert.equal(p.pane, 'releases');
+await check('on a details pane Work is lit, and is still the way back to the board', () => {
+  // bc-qzng7.3. The advocate console and Releases are Work's details: the row says you are
+  // in Work, and the lit pill — normally a dead <span> — stays a button, because it is how
+  // you get back to the board from there.
+  const { nav, panes } = row(whenBuilt());
+  for (const id of ['advocates', 'releases']) {
+    panes().go(id);
+    const p = pill(nav, 'epics');
+    assert.equal(p.current, true, `Work is not lit on ${id}`);
+    assert.equal(p.tag, 'button', `Work on ${id} is a dead span — no way back to the board`);
+    assert.equal(p.pane, 'epics');
+    assert.equal(p.kind, 'epics');
+  }
 });
 
 await check('and no pill anywhere on the shell is an <a> to a view it can show', () => {
@@ -848,20 +856,25 @@ await check('the lit pill follows the pane, not the address', () => {
   // the pane's (`lit()` in public/viewbar.js), and an unnarrowed Home lights Home.
   const { nav, panes } = row(whenBuilt());
   assert.equal(pills(nav).find((p) => p.current).id, 'home');
+  panes().go('history');
+  assert.equal(pills(nav).find((p) => p.current).id, 'beads');
+  assert.equal(pill(nav, 'beads').tag, 'span', 'the pill you are on is still a control');
   panes().go('advocates');
-  assert.equal(pills(nav).find((p) => p.current).id, 'advocates');
-  assert.equal(pill(nav, 'advocates').tag, 'span', 'the pill you are on is still a control');
+  assert.equal(pills(nav).find((p) => p.current).id, 'epics', 'the console does not light Work');
   panes().go('epics');
   assert.equal(pills(nav).find((p) => p.current).id, 'home');
 });
 
-await check('a kind pill tapped from another pane switches to Home and narrows, in one tap', () => {
+await check('the Inbox pill tapped from another pane switches to Home, in one tap', () => {
+  // Since bc-qzng7.2 there is no Questions or PRs pill: both are the Kind filter on
+  // Inbox, so the one pill that has to reach Home from elsewhere is Inbox itself.
   const { nav, panes } = row(whenBuilt());
   panes().go('history');
-  const p = pill(nav, 'pr');
-  assert.equal(p.tag, 'button', 'PRs went back to being a document load from the History pane');
+  assert.equal(pill(nav, 'pr'), undefined, 'PRs came back as a pill');
+  assert.equal(pill(nav, 'question'), undefined, 'Questions came back as a pill');
+  const p = pill(nav, 'home');
+  assert.equal(p.tag, 'button', 'Inbox went back to being a document load from the History pane');
   assert.equal(p.pane, 'epics');
-  assert.equal(p.kind, 'pr');
 });
 
 await check('and the counted pills keep their badges on that pane, so no pill changes width (bc-yjekg)', () => {
@@ -873,12 +886,11 @@ await check('and the counted pills keep their badges on that pane, so no pill ch
   assert.equal(onLedger, onHome, 'the badges went with the pane — every pill to their right moved under the thumb');
 });
 
-await check('and on Home it carries the narrowing alone — the pane is already right', () => {
+await check('and on Home the Inbox pill is the current one, not a control', () => {
   const { nav } = row(whenBuilt());
-  const p = pill(nav, 'pr');
-  assert.equal(p.tag, 'button');
+  const p = pill(nav, 'home');
+  assert.equal(p.current, true);
   assert.equal(p.pane, null, 'a tap on Home rewrites a hash that is already right');
-  assert.equal(p.kind, 'pr');
 });
 
 await check('the tap goes to the pane first and the filter second', () => {
@@ -899,10 +911,12 @@ await check('a narrowing chosen while another pane is up is waiting when Home co
   // The inbox goes on repainting behind a hidden pane, and `paint` pushes the selection at
   // the row every time. Refusing it outright — which is what "a no-op off Home" used to
   // mean — leaves the row lighting last week's answer on the way back.
+  // Since bc-qzng7.2 a PRs narrowing is Inbox's own Kind filter, so coming back lights
+  // Inbox — the pill that holds `kinds: ['question', 'pr']`.
   ctx.window.beadcause.views.mark('pr');
   assert.equal(pills(nav).find((p) => p.current).id, 'beads', 'the row lit a Home pill while the ledger was up');
   panes().go('epics');
-  assert.equal(pills(nav).find((p) => p.current).id, 'pr');
+  assert.equal(pills(nav).find((p) => p.current).id, 'home');
 });
 
 /* ============================================ the ⋯ menu (bc-yjekg.1) */
@@ -911,21 +925,15 @@ console.log('\nthe ⋯ pill — operations and repo tools, off the row');
 
 const moreBtn = (nav) => /<button type="button" class="viewpill viewpill-more"[^>]*>/.exec(nav.innerHTML)?.[0] ?? null;
 
-await check('the row is the inbox’s narrowings and the Beads pane, then ⋯ — seven', () => {
+await check('the row is Inbox, Work and Beads, and no ⋯ while nothing is tucked', () => {
+  // Questions and PRs left the row with bc-qzng7.2 — they are Inbox's Kind filter. Chats,
+  // Advocates and Releases left with bc-qzng7.3 — they are Work. Config left the ⋯ menu
+  // with bc-qzng7.1. So the ⋯ appears only when a repo declares a view of its own.
   const { nav } = row(whenBuilt());
   const onRow = pills(nav).filter((p) => !p.menu).map((p) => p.id);
-  assert.deepEqual(onRow, ['home', 'epics', 'question', 'pr', 'session', 'beads']);
-  assert.ok(moreBtn(nav), 'there is no ⋯ pill');
-  const inMenu = pills(nav).filter((p) => p.menu).map((p) => p.id);
-  assert.deepEqual(inMenu, ['advocates', 'releases', 'config']);
-});
-
-await check('the ⋯ is lit when the view on screen is one it holds', () => {
-  const { nav, panes } = row(whenBuilt());
-  assert.ok(!moreBtn(nav).includes('aria-current'), '⋯ is lit over Home');
-  panes().go('releases');
-  assert.ok(moreBtn(nav).includes('aria-current="page"'), '⋯ is not lit on Releases — the row says nowhere');
-  assert.equal(pills(nav).find((p) => p.current).id, 'releases', 'and the menu row is the current one');
+  assert.deepEqual(onRow, ['home', 'epics', 'beads']);
+  assert.equal(moreBtn(nav), null, 'a ⋯ with nothing behind it');
+  assert.deepEqual(pills(nav).filter((p) => p.menu).map((p) => p.id), []);
 });
 
 await check('⋯ opens the menu, and a row of it goes there and shuts it', () => {
@@ -1072,17 +1080,18 @@ await check('and on a page that is a view, that view’s pill is current', () =>
   const b = boot([], { pathname: '/work.html' });
   b.run('viewbar.js');
   const nav = b.body.querySelector('.viewbar');
-  assert.equal(pills(nav).find((p) => p.current).id, 'advocates');
+  // Work since bc-qzng7.3: the console is Work's details.
+  assert.equal(pills(nav).find((p) => p.current).id, 'epics');
 });
 
-await check('on Home as a whole document, the kind pills still act and Advocates still links', () => {
+await check('on Home as a whole document, there are no kind pills and Work is a button', () => {
   const b = boot([], { pathname: '/' });
   b.run('viewbar.js');
   const nav = b.body.querySelector('.viewbar');
-  assert.equal(pill(nav, 'pr').tag, 'button');
-  assert.equal(pill(nav, 'pr').kind, 'pr');
-  assert.equal(pill(nav, 'pr').pane, null);
-  assert.equal(pill(nav, 'advocates').tag, 'a');
+  assert.equal(pill(nav, 'pr'), undefined, 'PRs came back as a pill');
+  assert.equal(pill(nav, 'advocates'), undefined, 'Advocates came back as a pill');
+  assert.equal(pill(nav, 'epics').tag, 'button');
+  assert.equal(pill(nav, 'epics').kind, 'epics');
   assert.equal(pills(nav).find((p) => p.current).id, 'home');
 });
 

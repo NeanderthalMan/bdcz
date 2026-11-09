@@ -3256,6 +3256,16 @@ button.work-row {
   cursor: pointer;
 }
 .adv-btn:disabled { opacity: 0.5; }
+/* The per-workspace iTerm tab buttons — Consolidate, Close all, Reopen (bc-4olsx). The
+   same pills as the card head's controls, on a row of their own under it, because they
+   are about the workspace's windows rather than its advocate and a card with no advocate
+   carries them too. Close all's first tap arms it, in Ship's armed colour. */
+.tab-ctl { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0 4px; }
+.tab-ctl-label { font-size: 11px; color: var(--muted); margin-right: 2px; }
+.tab-ctl .board-said { flex-basis: 100%; margin-top: 4px; }
+.tab-ctl > span.tab-ctl-said { font-size: 11px; color: var(--muted); }
+.adv-btn.armed { border-color: transparent; background: var(--warn); color: var(--accent-ink); }
+.tab-skipped { flex-basis: 100%; margin: 2px 0 0; padding-left: 18px; font-size: 11px; color: var(--muted); }
 /* How many sessions this advocate may open, as a stepper rather than a config edit.
    One pill for the whole control — the two buttons and the number they change are one
    thing, and a gap between them would read as three separate actions beside Pause.
@@ -5656,12 +5666,14 @@ textarea.f-input { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; 
    between the strip's border and the pane. It is padding on the pinned box instead,
    which is the same gap drawn in `var(--bg)`; the border-bottom moves down by it,
    which is what a border under a bar with room beneath it should do anyway. */
+/* Since bc-qzng7.9 the chips are hidden (Work's details have no tab row), so what is
+   left of this line is its status text: no border, and only the padding the text needs,
+   so on an install with nothing to say it is all but gone. */
 .mon-tabs {
   flex: none;
   z-index: 3;
-  padding: 8px 14px 14px;
+  padding: 6px 14px 0;
   background: var(--bg);
-  border-bottom: 1px solid var(--line);
   display: flex;
   gap: 2px;
   margin: 0;
@@ -5681,6 +5693,8 @@ textarea.f-input { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; 
 }
 .mon-tabs::-webkit-scrollbar { display: none; }
 .mon-tabs .chip { position: relative; }
+.mon-tabs .chip[hidden] { display: none; }
+.prs-tabs[hidden] { display: none; }
 /* The far end of the chip row: the observer mark and the roster's tally (bc-khoe.4).
    On monitor.html those two sit at the right of that page's own top bar. In the shell the
    top bar belongs to every view and these are facts about one of them, so they came down
@@ -8422,6 +8436,25 @@ body.editing::after {
 .demo-runs, .demo-thread { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
 .demo-thread li { display: flex; flex-direction: column; gap: 2px; }
 .demo-said { color: var(--text); font-size: 13px; line-height: 1.4; white-space: pre-wrap; }
+/* The three verdicts (bc-sj8k.3), down the right of the card and outside it, because the
+   card is the tap that tries it. The board's own buttons, so Approve arms the way Merge does. */
+.demo-row { display: flex; align-items: stretch; gap: 8px; min-width: 0; }
+.demo-row > .demo-card { flex: 1 1 auto; min-width: 0; }
+.demo-verdicts { display: flex; flex-direction: column; justify-content: center; gap: 6px; flex: 0 0 auto; width: 112px; }
+.demo-verdicts .board-btn { width: 100%; padding: 6px 10px; white-space: normal; line-height: 1.2; text-align: center; }
+.demo-panel {
+  display: flex; flex-direction: column; gap: 8px; padding: 10px 14px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+}
+.demo-panel p { margin: 0; }
+.demo-text, .demo-bead-pick {
+  width: 100%; box-sizing: border-box; padding: 8px 10px;
+  background: var(--surface-2); color: var(--text);
+  border: 1px solid var(--line); border-radius: var(--radius);
+  font: inherit; font-size: 13px;
+}
+.demo-text { resize: vertical; min-height: 64px; }
+.demo-said-line { margin: 0; padding: 0 14px; }
 
 /* -------------------------------------------------------------- /sounds
 
@@ -8772,3 +8805,347 @@ body.editing::after {
   font-size: 11px; font-weight: 400; letter-spacing: 0; text-transform: none;
   opacity: 0.85;
 }
+
+/* ------------------------------------------------------------------ Settings (bc-qzng7.1)
+
+   The Settings screen: a grouped list where each row opens a page of its own, the way a
+   phone's Settings is. Drawn by public/config.js into the `config` pane. Groups are
+   rounded boxes of rows with hairlines between them; a row is an icon, a title with a
+   line under it, and a chevron. The whole row is the target — `--tap` high at least. */
+.settings { display: flex; flex-direction: column; gap: 18px; }
+.settings-title { margin: 4px 0 0; font-size: 24px; }
+.settings-back + .settings-title { margin-top: -14px; }
+.settings-back {
+  align-self: flex-start;
+  color: var(--accent); text-decoration: none; font-size: 13px;
+  padding: 6px 0;
+}
+.settings-group h3 {
+  margin: 0 0 6px 12px;
+  color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;
+}
+.settings-group ul {
+  list-style: none; margin: 0; padding: 0;
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+  overflow: hidden;
+}
+.settings-group li + li { border-top: 1px solid var(--line); }
+.settings-row {
+  display: flex; align-items: center; gap: 12px;
+  width: 100%; min-height: var(--tap);
+  padding: 10px 14px;
+  border: 0; background: none; color: var(--text); font: inherit; text-align: left;
+  text-decoration: none; cursor: pointer;
+}
+.settings-row:hover { background: var(--surface-2); }
+.settings-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.settings-row-note { cursor: default; }
+.settings-row-note:hover { background: none; }
+.settings-icon { width: 26px; flex: none; text-align: center; font-size: 19px; }
+.settings-label { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.settings-name { font-weight: 600; }
+.settings-sub { color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.settings-chev { color: var(--muted); font-size: 19px; flex: none; }
+/* Every count, two to a line on a phone: a definition list so a screen reader hears
+   "ready, 42" rather than a run of numbers. */
+.settings-counts {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 4px 16px;
+  margin: 10px 0 0;
+}
+.settings-counts div { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; }
+.settings-counts div.dim { opacity: 0.55; }
+.settings-counts dt { color: var(--muted); }
+.settings-counts dd { margin: 0; font-variant-numeric: tabular-nums; font-weight: 600; }
+.settings-details summary { cursor: pointer; color: var(--muted); padding: 6px 0; }
+/* launchd's lines carry absolute paths, and a path is one unbreakable word on a phone. */
+.settings-details .svc { overflow-wrap: anywhere; }
+
+/* All settings (bc-qzng7.5): every config.json key as a folded row — the key, its value,
+   and a badge or two — that opens on its description, facts and editor. A group is the
+   same rounded box the list's groups are, its rows `<details>` with hairlines between. */
+.cfg-search {
+  width: 100%; min-height: var(--tap); padding: 8px 12px;
+  border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--surface); color: var(--text); font: inherit;
+}
+.cfg-group { display: flex; flex-direction: column; }
+.cfg-group[hidden], .cfg-key[hidden] { display: none; }
+.cfg-count { font-weight: 400; opacity: 0.7; }
+.cfg-key { background: var(--surface); border: 1px solid var(--line); border-top-width: 0; }
+.cfg-group h3 + .cfg-key { border-top-width: 1px; border-radius: var(--radius) var(--radius) 0 0; }
+.cfg-key:last-child { border-radius: 0 0 var(--radius) var(--radius); }
+.cfg-group h3 + .cfg-key:last-child { border-radius: var(--radius); }
+.cfg-key > summary {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  min-height: var(--tap); padding: 8px 14px; cursor: pointer;
+}
+.cfg-name { font-size: 13px; overflow-wrap: anywhere; }
+.cfg-val {
+  flex: 1; min-width: 0; color: var(--muted); font-size: 13px; text-align: right;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cfg-badge {
+  flex: none; font-size: 11px; padding: 1px 6px; border-radius: 999px;
+  border: 1px solid var(--line); color: var(--muted);
+}
+.cfg-badge.cfg-set { color: var(--accent); border-color: var(--accent); }
+.cfg-body { padding: 0 14px 12px; display: flex; flex-direction: column; gap: 8px; font-size: 13px; }
+.cfg-desc { margin: 0; color: var(--muted); overflow-wrap: anywhere; }
+.cfg-facts { margin: 0; display: grid; gap: 4px; }
+.cfg-facts div { display: grid; grid-template-columns: 96px 1fr; gap: 8px; }
+.cfg-facts dt { color: var(--muted); }
+.cfg-facts dd { margin: 0; overflow-wrap: anywhere; }
+.cfg-pw { border-collapse: collapse; font-size: 13px; }
+.cfg-pw td { padding: 2px 10px 2px 0; }
+.cfg-edit { display: flex; flex-direction: column; gap: 8px; }
+.cfg-in {
+  width: 100%; min-height: var(--tap); padding: 6px 10px;
+  border: 1px solid var(--line); border-radius: 6px;
+  background: var(--surface-2); color: var(--text); font: inherit;
+}
+.cfg-json { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+.cfg-why { margin: 0; font-style: italic; color: var(--muted); }
+.cfg-restart { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.cfg-log ul li { padding: 8px 14px; display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.cfg-log-change { overflow-wrap: anywhere; }
+.cfg-log-meta { color: var(--muted); display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+/* The `‹ Settings` link a page that is one of Settings' rows draws in its own top bar
+   (admin, foundations, terminal, and the four reference pages). */
+.settings-up {
+  color: var(--accent); text-decoration: none; font-size: 13px; white-space: nowrap;
+  padding: 4px 6px;
+}
+
+/* A row's kind, at the head of its meta line (bc-qzng7.2). Inbox holds every kind in
+   one list now that Questions and PRs are a filter rather than pills, so each row says
+   which it is. A button: tapping it narrows Inbox to that kind. Tinted from the same
+   tokens as the rest of the card so it follows the theme. */
+.kind-tag {
+  display: inline-flex; align-items: center;
+  padding: 2px 6px; margin: 0; border: 0; border-radius: 6px;
+  font: 700 9px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.05em; text-transform: uppercase;
+  color: var(--muted); background: color-mix(in srgb, var(--muted) 16%, transparent);
+  cursor: pointer; -webkit-tap-highlight-color: transparent;
+}
+.kind-tag:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.kind-tag.kind-ask { color: var(--warn); background: color-mix(in srgb, var(--warn) 16%, transparent); }
+.kind-tag.kind-merge { color: var(--bead-answered); background: color-mix(in srgb, var(--bead-answered) 16%, transparent); }
+.kind-tag.kind-endorse,
+.kind-tag.kind-proposal { color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+
+/* The held row on Inbox sits in the list's own flow, so it needs the gap the cards get. */
+.inbox-held { margin-bottom: 10px; }
+
+/* ---------------------------------------------------------------- Work (bc-qzng7.3) */
+
+/* The one line of advocate health at the top of Work. Plumbing surfaces here only when
+   it is wrong, in amber, under the line. */
+.work-health {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  font-size: 13px;
+}
+.work-health-line { flex: 1 1 auto; }
+.work-health-go { color: var(--accent); text-decoration: none; white-space: nowrap; }
+.work-health-trouble { flex: 1 0 100%; color: var(--warn); font-size: 11px; }
+.work-health.bad { border-color: color-mix(in srgb, var(--warn) 55%, var(--line)); }
+
+/* Each effort's pipeline: ready → in session → in review → merged → shipped. One line
+   that scrolls sideways on a phone rather than wrapping into a paragraph. */
+.work-strip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow-x: auto;
+  padding: 6px 12px 2px;
+  font-size: 11px;
+  white-space: nowrap;
+  scrollbar-width: none;
+}
+.work-strip::-webkit-scrollbar { display: none; }
+.work-step {
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+.work-step a { color: inherit; }
+.work-step.none { opacity: 0.45; }
+.work-step.session:not(.none) { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+.work-step.review:not(.none) { color: var(--bead-answered); border-color: color-mix(in srgb, var(--bead-answered) 45%, var(--line)); }
+.work-step.merged:not(.none) { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); }
+.work-arrow { color: var(--muted); opacity: 0.6; }
+
+.work-chats { margin-top: 18px; }
+.work-queue { display: flex; justify-content: flex-end; margin: 0 0 10px; font-size: 13px; }
+.work-queue a { color: var(--accent); text-decoration: none; }
+.compose-chat { font-weight: 600; }
+
+/* ------------------------------------------------- one bar: bottom on a phone, rail on a desk
+   bc-qzng7.4. The view row is the app's only navigation: Inbox, Work, ＋, Beads, Find. On a
+   phone it is a tab bar at the foot of the screen, where a thumb is; above 1100px it is a
+   rail down the left. Same element (public/viewbar.js) and same markup either way — only
+   where the flex column puts it, and how a pill is drawn, change.
+
+   The bar is a row of the body's flex column (`order` moves it last), not `position:
+   fixed`, so the scroller above it ends where it starts and nothing has to reserve space.
+   `.card.open` (z 40) and the drawer (70) are fixed layers above it, which is what keeps an
+   open question's answer buttons clear of the bar. */
+@media (max-width: 1099px) {
+  body > .viewbar {
+    order: 99;
+    justify-content: space-around;
+    gap: 0;
+    padding: 2px 4px 0;
+    border-bottom: 0;
+    border-top: 1px solid var(--line);
+    overflow-x: hidden;
+  }
+  body > .viewbar .viewpill {
+    flex: 1 1 0;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+    min-height: 52px;
+    padding: 4px 2px;
+    border: 0;
+    border-radius: 10px;
+    background: none;
+    font-size: 11px;
+  }
+  body > .viewbar .viewpill-icon { font-size: 19px; }
+  body > .viewbar .viewpill[aria-current="page"] {
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    color: var(--accent);
+  }
+  /* The count rides the icon's corner on a tab bar rather than sitting beside the word. */
+  body > .viewbar .viewpill { position: relative; }
+  body > .viewbar .viewpill-count {
+    position: absolute;
+    top: 2px;
+    left: calc(50% + 6px);
+    min-width: 16px;
+    padding: 0 4px;
+    border-radius: 999px;
+    background: var(--warn);
+    color: var(--bg);
+    font-size: 9px;
+    line-height: 16px;
+  }
+  /* The bar has ＋ now, so the floating one goes; its panels stay, and open above the bar. */
+  body:has(> .viewbar .viewpill-plus) .compose-wrap .compose { display: none; }
+  body:has(> .viewbar) .compose-wrap { bottom: calc(env(safe-area-inset-bottom) + 70px); }
+  body:has(> .viewbar) .toast { bottom: calc(env(safe-area-inset-bottom) + 76px); }
+  body.has-compose:has(> .viewbar) .pagescroll { padding-bottom: 16px; }
+}
+
+@media (min-width: 1100px) {
+  body:has(> .viewbar) { padding-left: 208px; }
+  body > .viewbar {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 208px;
+    flex-direction: column;
+    gap: 4px;
+    padding: 16px 12px;
+    border-bottom: 0;
+    border-right: 1px solid var(--line);
+    overflow-y: auto;
+  }
+  body > .viewbar .viewpill {
+    justify-content: flex-start;
+    border-color: transparent;
+    background: none;
+    padding: 0 14px;
+  }
+  body > .viewbar .viewpill[aria-current="page"] {
+    border-color: transparent;
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    color: var(--accent);
+  }
+  body > .viewbar .viewpill-count { margin-left: auto; }
+  body > .viewbar .viewpill-find { margin-top: auto; }
+  /* The rail has New, so the floating ＋ goes here too; its panels open beside the rail. */
+  body:has(> .viewbar .viewpill-plus) .compose-wrap .compose { display: none; }
+  body:has(> .viewbar) .compose-wrap {
+    right: auto;
+    left: 220px;
+    bottom: calc(env(safe-area-inset-bottom) + 14px);
+    align-items: flex-start;
+  }
+  /* On a desk the detail drawer is a pane beside the list, not a sheet over it. */
+  .drawer-wrap { left: auto; width: min(46vw, 640px); }
+  .drawer-backdrop { display: none; }
+  .drawer { box-shadow: none; }
+  html.drawer-docked body { padding-right: min(46vw, 640px); }
+  /* A grid cell is narrower than a phone; the strip wraps there rather than clipping. */
+  .work-strip { flex-wrap: wrap; row-gap: 4px; overflow-x: visible; }
+}
+
+/* Find (public/find.js). */
+.find[hidden] { display: none; }
+.find { position: fixed; inset: 0; z-index: 80; }
+.find-backdrop { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.5); }
+.find-panel {
+  position: absolute;
+  left: 50%;
+  top: calc(env(safe-area-inset-top) + 8vh);
+  transform: translateX(-50%);
+  width: min(640px, calc(100% - 24px));
+  max-height: 76vh;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+}
+.find-box { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+.find-input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 16px;
+  outline: none;
+}
+.find-close {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: none;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 11px;
+  padding: 2px 6px;
+  cursor: pointer;
+}
+.find-list { overflow-y: auto; padding: 6px 0 10px; }
+.find-head {
+  padding: 10px 16px 4px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.find-row { display: flex; align-items: center; gap: 12px; padding: 8px 16px; color: inherit; text-decoration: none; }
+.find-row:hover,
+.find-row:focus { background: color-mix(in srgb, var(--accent) 12%, transparent); outline: none; }
+.find-icon { width: 22px; text-align: center; flex: none; }
+.find-text { display: flex; flex-direction: column; min-width: 0; }
+.find-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.find-sub { color: var(--muted); font-size: 11px; }
+.find-empty { padding: 18px 16px; color: var(--muted); font-size: 13px; }

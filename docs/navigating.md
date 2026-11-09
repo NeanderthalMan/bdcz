@@ -2,6 +2,86 @@
 
 ## Getting around — the pill row
 
+> **Being replaced (bc-qzng7).** The navigation is moving to four destinations: Inbox,
+> Work, Beads and a Settings screen, with a bottom bar on the phone. Phase 2
+> (bc-qzng7.2) has landed:
+>
+> - **Home is Inbox**, and it is always the `human` sweep: everything waiting on you.
+>   The Human / Both / Agent switch is gone. Agent-side rows are under **Beads**, which
+>   still widens the sweep for its own load.
+> - **Questions and PRs are no longer pills.** They are one **Kind** filter pill beside
+>   the bead search (`kindGroup` in `public/inboxfilter.js`). `?kind=question` and
+>   `?kind=pr` still work, and keep the Inbox pill lit.
+> - **One badge**, on Inbox. My Efforts and Chats carry no count.
+> - **Each question or merge row has a kind tag** (ask, merge, endorse, ticket,
+>   proposal) at the head of its meta line. Tapping it narrows Inbox to that kind.
+> - **Held beads are one row at the top of Inbox**, counted from `/api/unendorsed` and
+>   linking to `/endorse`, instead of the Held half of the Questions pill.
+> - The unnarrowed Inbox no longer confesses the `asked` and `unmerged` defaults as a
+>   note. They are what Inbox means. A sub-filter you chose is still said.
+>
+> Phase 3 (bc-qzng7.3) has landed:
+>
+> - **Work** replaces My Efforts, Chats, Advocates, the PR board and Releases. It is
+>   the effort board, with a **pipeline strip** on each card: ready → in session → in
+>   review → merged, not shipped → shipped. The review and merged steps name their
+>   pull requests by number.
+> - **Chats are on Work**, under the board. They are no longer in Inbox's list or
+>   count. `?kind=session` lands on Work. ＋ on Work opens a panel whose first row starts
+>   a chat; the rows under it put one of your efforts on the board.
+> - **One health line** sits on top of Work: sessions running, ready, blocked. Its
+>   "details ›" opens the advocate console. launchd and router trouble surfaces on the
+>   line only when something is wrong.
+> - A **Stage** filter on Work (In review, Shipping) swaps the board for the pull
+>   requests at that stage. This is the PR board and Releases as a narrowing. Shipping
+>   links to Releases when nothing is waiting.
+> - The advocate console and Releases are Work's **details panes**. Every address they
+>   had still works and lights Work, and on them the lit Work pill stays a button: it
+>   is the way back to the board.
+> - **No tab rows under Work** (bc-qzng7.9). The console's Advocates / PRs / Mirror
+>   chips and its Open PRs / Merge queue switch are hidden. The address picks the
+>   section, and Work links to each one:
+>   - `details ›` opens the roster (`#advocates`).
+>   - `mirror ›` opens Mirror (`#advocates?tab=mirror`).
+>   - `merge queue ›`, over the In review stage, opens the queue in the order it will
+>     try them (`#advocates?tab=prs&sub=queue`). A bare `tab=prs` — `/prs` and every old
+>     link to the board — is still Open PRs.
+>
+>   Open PRs is also Work's In review stage. Terminal is still a card's ⌨️ menu item, on
+>   the bead. Mirror went on the health line rather than on a chat, because it mirrors
+>   another device rather than a session.
+>
+> Phase 4 (bc-qzng7.4) has landed:
+>
+> - **One bar, and it moved.** On a phone (under 1100px) the row is a tab bar at the
+>   foot of the screen: Inbox (with its badge), Work, ＋ New, Beads, Find. It fits the
+>   screen rather than scrolling sideways. On a desk it is a rail down the left, with Find
+>   at its foot. It is the same `.viewbar` element and the same script; only where the
+>   body's flex column puts it, and how a pill is drawn, change (style.css).
+> - **The bottom bar is back, deliberately.** bc-khoe.1 deleted the old bottom bar because
+>   there were two bars, a tab bar and the pill row. The redesign has no second row
+>   anywhere, so that reason no longer applies: this bar is the only navigation there is.
+> - **＋ is on the bar.** It is the page's own create (`#compose` in app.js), drawn while
+>   the view has one, and the floating button goes. Its panels open above the bar.
+> - **Find** (public/find.js): one box for beads, chats, pull requests and every page.
+>   ⌘K / Ctrl+K on a desk; the bar's Find on a phone. Places with no pill of their own
+>   (the ledger, the merge queue, Releases, This machine, Foundations, the terminal…) are
+>   reached from here. `is:open`, `is:closed` and `is:all` find the three sides of Beads.
+>   test/findpages.mjs fails the build when a page in public/ is neither in Find nor
+>   named as not a place, with a reason.
+> - **On a desk the detail drawer is a pane beside the list**, not a sheet over it: no
+>   backdrop, and the page makes room while it is open (`html.drawer-docked`). Below
+>   1100px it behaves as before.
+> - Open question cards (`.card.open`, z 40) and the drawer still sit above the bar, so
+>   an answer button is never under it.
+> - Not yet: the Beads screen's Open / Closed / All toggle is still a toggle. The tokens
+>   that replace it work in Find, and replacing the toggle itself is bc-qzng7.11.
+>
+> The rest of this section describes the row as it was before bc-qzng7 and is kept as
+> the record of why each piece was built. The bar today is: Inbox, Work, ＋, Beads, Find.
+> The ⋯ menu appears only when a repo declares a view of its own. Settings is reached
+> from the space name.
+
 The standing views — it started as four: the **inbox**, the **chat session**, the
 **sessions** and the **advocates**, with the **pull requests** and the **admin**
 screen since. They are separate pages, and each one used to end in an ✕ in the top right
@@ -28,18 +108,17 @@ So there is one row now, under the top bar on every page the bottom bar was on:
   └──────────────────────────────────────────────────────┘
 ```
 
-Ten pills today, on ten pages: the [seven kinds](inbox.md#one-list-six-kinds--and-the-two-sub-filters)
+Nine pills today, on ten pages: the [seven kinds](inbox.md#one-list-six-kinds--and-the-two-sub-filters)
 bc-khoe.2 promoted out of the inbox's filter panel — Home, My Epics, Questions, Chats,
 Ledger, All Beads, PRs — plus Advocates, plus
-[Releases](pull-requests.md#releases--the-view-those-queues-are-drawn-on), plus
-[Config](asking.md#space-details--every-setting-a-space-has-on-a-page-of-its-own), the selected
-space's own settings, which bc-khoe.10 took off the advocate console. Releases sits next to
+[Releases](pull-requests.md#releases--the-view-those-queues-are-drawn-on). Releases sits next to
 Advocates because the two are read one after the other — the board is where you decide
-something may land and Releases is where you watch it do so — and Config is rightmost
-because the row is ordered by how often a thumb reaches a pill and this is the one you
-reach about once a month. Its glyph is knobs and not a gear: the gear in this app is
-`/admin`, which is the *machine's* settings and is in the mark's menu, and two settings
-screens behind one glyph is the confusion that menu exists to end. The other five pages
+something may land and Releases is where you watch it do so.
+
+**There was a tenth, Config, and it is gone (bc-qzng7.1).** It was the selected space's own
+settings, rightmost in the ⋯ menu because it is the pill you reach about once a month. The
+pane it opened is the [Settings screen](#settings--the-space-its-advocate-and-everything-else)
+now, and it is reached by tapping the space name rather than from this row. The other five pages
 that used to load the bottom bar (`/admin`, `/console`, `/endorse`, `/flow`,
 `/requirements`) draw the row with **nothing on it current**, which is their way off a page
 that would otherwise be reachable only by the browser's back gesture.
@@ -80,8 +159,8 @@ under it.
 
 **Five counts, and only on Home.** Home, My Epics, Questions, PRs and Chats each carry a
 number: how many rows tapping that pill would leave you with. All Beads, Ledger, Advocates,
-Releases and Config carry none — the first is unbounded and says nothing you would act on,
-and the other four are pages of their own with their own polls.
+and Releases carry none — the first is unbounded and says nothing you would act on, and the
+other three are pages of their own with their own polls.
 
 This reverses a decision this section used to record, and the objection it was written
 against still stands as written. Advocates carried a badge once — how many proposals were
@@ -135,10 +214,14 @@ The count the bar used to carry is still served and still on screen, in the advo
 console's own tally ("3 working · 1 to answer"), beside the repo it belongs to instead of
 standing in for all of them.
 
-**What is not a pill, and why.** `/admin` is the screen you least want under a stray
-thumb, so it loses the rightmost tab it had — and it does not need one: since bc-khoe.5 it
-is a row in the menu the top bar's gear-wrapped mark opens, on every page rather than only
-the one that happened to carry a ⚙. **A create** has had no place on the navigation since
+**What is not a pill, and why.** **Settings** is not a pill and is not in the ⋯ menu: it is
+behind the space name, because the settings you came to change are the selected space's,
+and the space name is the thing on screen that says which space that is (bc-qzng7.1). The
+epic's rule is four destinations, fixed, and a settings screen is not a fifth — it is where
+you set things up, not somewhere you go to see what is happening. `/admin` is the screen you
+least want under a stray thumb, so it loses the rightmost tab it had — and it does not need
+one: it was a row in the mark's menu from bc-khoe.5, and since bc-qzng7.1 it is a row of
+Settings → This machine, beside the account, Foundations and the terminal. **A create** has had no place on the navigation since
 bc-l8jp.5: `Chats` is a pill now, but it is the pill for the conversations you already
 have open, and starting one is still the ＋ on Home — a pill goes somewhere, it does not do
 anything. The endorsement queue's absence is a recorded decision (bc-j0zl, [never a sixth
@@ -158,10 +241,60 @@ rather than one, and it stays two: bc-khoe.30.6 re-decided it with the rest of t
 and left it a mode of the console — see
 [The advocate console is one pane, and its chip row stays](#the-advocate-console-is-one-pane-and-its-chip-row-stays).
 
-⟳ stays in the top bar of the views that have it: it acts on the view you
-are looking at rather than taking you off it. ⌨️ (the terminal) and ⚖️ (the
-foundations) stay in the inbox's top bar too — they are places you go for one thing
-and come back from, not views you live in.
+⟳ stays behind the mark, in the ⋮ menu of the views that have it: it acts on the view you
+are looking at rather than taking you off it, and so does 🌐 (open this page in Chrome, in
+the Android app). Those two are all that menu holds since bc-qzng7.1, because they are the
+only things in it that are not *places*. ⌨️ (the terminal) and ⚖️ (the foundations) used to
+hang in the inbox's top bar and then in that menu; they are rows of Settings → This machine
+now, and the foundation requests the ⚖️ badge counted are a section at the top of the inbox
+list, which is where they were already drawn.
+
+### Settings — the space, its advocate and everything else
+
+One screen for everything that is configuration rather than work (bc-qzng7.1). It is the
+`config` pane — the same container, the same three addresses (`/config`, `/settings`,
+`/config.html`, each a hop to `/#config`) — grown from one space's settings card into a
+grouped list, the way a phone's Settings is:
+
+| Row | Page | What is on it |
+|---|---|---|
+| This space | `#config?p=space` | Muted, quiet hours and days, push and Slack detail, and the seven policies — who may endorse, what merges itself, approval, review, auto-ship, keeping checks across a downmerge |
+| Advocate | `#config?p=advocate` | Every control on the Advocates view that changes behaviour — capacity (per repo and Mac-wide), Pause, Reclaim sessions, Forget attempts, Turn off/on — and its full status: the counts, and the launchd and build lines behind *details* (open on their own when one is wrong) |
+| Repos in this space | `#config?p=repos` | One row per repo: what it resolves to, and the per-repo overrides |
+| Notifications | `#config?p=notifications` | Android's per-channel settings (only where the app's bridge can open them), the space's muting, Sounds |
+| This machine | `#config?p=machine` | The account (switch or add — the same picker the mark's menu used to open), Admin, Foundations, Terminal |
+| All settings | `#config?p=all` | Every `config.json` key [docs/config.md](config.md#all-settings--every-key-from-the-app) documents, grouped as it groups them and searchable by name and description; each with its value, default, source, a typed editor, and a badge if it waits for a restart. Secrets show only *set* or *not set*. The changes made from here are listed at the foot with Revert (bc-qzng7.5) |
+| Reference | `#config?p=reference` | Flow, Requirements, Skills, Sounds |
+
+**A page is an address, not a tab.** Each row is a plain link to its `#config?p=…`, so a tap
+pushes one history entry and back walks out of the page the way you walked in. The shell
+already carries a view's own query (decision 5 in `public/hashroute.js`) and
+`panes.onQuery` is how the pane hears it move. That is also why there is no row of tabs
+across the top of it — the epic's no-second-row rule.
+
+**Reached from the space name.** The picker's first row is **⚙ Settings**
+(`public/spacebar.js`): the space name is that `<select>`, so tapping it already opens a list,
+and the settings of the space you are looking at belong at the top of it. On the shell it
+shows the pane; on every other page that has the picker it loads `/settings`. The desktop
+rail and Find that the epic also names as doors are phase 4 (bc-qzng7.4).
+
+**Pages that are documents stay documents.** Admin, Foundations, the terminal and the four
+reference pages keep their addresses and their scripts — they are rows that *link* to them —
+and each draws a `‹ Settings` link in its own top bar back to `/settings?p=<its page>`, which
+the daemon hops to that page of the pane.
+
+**All settings reads the document, not a list of its own.** The rows are docs/config.md's
+table, served by `GET /api/config`, so a key documented tomorrow is on the page tomorrow. A
+row is folded to one line — the key, its value, `↻ restart`, `file only`, `set` — and opens
+on its description and editor. The search box hides rows in place rather than repainting,
+so the keyboard stays up. What is open and what is half-typed are kept across the repaint a
+Save makes. See [All settings](config.md#all-settings--every-key-from-the-app) for the write,
+the log and what a browser may not change.
+
+**The Advocates view keeps its controls until phase 3.** The Advocate page posts to the same
+`POST /api/advocate` with the same actions, so a press there is a press on the console.
+bc-qzng7.3 folds the console into Work and takes them off it; doing that first would have
+left the console unable to act on what it shows.
 
 An **open question is the exception**: a card you have opened takes the whole screen,
 pill row included, because the answer buttons at its foot must not sit under anything.

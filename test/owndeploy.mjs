@@ -29,6 +29,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cleanupTmp } from './helpers/tmp.mjs';
 
+// The suite is about a launchd install (plist, gui/<uid>); off a Mac the service manager
+// defaults to systemd, so pin it (bc-obucr.7).
+process.env.BEADCAUSE_SERVICE_MANAGER = 'launchd';
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'beadcause-owndeploy-'));
 // Before anything under lib/ is imported: CONFIG_DIR resolves once, at module load.
 process.env.BEADCAUSE_CONFIG_DIR = path.join(tmp, 'config');

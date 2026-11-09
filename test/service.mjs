@@ -41,6 +41,9 @@ import {
 } from '../lib/service.js';
 import { removeTreeSync } from './helpers/tmp.mjs';
 
+// This suite is about what launchd hands us. Off a Mac the service manager defaults to
+// systemd, so pin it (bc-obucr.7); the systemd side is test/servicesystemd.mjs.
+process.env.BEADCAUSE_SERVICE_MANAGER = 'launchd';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 // Nothing below asks anything of the machine this runs on: every case is a directory

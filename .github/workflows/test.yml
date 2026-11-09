@@ -106,7 +106,8 @@
 # answer instead of the whole roster, so on a `pull_request` each shard runs only the part
 # of the narrowed list that belongs to it. Measured over the last thirty merges to `main`:
 # a median diff selects **4% of the suite's total time**, and one in thirty selects all of
-# it. On `merge_group` and `push: main` nothing is narrowed — those run all 530.
+# it. On `merge_group` nothing is narrowed. `push: main` was whole-roster too until
+# bc-xl7n.227, below.
 #
 # That split is the whole safety argument. Narrowing can only be wrong by running too
 # little, and the place it would matter is the merge, which is exactly where it is turned
@@ -150,6 +151,17 @@
 # That retires the safety argument two sections up: the merge is no longer where
 # narrowing is turned off, and `push: main` is the only whole-roster run left.
 #
+# ## …and `main` narrows too, with the whole roster nightly (bc-xl7n.227)
+#
+# The whole roster outgrew the Mac. At 674 suites a `push: main` run took 43-60 minutes,
+# and four of six in a row were cancelled at `timeout-minutes` — 45, then 60. A cancelled
+# run gives `main` no verdict, the queue reads that as a red base and holds every merge,
+# so the backstop had become the thing stopping the line. A push to `main` now narrows on
+# what it landed (the diff from `github.event.before` to the pushed sha), and the whole
+# roster runs on a nightly `schedule` and on `workflow_dispatch` instead. Adam's call,
+# 2026-11-08. What it gives up: a break through a non-import coupling (above) now
+# surfaces on the next nightly run, not on the push that caused it.
+#
 # Why this rather than `lib/basegate.js` in reverse (a local, clean, full `b7e-gate` run
 # pinned to the head sha): that would mean the daemon starting a whole-suite run on this
 # Mac for every downmerge and holding the merge until it finished. That is a slot in the
@@ -166,14 +178,17 @@
 # ## Why three triggers
 #
 # - `pull_request` — the ordinary signal, so a red suite is visible on the PR page before
-#   anyone (or `bin/deliver.js`) merges it. The one trigger that narrows.
+#   anyone (or `bin/deliver.js`) merges it. Narrowed.
 # - `merge_group` — **the load-bearing one.** A merge queue builds a temporary ref of
 #   `main` + the entries ahead of yours + yours, and runs the required checks against
 #   *that*. Without this trigger the queue has nothing to wait for and every entry stalls.
 #   It is here before the queue is switched on, deliberately: a required check that does
 #   not answer for `merge_group` events blocks the queue rather than gating it.
 # - `push` on `main` — so the history of `main` itself has a verdict, which is what makes
-#   "was main already broken when I branched?" answerable after the fact.
+#   "was main already broken when I branched?" answerable after the fact. Narrowed to
+#   what the push landed, since bc-xl7n.227.
+# - `schedule`, nightly — the whole roster on `main`, so a break narrowing missed is
+#   found within a day. `workflow_dispatch` runs the whole roster on demand.
 #
 # ## Why the git identity step
 #
@@ -199,6 +214,11 @@ on:
   merge_group:
   push:
     branches: [main]
+  # The whole roster, once a night, on `main` — the backstop `push: main` used to be
+  # (bc-xl7n.227). 07:00Z is 03:00-04:00 in Halden, when the Mac has the fewest
+  # sessions on it. GitHub runs a schedule on the default branch only.
+  schedule:
+    - cron: '0 7 * * *'
   # So a runner change can be proved on demand rather than by pushing something and
   # hoping — bc-hkval was diagnosed with no logs to read at all.
   workflow_dispatch:
@@ -206,8 +226,12 @@ on:
 # One run per pull request: a branch pushed three times in a minute should not hold three
 # sets of runners. Merge-group runs are never cancelled — cancelling one drops the entry
 # from the queue, which is the opposite of what the queue is for.
+#
+# The nightly run has its own group. A concurrency group keeps only one run pending, so
+# sharing `main`'s group would let the next push to `main` cancel a nightly run that was
+# still waiting for a runner (bc-xl7n.227).
 concurrency:
-  group: test-${{ github.event.pull_request.number || github.ref }}
+  group: test-${{ github.event.pull_request.number || (github.event_name == 'schedule' && 'nightly') || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -251,14 +275,27 @@ jobs:
     # `workflow_dispatch` run the whole roster, which takes ~40 minutes on a 3-core hosted
     # runner, so those stay on the Mac. If the bill fails again, every PR check fails
     # instantly with no steps (bc-hkval): revert this condition, nothing else.
-    runs-on: ${{ (github.event.repository.private && github.event_name != 'pull_request') && fromJSON('["self-hosted","macOS","ARM64"]') || 'macos-latest' }}
+    #
+    # **Reverted 2026-11-05 (bc-uy247): the bill failed again.** From ~13:14Z every hosted
+    # job was refused unstarted ("recent account payments have failed or your spending
+    # limit needs to be increased"), so every PR read red and the merge queue spent its
+    # attempts on checks that never ran. Pull requests are back on the Mac. To return them
+    # to hosted once billing is sorted, put `&& github.event_name != 'pull_request'` back
+    # here and in the `--jobs` line below.
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","macOS","ARM64"]') || 'macos-latest' }}
     # About 20 minutes for the full roster on a loaded Mac at `--jobs 6`, and less for a
     # narrowed PR. 45 rather than the 20 a hosted runner needed: the job shares the machine
     # with local gates and the live daemon, and #105's own first run lost a shard to the
     # 20-minute limit while the tests themselves were fine. Still short enough that a suite
     # hanging on a port or a lock is killed rather than sitting ahead of everybody else.
     # Time spent queued for a runner does not count against it.
-    timeout-minutes: 45
+    #
+    # **60, not 45 (bc-xl7n.223).** With the roster at 674 suites a whole-roster `push: main`
+    # run takes 44 minutes on this Mac: two of six recent runs finished at 43.9m and 44.3m,
+    # four were cancelled at the cap. A cancelled base check reads as pending, so main never
+    # got a green verdict from GitHub. Sixty leaves headroom for the roster to keep growing
+    # and still kills a hung suite well inside the window `lib/autogate.js` waits on GitHub.
+    timeout-minutes: 60
     steps:
       # Whether this run needs the suite at all — bc-sypx2. A pull request that changes
       # nothing but `.claude/` (handoffs, settings, the runner installer) cannot change what
@@ -341,15 +378,20 @@ jobs:
       - run: npm ci
         if: steps.decide.outputs.code == 'true'
 
-      # On a pull request only. `b7e-affected` prints nothing and exits 1 when a changed
-      # file matched no suite — `|| true` keeps that from failing the step, because an
-      # empty list is `b7e-shard --from`'s own spelling of "the whole roster", which is
-      # exactly the fallback being asked for.
+      # On a pull request and on a push to `main`. `b7e-affected` prints nothing and exits 1
+      # when a changed file matched no suite — `|| true` keeps that from failing the step,
+      # because an empty list is `b7e-shard --from`'s own spelling of "the whole roster",
+      # which is exactly the fallback being asked for.
+      #
+      # On a push the two shas are `main` before and after it (bc-xl7n.227), so the diff is
+      # exactly what the merge landed. A first push has a `before` of forty zeros, which
+      # the clone cannot read, so it runs the whole roster — the same conservative answer.
+      # The step keeps its pull-request name because test/shard.mjs finds it by that name.
       - name: Work out which suites this pull request affects
-        if: steps.decide.outputs.code == 'true' && github.event_name == 'pull_request'
+        if: steps.decide.outputs.code == 'true' && (github.event_name == 'pull_request' || github.event_name == 'push')
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event_name == 'push' && github.event.before || github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event_name == 'push' && github.sha || github.event.pull_request.head.sha }}
         run: |
           # A downmerged branch narrows like any other, on what it changes against the
           # base's tip (bc-3crv6, "…downmerged ones narrow too" above). HEAD here is
@@ -405,8 +447,86 @@ jobs:
           set -o pipefail
           # Fixed, not load-based: see "Why `--jobs 6`" in the header (bc-s57oe). 3 on a
           # hosted runner, which has three cores — the same header says why not more.
-          # Keyed on the same condition as `runs-on`, so a hosted pull-request run gets 3.
-          node bin/b7e-gate --jobs ${{ (github.event.repository.private && github.event_name != 'pull_request') && 6 || 3 }} $ONLY_ARGS 2>&1 | tee "$LOG"
+          # Keyed on the same condition as `runs-on`, so a hosted run gets 3.
+          node bin/b7e-gate --jobs ${{ github.event.repository.private && 6 || 3 }} $ONLY_ARGS 2>&1 | tee "$LOG"
           STATUS=$?
           chmod 644 "$LOG" 2>/dev/null || true
           exit $STATUS
+
+  # The same suite on Linux (bc-obucr.7), beside the Mac one rather than instead of it.
+  #
+  # bc-obucr made the daemon run on a Linux server: tmux for agent windows, systemd for
+  # the service, no osascript. Nothing proved the suite agreed until this job, and a
+  # Linux-only break would otherwise be found by whoever next deploys there.
+  #
+  # **Not the `test` check, on purpose.** The required check is named `test` and stays
+  # exactly what it was; this one is `test-linux`, a separate check. It runs on `push: main`
+  # and on demand, not on `pull_request` or `merge_group`: it uses hosted minutes (1x on
+  # Linux, not the 10x of macOS), and when the bill fails every hosted job is refused
+  # unstarted (bc-hkval, bc-uy247) — which on a pull request would read as a red check that
+  # came in with the branch and cost the merge queue its attempts. On `main` a red
+  # `test-linux` is a signal about the tree and blocks nobody. Add `pull_request` to the
+  # `if:` once billing has been quiet for a while.
+  #
+  # Always the whole roster: there is no narrowing here, because a push to `main` is the
+  # event that runs everything on the Mac too.
+  #
+  # **Packages.** The suites exercise tools the daemon shells out to by absolute path or
+  # name, and a stock runner lacks some: tmux (the tmux backend), zsh (`/bin/zsh` is where
+  # dispatch and the console spawn claude), expect (test/canonline's tty harness is
+  # skipped here, but other suites use it), lsof (stale git lock detection). jq is there.
+  #
+  # **Platform-skips, each with its reason, live in the suites themselves** and print
+  # `skipped: <why>`; nothing is listed in this file. `test/browse.mjs` is left out as it
+  # is on the Mac job (bc-i6d5d): it drives headless Chrome, which is not what this job is
+  # for.
+  #
+  # **Off on the private repository while GitHub billing is failing (bc-xl7n.222,
+  # bc-xl7n.226).** There is no Linux self-hosted runner, so this job can only run on hosted
+  # minutes, and from the day it was added every one was refused unstarted (bc-r7pv2). That
+  # refusal is a failed check on `main`, and lib/redbase.js holds the whole merge queue on
+  # any failed check on `main` — so a job that never ran froze every merge until a local
+  # gate stood in (bc-w5ndx, 2026-11-08). bc-xl7n.226 first turned it off everywhere with
+  # `if: false`; this narrows that to the private repo. Skipped by `if:`, it still reports,
+  # as `skipped`, which reads as passing. The public snapshot (bdcz) pays nothing for hosted
+  # minutes and keeps running it. For a Linux answer here meanwhile: `bin/b7e-linux --all`
+  # runs it in Docker on this Mac. To turn it back on, delete the
+  # `!github.event.repository.private &&` below.
+  test-linux:
+    name: test-linux
+    if: ${{ !github.event.repository.private && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # test/landedcheck.mjs reads this repo's own history.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install what the suites shell out to
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq tmux zsh expect lsof jq
+
+      - name: Give the runner a git identity
+        run: |
+          git config --global user.name "beadcause ci"
+          git config --global user.email "ci@beadcause.invalid"
+
+      # See the Mac job: an empty workspace is all the router suites' daemon scan needs.
+      - name: Give the runner a beads workspace to serve
+        run: mkdir -p "$HOME/beads/ci/.beads"
+
+      - run: npm ci
+
+      - name: Run the suite, no-bail
+        run: |
+          node bin/b7e-shard --index 0 --total 1 > slice.txt
+          grep -vx 'test/browse.mjs' slice.txt > slice.kept || true
+          ONLY_ARGS=$(sed 's/^/--only=/' slice.kept | tr '\n' ' ')
+          node bin/b7e-gate --jobs 4 $ONLY_ARGS

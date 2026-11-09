@@ -20,6 +20,7 @@ import { pushCertificate } from '../lib/notify.js';
 import { startSlack, slackStatusLine, slackTokenWarnings } from '../lib/slack.js';
 import { repoStatusLine, repoWarnings } from '../lib/repos.js';
 import { flush } from '../lib/commonrepo.js';
+import { describeEnsure, ensureJsonMergeDriver } from '../lib/jsonmergedriver.js';
 import { restoreTerminals, shutdownTerminals, startTerminalReaper, terminalsEnabled } from '../lib/terminal.js';
 import { bootAt, resumeAfterReboot } from '../lib/rebootresume.js';
 import { loadRegister, saveRegister, startRegisterPoll } from '../lib/sessionregister.js';
@@ -589,6 +590,14 @@ console.log(`[beadcause] phone URL   ${cfg.baseUrl}/?t=${cfg.token}`);
 // has one in localStorage already or is one click from the line above.
 console.log(`[beadcause] local URL   ${localBaseUrl(cfg)}`);
 console.log(`[beadcause] build       ${build} (${role}${internalPort ? `, internal :${internalPort}` : ', standalone'})`);
+// bc-xl7n.207: the structural merge driver for package.json / package-lock.json is a
+// per-clone setting nobody remembered to switch on, and every merge on this Mac paid for
+// it in conflicts. One idempotent `git config` on our own clone covers every worktree of
+// it. Not while observing — that instance writes nothing.
+if (!OBSERVING) {
+  const line = describeEnsure(ensureJsonMergeDriver(ROOT));
+  if (line) (/could not/.test(line) ? console.warn : console.log)(`[beadcause] ${line}`);
+}
 
 /**
  * Say it, at startup, when launchd is running this file instead of the router.

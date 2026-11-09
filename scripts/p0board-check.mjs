@@ -365,7 +365,7 @@ try {
   /* ---- bc-rfnr.9.7: what the list holds once the board is drawing the beads ---- */
 
   let v = await evalJs(VIEW);
-  check('My Epics is the board, with one epic on it and every tree shut', v.cards === 1 && v.rows === 0, `${v.cards} cards`);
+  check('Work is the board, with one epic on it and every tree shut', v.cards === 1 && v.rows === 0, `${v.cards} cards`);
   check(
     'the bead the board draws is not drawn again underneath it',
     !v.listKeys.includes(`${WS}/${ASKS}`),
@@ -381,7 +381,13 @@ try {
 
   /* ---- bc-khoe.28: and the other pill is the list, with no board over it ---- */
 
-  await press('button.viewpill[data-pill="question"]');
+  // There is no Questions pill since bc-qzng7.2: it is Inbox narrowed by the Kind filter,
+  // so the way there is the Inbox pill and then the Kind filter's `question` chip — the
+  // two taps a thumb makes. Pressed through `.click()`, which reaches the chip whether or
+  // not the filter panel holding it is open.
+  check('there is an Inbox pill to leave Work by', await press('button.viewpill[data-pill="home"]'));
+  await sleep(500);
+  check('and a Kind filter on it with Questions in it', await press('.chip-row.kinds [data-chip="question"]'));
   await sleep(500);
   v = await evalJs(VIEW);
   // Gone, not collapsed to its shut heading line: a view shows its own kind, and half a
@@ -409,7 +415,7 @@ try {
   await press('button.viewpill[data-pill="epics"]');
   await sleep(500);
   v = await evalJs(VIEW);
-  check('and tapping My Epics brings the board back and takes the list away', v.cards === 1 && v.listRows === 0, `${v.cards} cards, ${v.listRows} rows`);
+  check('and tapping Work brings the board back and takes the list away', v.cards === 1 && v.listRows === 0, `${v.cards} cards, ${v.listRows} rows`);
 
   /* ---- bc-rfnr.9.9: the tap must not move the card out from under your thumb ---- */
 

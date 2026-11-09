@@ -44,6 +44,8 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 
+import { planMove, publicPlan } from '../lib/movespace.js';
+
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(HERE, '..');
 const read = (f) => fs.readFileSync(path.join(ROOT, f), 'utf8');
@@ -91,8 +93,8 @@ const ctx = vm.createContext({
   FROM_BD: { breaks: false },
   workspace: 'beadcause',
 });
-const { sheetHtml, relations, sessionRowHtml, docketRowHtml, sheetMenuHtml, sheetEditHtml, sheetMoveHtml, editFrom } = vm.runInContext(
-  `${region}\n;({ sheetHtml, relations, sessionRowHtml, docketRowHtml, sheetMenuHtml, sheetEditHtml, sheetMoveHtml, editFrom })`,
+const { sheetHtml, relations, sessionRowHtml, docketRowHtml, sheetMenuHtml, sheetEditHtml, sheetMoveHtml, editFrom, childrenChoiceHtml, sheetSpaceHtml, spacePlanHtml, spaceTargets } = vm.runInContext(
+  `${region}\n;({ sheetHtml, relations, sessionRowHtml, docketRowHtml, sheetMenuHtml, sheetEditHtml, sheetMoveHtml, editFrom, childrenChoiceHtml, sheetSpaceHtml, spacePlanHtml, spaceTargets })`,
   ctx,
   { filename: 'graph.js#sheet' }
 );
@@ -939,6 +941,16 @@ check('Move opens the card, and only once both reads have landed', () => {
   assert.match(body, /if \(seq !== sheetSeq\) return;\s*\n\s*\$\('sheet-body'\)\.innerHTML = sheetMoveHtml/, 'the card can land on another bead');
 });
 
+check('the Move card offers a bead search narrowed to this space', () => {
+  const card = sheetMoveHtml(mover, { roots: ROOTS, children: [] });
+  assert.match(card, /data-move="find"/, 'there is no search box');
+  assert.match(card, /id="sheet-move-hits"/, 'nowhere to draw the hits');
+  assert.match(card, /<select data-move="parent">/, 'the roots list is gone');
+  // Call shapes on the raw source: the slice cannot reach the wiring.
+  assert.match(GRAPH, /api\(`\/api\/beads\?workspace=\$\{encodeURIComponent\(workspace\)\}&q=/, 'the search is not narrowed to this space');
+  assert.match(GRAPH, /\[data-move-pick\]/, 'a hit is not wired to the select');
+});
+
 check('a read that fails leaves the bead you were reading exactly as it was', () => {
   const open = GRAPH.slice(GRAPH.indexOf('async function openMoveCard()'));
   const body = open.slice(0, open.indexOf('\n  }'));
@@ -975,6 +987,232 @@ check('picking "leave" is what reveals the epic to leave them under', () => {
   const body = GRAPH.slice(at, GRAPH.indexOf('\n  });', at));
   assert.match(body, /box\.style\.display = ev\.target\.value === 'leave' \? '' : 'none'/, 'the box is not toggled by the choice');
   assert.ok(!/\.hidden = /.test(body), 'the box is toggled with an attribute `.eq-lab`\'s flex rule beats');
+});
+
+/* ------------------------------------------------ moving it into another space */
+
+console.log('\nmove to another space (bc-ka5y.45)');
+
+/**
+ * Plans built by the real engine, not typed out here. The card reads `publicPlan` by its
+ * field names, and a fixture written by hand would agree with the card whatever the engine
+ * actually sends — so this asks lib/movespace.js for the plan, over a `bd` that answers
+ * from a three-row export, and hands the card exactly what the route would.
+ */
+const exportRows = [
+  { id: 'bc-x9', title: 'Rewrite the picker', status: 'open', priority: 1, dependencies: [] },
+  { id: 'bc-x9.1', title: 'one', status: 'open', dependencies: [{ type: 'parent-child', depends_on_id: 'bc-x9' }] },
+  { id: 'bc-x9.2', title: 'two', status: 'closed', dependencies: [{ type: 'parent-child', depends_on_id: 'bc-x9' }] },
+];
+const stubBd = (rows) => ({
+  json: async () => [],
+  run: async () => rows.map((r) => JSON.stringify(r)).join('\n'),
+  exists: async () => false,
+});
+const planFor = async (children, rows = exportRows, epicTitle = '') =>
+  publicPlan(
+    await planMove(stubBd(rows), {
+      from: { name: 'beadcause', dir: '/nowhere' },
+      to: { name: 'sorrel', dir: '/nowhere' },
+      id: 'bc-x9',
+      children,
+      epicTitle,
+      prefix: 'sp',
+      ps: async () => '',
+    })
+  );
+const planMoved = await planFor('move');
+const planLeft = await planFor('leave');
+const planLeftTitled = await planFor('leave', exportRows, 'Typed by hand');
+const underParent = [
+  { id: 'bc-top', title: 'The epic above', status: 'open', issue_type: 'epic', dependencies: [] },
+  { ...exportRows[0], dependencies: [{ type: 'parent-child', depends_on_id: 'bc-top' }] },
+  ...exportRows.slice(1),
+];
+const planLeftUnder = await planFor('leave', underParent);
+
+const SPACES = {
+  spaces: [
+    { name: 'Work', workspaces: ['beadcause', 'northwind'] },
+    { name: 'Home', workspaces: ['sorrel', 'delmar'] },
+  ],
+  workspaces: ['beadcause', 'northwind', 'sorrel', 'delmar', 'loose'],
+};
+
+check('the menu offers Move to another space, after Move', () => {
+  const menu = sheetMenuHtml(plain);
+  assert.match(menu, /data-sheet-act="space"/, 'there is no item for it');
+  assert.ok(menu.indexOf('data-sheet-act="move"') < menu.indexOf('data-sheet-act="space"'), 'it is not the third item');
+  assert.ok(!/data-sheet-act="space" disabled/.test(menu), 'an ordinary bead is offered a dead item');
+  assert.ok(!/data-sheet-act="space" disabled/.test(sheetMenuHtml({ ...plain, status: 'closed' })), 'a closed bead cannot be moved, unlike Move');
+});
+
+check('but not on a bead that has already been moved, which would mint a second successor', () => {
+  const menu = sheetMenuHtml({ ...plain, status: 'closed', labels: ['superseded-by:sorrel/sp-abcde'] });
+  assert.match(menu, /data-sheet-act="space" disabled/, 'a moved original can be moved again');
+  assert.match(menu, /Already moved/, 'the disabled item does not say why');
+});
+
+check('the spaces it lists are the picker\'s, less the one the bead is in', () => {
+  const targets = spaceTargets(SPACES, 'beadcause');
+  assert.deepEqual(
+    targets.map((t) => t.name),
+    ['northwind', 'sorrel', 'delmar', 'loose'],
+    'the list is not every other workspace, in order'
+  );
+  assert.equal(targets.find((t) => t.name === 'sorrel').space, 'Home', 'the space a workspace belongs to is lost');
+  assert.equal(targets.find((t) => t.name === 'loose').space, '', 'a workspace in no space is given one');
+  const card = sheetSpaceHtml(mover, { targets, children: [] });
+  assert.ok(!/<option value="beadcause"/.test(card), 'the bead\'s own space is offered');
+  assert.match(card, /<optgroup label="Home"><option value="sorrel">sorrel<\/option><option value="delmar">/, 'the spaces are not grouped');
+  assert.match(card, /<option value="loose">loose<\/option><\/select>/, 'a workspace in no space is not offered');
+});
+
+check('the children question reads exactly as it does on Move, and is absent without children', () => {
+  // The acceptance is that it *reads the same*, so the strongest check is equality with
+  // the other card's own row rather than a second copy of its wording.
+  const targets = spaceTargets(SPACES, 'beadcause');
+  for (const parent of [null, { id: 'bc-ka5y', title: 'x' }]) {
+    const onMove = sheetMoveHtml(mover, { roots: ROOTS, children: kids, parent });
+    const onSpace = sheetSpaceHtml(mover, { targets, children: kids, parent });
+    const row = childrenChoiceHtml(kids.length, parent?.id || '');
+    assert.ok(onMove.includes(row), 'Move does not draw the shared row');
+    assert.ok(onSpace.includes(row), 'Move to another space does not draw the shared row');
+  }
+  const leaf = sheetSpaceHtml(mover, { targets, children: [] });
+  assert.ok(!/data-move="children"/.test(leaf), 'a leaf is asked a question with one answer');
+});
+
+check('the card does not claim a plan before the engine has made one', () => {
+  const card = sheetSpaceHtml(mover, { targets: spaceTargets(SPACES, 'beadcause'), children: kids });
+  assert.match(card, /id="sheet-space" data-id="bc-x9"/, 'the card does not say which bead it is');
+  assert.match(card, /data-sheet-act="space-save" disabled/, 'Move is pressable before there is a plan to read');
+  assert.match(card, /data-sheet-act="cancel"/, 'there is no way back to the bead');
+  assert.match(card, /id="sheet-space-plan"/, 'the plan has nowhere to land');
+  assert.match(card, /id="sheet-space-err" hidden/, 'a refusal has nowhere to land');
+  assert.ok(!/sp-/.test(card), 'the card guesses at new ids instead of asking');
+});
+
+check('the plan says how many cross and what each one becomes', () => {
+  const html = spacePlanHtml(planMoved);
+  assert.match(html, /3 beads cross to sorrel/, 'the count crossing is not said');
+  for (const [was, now] of planMoved.map) {
+    assert.match(html, new RegExp(`${was.replace('.', '\\.')}</span><span class="rel-title">becomes</span><span class="pill id">${now.replace('.', '\\.')}<`), `${was} → ${now} is not shown`);
+  }
+  assert.ok(!/stay in/.test(html), 'a move with its children reports some staying behind');
+  assert.ok(!/data-space="epic"/.test(html), 'an epic is offered where none is minted');
+  assert.match(sheetSpaceHtml(mover, { targets: [], children: [] }) + spacePlanHtml(planFor1()), /1 bead crosses/, 'one bead is not one bead');
+});
+
+function planFor1() {
+  return { ...planMoved, map: planMoved.map.slice(0, 1) };
+}
+
+check('leaving them with a grandparent says which children stay, and under what', () => {
+  const html = spacePlanHtml(planLeftUnder);
+  assert.match(html, /1 bead crosses to sorrel/, 'more than the bead crosses');
+  assert.match(html, /2 children stay in beadcause, under bc-top/, 'where the children land is not said');
+  assert.match(html, /bc-x9\.1<\/span><span class="rel-title">one</, 'the children staying are not named');
+  assert.ok(!/data-space="epic"/.test(html), 'an epic is offered where a grandparent exists');
+});
+
+check('with no grandparent the minted epic\'s title is shown, editable, seeded from the plan', () => {
+  const html = spacePlanHtml(planLeft);
+  assert.match(html, /2 children stay in beadcause, under a new epic/, 'it does not say an epic is made');
+  assert.match(html, /data-space="epic" value="Rewrite the picker — the work left behind"/, 'the box is not the plan\'s title');
+  // A typed title travels on the next dry run, and the plan is what the box is redrawn from.
+  assert.match(spacePlanHtml(planLeftTitled), /data-space="epic" value="Typed by hand"/, 'a typed title does not survive a re-plan');
+});
+
+check('the plan escapes what it was sent', () => {
+  const html = spacePlanHtml({ ...planLeft, epic: { needed: true, title: '"><img src=x>' } });
+  assert.ok(!/<img/.test(html), 'the epic title escaped its attribute');
+});
+
+check('the plan card wears only styles the app already ships', () => {
+  const css = read('public/style.css');
+  const html = sheetSpaceHtml(mover, { targets: spaceTargets(SPACES, 'beadcause'), children: kids }) + spacePlanHtml(planLeft);
+  for (const cls of html.match(/class="([^"]*)"/g) || []) {
+    for (const one of cls.slice(7, -1).split(/\s+/).filter(Boolean)) {
+      assert.ok(css.includes(`.${one}`), `.${one} is drawn by the space card and styled by nothing`);
+    }
+  }
+});
+
+check('a superseded original links to its successor, in the other space', () => {
+  const sheet = sheetHtml({ ...plain, status: 'closed', close_reason: 'moved', labels: ['superseded-by:sorrel/sp-abcde'] });
+  assert.match(sheet, /Moved to/, 'the row does not say it moved');
+  assert.match(sheet, /href="\/graph\?ws=sorrel&amp;id=sp-abcde&amp;open=1"/, 'the link opens this space instead of the successor\'s');
+  assert.ok(sheet.indexOf('closed-note') < sheet.indexOf('Moved to'), 'the row is above the sentence saying it moved');
+});
+
+check('a bare marker is a duplicate here, and a bead with none draws no row', () => {
+  const dup = sheetHtml({ ...plain, labels: ['superseded-by:bc-orig'] });
+  assert.match(dup, /Superseded by/, 'a duplicate reads as a move');
+  assert.match(dup, /href="\/graph\?ws=beadcause&amp;id=bc-orig&amp;open=1"/, 'a bare marker leaves this space');
+  assert.ok(!/Moved to|Superseded by/.test(sheetHtml(plain)), 'a bead with no marker grew a row');
+  assert.ok(!/Moved to/.test(sheetHtml({ ...plain, labels: ['superseded-by:not an id'] })), 'a broken marker draws a link to nowhere');
+});
+
+console.log('\nand something actually moves it to another space');
+
+const bodyOf = (sig) => {
+  const at = GRAPH.indexOf(sig);
+  assert.ok(at > 0, `${sig} is gone`);
+  const rest = GRAPH.slice(at);
+  return rest.slice(0, rest.indexOf('\n  }'));
+};
+
+check('the item opens the card, and only once both reads have landed', () => {
+  const body = bodyOf('async function openSpaceCard()');
+  assert.match(GRAPH, /if \(act === 'space'\) return openSpaceCard\(\)/, 'the menu item is not wired to anything');
+  assert.match(body, /api\('\/api\/spaces'\)/, 'the card is drawn without asking what spaces there are');
+  assert.match(body, /api\(`\/api\/bead-links\?workspace=/, 'the card is drawn without asking what is under the bead');
+  assert.match(body, /spaceTargets\(spaces, workspace\)/, 'the bead\'s own space is not left out');
+  assert.ok(body.indexOf('catch') < body.indexOf('innerHTML = sheetSpaceHtml'), 'a failed read still draws a card');
+  assert.match(body, /if \(seq !== sheetSeq\) return;/, 'the card can land on another bead');
+  assert.match(body, /\n\s*planSpaceMove\(\);/, 'the card is drawn and never planned');
+});
+
+check('the plan is the engine\'s dry run, and only the newest one arms Move', () => {
+  const body = bodyOf('async function planSpaceMove()');
+  assert.match(body, /post\('\/api\/bead\/move', \{ \.\.\.spaceMoveBody\(card\), dryRun: true \}\)/, 'the plan is not asked of the engine');
+  assert.match(body, /slot\.innerHTML = spacePlanHtml\(plan\)/, 'the plan is not drawn');
+  assert.match(body, /if \(go\) go\.disabled = true;/, 'Move stays armed over a stale plan while a new one is asked for');
+  assert.ok(body.indexOf('mine !== spacePlanSeq') < body.indexOf('go.disabled = false'), 'a slow plan can arm Move after a newer choice');
+  const caught = body.slice(body.indexOf('} catch'), body.indexOf('    if (mine !== spacePlanSeq || '));
+  assert.ok(!/disabled = false/.test(caught), 'a refused plan arms Move');
+  assert.match(caught, /err\.hidden = false;/, 'a refusal is not shown');
+});
+
+check('changing the destination or the children choice re-plans', () => {
+  assert.match(GRAPH, /ev\.target\.matches\?\.\('\[data-space="to"\], \[data-move="children"\]'\)\) return;\s*\n\s*planSpaceMove\(\);/, 'a new choice keeps the old plan');
+});
+
+check('the post carries the destination, the engine\'s mode, and the typed epic title', () => {
+  const body = bodyOf('function spaceMoveBody(card)');
+  assert.match(body, /to: val\('\[data-space="to"\]'\)/, 'the destination is not sent');
+  assert.match(body, /children: kids && kids\.value === 'leave' \? 'leave' : 'move'/, 'the card\'s `with` reaches an engine that only knows `move`');
+  assert.match(body, /epicTitle: val\('\[data-space="epic"\]'\)/, 'the typed epic title is not sent');
+});
+
+check('a refusal reaches the card as the engine\'s sentence, not as HTTP 409', () => {
+  // The route answers 409 with `publicPlan`, whose sentence is in `refused`, not `error`.
+  const post = bodyOf('async function post(path, body)');
+  assert.match(post, /out\.error \|\| out\.refused \|\|/, '`post` drops the refusal and throws a status code');
+});
+
+check('on success the sheet lands on the new id, in the new space', () => {
+  const body = bodyOf('async function saveSpaceMove()');
+  assert.match(body, /out = await post\('\/api\/bead\/move', body\)/, 'Move does not post the move');
+  assert.ok(!/dryRun/.test(body), 'the real move is sent as a dry run');
+  assert.match(body, /new Map\(out\?\.map \|\| \[\]\)\.get\(body\.id\)/, 'the new id is not read off the engine\'s map');
+  assert.match(body, /location\.replace\(beadUrlIn\(out\.to \|\| body\.to, next\)\)/, 'the sheet does not land on the new id in the new space');
+  // A copy that exists over an original left open must not be offered again: a second
+  // Move mints a second successor.
+  const partial = body.slice(body.indexOf('if (out?.imported && next)'));
+  assert.match(partial, /the copy that was made/, 'a half-finished move does not link to the copy it made');
+  assert.ok(partial.indexOf('} else if (go)') > 0, 'a half-finished move re-arms Move');
 });
 
 console.log(failures ? `\n${failures} failed\n` : '\nall good\n');

@@ -1,0 +1,96 @@
+#!/usr/bin/env node
+/**
+ * `b7e-tokens` — where the tokens go: every Claude Code session on this Mac, by the kind of session that opened it.
+ *
+ *     b7e-tokens                     by kind, Epic Advocate first vs repeat visits, conflict repeats per PR, per effort
+ *     b7e-tokens --since 7d          only sessions started in the last 7 days (or --since 2026-11-01)
+ *     b7e-tokens --top 30            longer per-epic and per-PR tables (default 15)
+ *     b7e-tokens --kind worker       one kind's sessions, heaviest first
+ *     b7e-tokens --json              the whole summary as one object
+ *     b7e-tokens --json --sessions   one row per session instead
+ *
+ * bc-bdjbs. Adam, 2026-11-07: "i wonder if the advocate is being visited too often? can i
+ * get some metrics on how many tokens are used by each session … i'd like aggregate metrics
+ * as well as on a per-effort basis". The kind is read off the brief's first line — Epic
+ * Advocate, epic worker, worker, conflict resolution, MergeAdvocate, ReviewAdvocate, review
+ * answer, filing gate, session audit, handoff — and everything else is `manual`. Subagent
+ * transcripts are added to their parent. See lib/tokenspend.js for why a weighted figure
+ * (cache read ×0.1, cache write ×1.25, output ×5) sits beside the raw count.
+ *
+ * Reads the transcripts under every `projects` directory lib/transcript.js `projectsRoots`
+ * knows (config `claudeProjectsDir` overrides). Writes nothing and needs no daemon. Only what
+ * Claude Code still has on disk is counted — it prunes transcripts after about 30 days.
+ *
+ * Exit codes: `0` printed the report; `2` refused — bad usage.
+ *
+ * @grant read
+ */
+import { loadConfig } from '../lib/config.js';
+import { projectsRoots } from '../lib/transcript.js';
+import { scanTranscripts, summarize, render, fmt, weightedOf, rawOf, KIND_NAMES } from '../lib/tokenspend.js';
+
+const argv = process.argv.slice(2);
+const HELP = [
+  'b7e-tokens                     by kind, Epic Advocate first vs repeat visits, conflict repeats per PR, per effort',
+  'b7e-tokens --since 7d          only sessions started in the last 7 days (or --since 2026-11-01)',
+  'b7e-tokens --top 30            longer per-epic and per-PR tables (default 15)',
+  "b7e-tokens --kind worker       one kind's sessions, heaviest first",
+  'b7e-tokens --json              the whole summary as one object',
+  'b7e-tokens --json --sessions   one row per session instead',
+].join('\n');
+
+const refuse = (msg) => {
+  console.error(`b7e-tokens: ${msg}\n\n${HELP}`);
+  process.exit(2);
+};
+
+let since = null;
+let top = 15;
+let kind = null;
+let json = false;
+let sessions = false;
+for (let i = 0; i < argv.length; i++) {
+  const a = argv[i];
+  const val = () => {
+    const v = argv[++i];
+    if (v === undefined) refuse(`${a} needs a value`);
+    return v;
+  };
+  if (a === '--help' || a === '-h') {
+    console.log(HELP);
+    process.exit(0);
+  } else if (a === '--since') since = val();
+  else if (a === '--top') top = Number(val());
+  else if (a === '--kind') kind = val();
+  else if (a === '--json') json = true;
+  else if (a === '--sessions') sessions = true;
+  else refuse(`unknown argument ${a}`);
+}
+if (!Number.isInteger(top) || top < 1) refuse('--top takes a positive whole number');
+if (kind && !KIND_NAMES.includes(kind)) refuse(`--kind is one of ${KIND_NAMES.join(', ')}`);
+
+let sinceMs = 0;
+if (since) {
+  const days = since.match(/^(\d+)d$/);
+  sinceMs = days ? Date.now() - Number(days[1]) * 86400000 : Date.parse(since);
+  if (!Number.isFinite(sinceMs)) refuse(`--since takes Nd or a date, not ${since}`);
+}
+
+let rows = scanTranscripts(projectsRoots(loadConfig()), { sinceMs });
+if (kind) rows = rows.filter((r) => r.kind === kind);
+
+if (json) {
+  const out = sessions ? rows.map((r) => ({ ...r, raw: rawOf(r), weighted: weightedOf(r) })) : summarize(rows);
+  console.log(JSON.stringify(out, null, 2));
+} else if (kind || sessions) {
+  const sorted = [...rows].sort((a, b) => weightedOf(b) - weightedOf(a));
+  console.log(`${rows.length} ${kind || ''} sessions, heaviest first (weighted / raw / calls / subagents)`);
+  for (const r of sorted.slice(0, kind ? top : sorted.length)) {
+    const what = r.bead || (r.pr ? `${r.ws}#${r.pr}` : r.first.slice(0, 50).replace(/\n/g, ' '));
+    console.log(
+      `${r.start.slice(0, 16).replace('T', ' ')}  ${r.kind.padEnd(16)} ${String(what).padEnd(22)} ${fmt(weightedOf(r)).padStart(7)} ${fmt(rawOf(r)).padStart(7)} ${String(r.calls).padStart(5)} ${String(r.subagents).padStart(3)}  ${r.sessionId}`
+    );
+  }
+} else {
+  console.log(render(summarize(rows), { top }));
+}

@@ -23,6 +23,7 @@ import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { mergeJsonText, mergeValues } from '../lib/jsonmerge.js';
+import { describeEnsure, driverCommand, driverState, ensureJsonMergeDriver, mainCheckoutScript } from '../lib/jsonmergedriver.js';
 import { cleanupTmp } from './helpers/tmp.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -200,6 +201,78 @@ try {
   // `cleanupTmp` rather than a bare `fs.rmSync` — test/tmpadoption.mjs.
   await cleanupTmp(tmp);
 }
+
+/* ---------------------------------------------- 2b. the daemon keeps it installed */
+//
+// bc-xl7n.207: the driver above was never installed in this repo's own clone, so 21 merges
+// of package-lock.json conflicted in a month while the fix sat unused. The daemon now calls
+// ensureJsonMergeDriver at startup; these pin what that call does to a clone.
+
+const tmp2 = fs.mkdtempSync(path.join(os.tmpdir(), 'beadcause-jsonmerge-ensure-'));
+try {
+  const r2 = path.join(tmp2, 'repo');
+  fs.mkdirSync(r2);
+  const g2 = (...args) => execFileSync('git', args, { cwd: r2, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  g2('init', '-q', '-b', 'main');
+
+  check(
+    'a clone whose .gitattributes does not name the driver is left alone',
+    ensureJsonMergeDriver(r2, { script: DRIVER }).state === 'skipped' && !driverState(r2).command
+  );
+
+  fs.writeFileSync(path.join(r2, '.gitattributes'), 'package-lock.json merge=jsonmerge\n');
+  check(
+    'with no main checkout copy of the script, nothing is pinned to a copy that may vanish',
+    mainCheckoutScript(r2) === null && ensureJsonMergeDriver(r2).state === 'skipped' && !driverState(r2).command
+  );
+
+  const first = ensureJsonMergeDriver(r2, { script: DRIVER });
+  check(
+    'an uninstalled clone gets the driver, pointing at the script',
+    first.state === 'installed' && first.was === '' && driverState(r2).ok && driverState(r2).script === DRIVER,
+    JSON.stringify(first)
+  );
+  check('a second call writes nothing', ensureJsonMergeDriver(r2, { script: DRIVER }).state === 'present');
+
+  g2('config', '--local', 'merge.jsonmerge.driver', driverCommand(path.join(tmp2, 'retired', 'scripts', 'jsonmerge.mjs')));
+  const fixed = ensureJsonMergeDriver(r2, { script: DRIVER });
+  check(
+    'a driver pointing at a retired worktree is repaired',
+    fixed.state === 'installed' && /retired/.test(fixed.was) && driverState(r2).ok,
+    JSON.stringify(fixed)
+  );
+  check('the repair is said in the startup log', /repaired/.test(describeEnsure(fixed) || ''));
+
+  g2('config', '--local', 'merge.jsonmerge.driver', driverCommand(DRIVER, path.join(tmp2, 'gone-node', 'bin', 'node')));
+  const reNode = ensureJsonMergeDriver(r2, { script: DRIVER });
+  check(
+    'a driver naming a node that is gone (an nvm upgrade) is repaired',
+    reNode.state === 'installed' && driverState(r2).ok && driverState(r2).node === process.execPath,
+    JSON.stringify(reNode)
+  );
+
+  // The main-checkout rule: a worktree of a clone that carries the script points at the
+  // clone's copy, never at its own.
+  fs.mkdirSync(path.join(r2, 'scripts'));
+  fs.writeFileSync(path.join(r2, 'scripts', 'jsonmerge.mjs'), '// stand-in\n');
+  g2('-c', 'user.name=t', '-c', 'user.email=t@localhost', '-c', 'commit.gpgsign=false', 'add', '-A');
+  g2('-c', 'user.name=t', '-c', 'user.email=t@localhost', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'base');
+  const wt = path.join(tmp2, 'wt');
+  g2('worktree', 'add', '-q', wt, '-b', 'side');
+  check(
+    "from a worktree, the driver is pointed at the main checkout's script",
+    fs.realpathSync(mainCheckoutScript(wt)) === fs.realpathSync(path.join(r2, 'scripts', 'jsonmerge.mjs')),
+    String(mainCheckoutScript(wt))
+  );
+} finally {
+  await cleanupTmp(tmp2);
+}
+
+const daemon = fs.readFileSync(path.join(ROOT, 'bin', 'beadcause.js'), 'utf8');
+check(
+  'the daemon installs the driver at startup',
+  /ensureJsonMergeDriver\(ROOT\)/.test(daemon)
+);
 
 /* ------------------------------------------------------------- 3. this repo declares it */
 

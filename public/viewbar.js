@@ -36,6 +36,15 @@
   scrolled into view on load, which is the one moment the offset can be wrong without
   anybody having touched it.
 
+  Past those nine there is one pill per view a repo declares about itself, and those are
+  the only pills here that come and go: a repo view is drawn only while the space picker
+  is **on the repo that declared it** (bc-7j5yz). sorrel's `Screws` is a through-screw
+  calculation for one rib of one building, and it sat on the row above northwind's work,
+  delmar's, and every screen in between. `visible` and `pickedOn` below have the
+  argument, including why the test is the picked *workspace* and not the wider
+  "would a bead from that repo be on the list". The row is shorter for it on nearly every
+  screen, which the paragraph above is glad of.
+
   ## A pill is a link only when there is somewhere to go
 
   There is one rule under all three shapes below and it is the whole of this section:
@@ -236,16 +245,24 @@
   const PILLS = [
     // Home with nothing narrowed. First because it is where you land, and because every
     // pill to its right is a narrowing of it rather than a different place.
-    { id: 'home', kind: 'home', icon: '🏠', label: 'Home', count: true },
-    // The P0 board and the work under it (bc-rfnr.9). Second rather than first since
-    // bc-fwp2c: it was the landing pill for as long as the board was drawn on the screen
-    // you land on, and the badge is what separated them — a place can only ever count the
-    // sum of every kind, which is not a number the word "Epics" can carry.
-    { id: 'epics', kind: 'epics', icon: '🎯', label: 'My Efforts', count: true },
-    // Questions, PRs, Chats: what is arriving, in the order it tends to need answering.
-    { id: 'question', kind: 'question', icon: '❓', label: 'Questions', count: true },
-    { id: 'pr', kind: 'pr', icon: '🚢', label: 'PRs', count: true },
-    { id: 'session', kind: 'session', icon: '💬', label: 'Chats', count: true },
+    //
+    // `Inbox` since bc-qzng7.2, and the only pill with a number: how many things are
+    // waiting on you. Questions and PRs were pills of their own and were only ever this
+    // list narrowed, so they are the Kind filter on Inbox now (public/inboxfilter.js),
+    // and `kinds` keeps this pill lit while one of them is chosen — `?kind=question` and
+    // `?kind=pr` from an old link or notification still land here.
+    { id: 'home', kind: 'home', icon: '📥', label: 'Inbox', count: true, kinds: ['question', 'pr'] },
+    // Work — what is moving (bc-qzng7.3). The effort board with a pipeline strip on
+    // each card, your chats under it, and one line of advocate health over it. It took
+    // in four pills: My Efforts (this one, renamed — the id stays `epics`), Chats (the
+    // `session` narrowing, so `?kind=session` still lights it), and Advocates and
+    // Releases, whose panes are Work's details now rather than places on the row.
+    //
+    // `views` lights it on those two panes, and `back` is what keeps it a control there:
+    // the lit pill is normally a dead `<span>`, but on a details pane the lit pill is the
+    // way back to the board, so it stays a button. No count: one badge in the app, on
+    // Inbox, so a number always means "waiting on you".
+    { id: 'epics', kind: 'epics', icon: '🛠️', label: 'Work', views: ['advocates', 'releases'], kinds: ['session'], back: true },
     // Every bead, one pill (bc-yjekg.3). It was two — `Ledger`, the record of every bead
     // the space has had (the `history` pane), and `All Beads`, Home narrowed to the live
     // ones (the `bead` kind) — and the two answered one question from two ends. They are
@@ -259,49 +276,19 @@
     // one pill is lit for, read by `pillOf`. Which side a tap lands on is the toggle you
     // last chose, remembered on this device — see `beadsMode`.
     { id: 'beads', icon: '🧿', label: 'Beads', views: ['history'], kinds: ['bead'] },
-    // Not a kind, and the one pill on this row that is neither Home nor a record. It
-    // also carries the pull request board's three paths, which used to be a `PRs` pill
-    // of their own: /prs, /pulls and /prs.html all serve monitor.html with its board
-    // chip up (see `serveStatic`), so the pill that is current there is the pill that
-    // points at that page — and the `PRs` label now belongs to the kind above, which is
-    // the pull requests *in Home*. bc-khoe.30.6 re-decided it and the answer did not
-    // move: the board stays a chip inside the console, so two taps reach it and this pill
-    // keeps its three extra paths. bc-khoe.4 folds that console into the shell's
-    // Advocates pane, at which point this pill stops being an `<a>` and starts being a
-    // `data-pane` like the rest — the same pill, one fewer document load.
-    { id: 'advocates', href: '/monitor', icon: '📣', label: 'Advocates', more: true },
-    // Where everything in flight actually is (bc-khoe.7). Immediately after the pill that
-    // carries the board, because the two are read one after the other: the board
-    // is where you decide something may land, and this is where you watch it do so. It is a
-    // view rather than a fifth pane of /monitor for the reason the deploy strip left the
-    // board at all — a deploy in flight is not a fact about a pull request, it is the rung
-    // after it, and a screen about pull requests was the wrong place to be told. Its three
-    // addresses — /releases, /deploys, /releases.html — are in public/hashroute.js with
-    // every other view's, since bc-khoe.30.2; this row asks rather than knows.
-    { id: 'releases', href: '/releases', icon: '🚀', label: 'Releases', more: true },
-    // Last, and last on purpose: it is the one pill here you reach about once a month.
-    // Past Releases, which asked only to sit beside the board it follows and is happy
-    // anywhere right of it; this one asked for the end of the row specifically.
-    // The selected space's own settings (bc-khoe.10) — muted, quiet hours, who may
-    // endorse, what merges itself — which were a card at the top of the console and then
-    // a chip on it. A row you scroll sideways spends its rightmost place on what you
-    // want least often, and this is it.
-    // Knobs rather than a gear: the gear in this app is Admin — the machine's own screen,
-    // in the mark's menu — and two settings screens behind one glyph is the confusion the
-    // menu was built to end.
-    // Its three addresses are in public/hashroute.js's `VIEWS` with every other view's,
-    // and that row is newer than this pill: bc-khoe.10 shipped the pill while the paths
-    // still lived in this file, bc-khoe.30.2 moved the table out, and Config was not in
-    // it — so for four days the row marked **nothing** current on the one screen this
-    // pill reaches, and the pill was a live `<a href="/config">` on /config itself.
-    // bc-khoe.50 put it in the table. Nothing here changed to make that work, which is
-    // the point of asking rather than knowing.
-    //
-    // Its pane in index.html was `data-pending` until bc-khoe.60 filled it — the same
-    // two-step History, Advocates and Releases each went through, and nothing here
-    // changed to make that work either: `panes?.has` answers yes on the shell now, and
-    // this pill draws as the row's control rather than this `<a>` the moment it does.
-    { id: 'config', href: '/config', icon: '🎛', label: 'Config', more: true },
+    // There were Advocates and Releases pills here, behind ⋯, and they are gone
+    // (bc-qzng7.3). Both are Work's details now: the health line at the top of Work opens
+    // the advocate console, and the Shipping stage there is what Releases was for. Their
+    // panes and every address they had (/monitor, /prs, /releases, /deploys …) are
+    // unchanged and light Work — see `views` on the Work pill above.
+    // There was a Config pill here, last in the ⋯ menu, and it is gone (bc-qzng7.1). The
+    // space's settings are one page of the Settings screen now, which is the same pane
+    // (`#config`) grown into a grouped list: this space, its advocate, its repos,
+    // notifications, this machine, reference. You reach it by tapping the space name —
+    // the picker's ⚙ Settings row (public/spacebar.js) — on every page that has the
+    // picker, which is more doors than this pill ever was and none of them behind ⋯.
+    // Its three addresses are still in public/hashroute.js's `VIEWS`, so `/config` and
+    // `/settings` still land on it.
   ];
 
   /**
@@ -565,7 +552,9 @@
    * it is whichever side you last chose.
    */
   function aim(p) {
-    if (!p.kinds) return { view: p.id, kind: p.href ? null : p.kind || null, href: hrefOf(p) };
+    // Beads is the pill with two sides. Inbox carries `kinds` too since bc-qzng7.2, but
+    // only so it stays lit under a Kind narrowing; its tap is an ordinary one.
+    if (p.id !== 'beads') return { view: p.id, kind: p.href ? null : p.kind || null, href: hrefOf(p) };
     if (beadsSide === 'open') return { view: null, kind: 'bead', href: '/?kind=bead' };
     return { view: 'history', kind: null, href: beadsSide === 'closed' ? '/#history?status=closed' : '/#history', side: beadsSide };
   }
@@ -583,6 +572,81 @@
    * that arrives later is a pill that changes width under a thumb already moving to it.
    */
   const shown = Object.fromEntries(PILLS.filter((p) => p.count).map((p) => [p.id, '0']));
+
+  /**
+   * Is the space picker on *this repo itself*?
+   *
+   * The picker's own `{space, workspace}`, read rather than re-derived — `workspace` is
+   * `'all'` until you pick one particular repo out of a space, which is exactly the
+   * distinction this needs. See public/spacebar.js.
+   *
+   * **Not `space.matches()`, which this was first written as.** That is the client half of
+   * `matchesFilter` — "would a bead from this repo be on the list" — and it says yes for
+   * every repo in the selected space. sorrel lives in `Personal` beside beadcause,
+   * delmar, ehden, safehold and presto-adapter, so `matches` would have gone on drawing
+   * `Screws` on every screen anybody actually uses, and the bug would have read as fixed
+   * in a test and unfixed on the phone. A repo view is about **one checkout**, not about
+   * the company of checkouts its beads are filed with, so the pill wants the narrower
+   * question and this is it.
+   *
+   * Two absences answer **yes**, and neither is a guess. A pill with no workspace is one of
+   * the nine this app declares about itself, which no picker can be about; and a page with
+   * no picker at all (spacebar.js loads *after* this file, and nine of the ten pages that
+   * draw this row are documents of their own) has nothing selected to be outside of. A row
+   * that showed nothing until the picker answered would blink every pill it has.
+   */
+  const pickedOn = (workspace) => {
+    if (!workspace) return true;
+    const picked = window.beadcause?.space?.filter?.workspace;
+    return picked === undefined ? true : picked === workspace;
+  };
+
+  /**
+   * Which pills the row draws at all (bc-7j5yz).
+   *
+   * Every pill, except a **repo** view while the picker is not on that repo. The nine
+   * above are the app and are drawn always; a repo view is a screen about one checkout,
+   * and sorrel's `Screws` — a through-screw calculation for one rib of one building — is
+   * a pill that means nothing at all unless sorrel is the thing you have picked out. So
+   * the rule is the narrow one: `Screws` appears when the picker says `sorrel`, and not
+   * under `Everything` and not under `Personal`, which are the two selections it spent
+   * its life on. `pickedOn` above has the argument against the wider reading.
+   *
+   * **Its address is untouched.** `/v/<ws>/<id>` still serves, `#<ws>.<id>` still shows,
+   * the pane is still adopted and public/viewhost.js still hosts it — a home-screen
+   * shortcut to a repo view keeps working with any space selected, which is the whole
+   * reason it is worth having one. What the picker moves is the row, not the grammar.
+   *
+   * And the pane you are **on** keeps its pill however the picker moves. The alternative
+   * is a row with nothing current over a screen you are plainly looking at, which is the
+   * same failure `viewOfPath` exists to stop, arrived at from the other direction — and
+   * it is one tap to a pill that is drawn, at which point the one you left goes.
+   */
+  const visible = (p) => !p.repo || p.id === here() || pickedOn(p.workspace);
+
+  /**
+   * Redraw when the picker moves.
+   *
+   * Wired on the first repo pill rather than at the top of this file, because at the top
+   * of this file there is nobody to wire it to: `public/index.html` loads viewbar.js
+   * before spacebar.js, and it has to — the row is a row of the shell and the bar that
+   * narrows it is drawn into the shell's own top bar. By the time a repo pill exists,
+   * `/api/views` has answered — several hundred milliseconds after boot — and
+   * `window.beadcause.space` has long since been published. Once, because `add` runs once
+   * per repo view and a listener per pill would redraw the row once per repo view per
+   * pick.
+   */
+  let watchingSpace = false;
+  function watchSpace() {
+    if (watchingSpace) return;
+    const space = window.beadcause?.space;
+    if (typeof space?.onChange !== 'function') return;
+    watchingSpace = true;
+    space.onChange(() => {
+      draw();
+      reveal();
+    });
+  }
 
   /**
    * Draw the row.
@@ -610,8 +674,12 @@
        the same `data-` attributes either way, so a tap in the menu is decided by exactly
        the code that decides one on the row; only the class and the menu role differ. */
     const one = (p, inMenu) => {
-      const on = p.id === cur;
       const a = aim(p);
+      /* Lit, but on one of its details panes rather than its own screen (`back`, the
+         Work pill on the advocate console or Releases): still `aria-current`, because
+         that is where you are, and still a control, because it is the way back. */
+      const away = p.id === cur && p.back && !!a.view && a.view !== here() && homeIsHere();
+      const on = p.id === cur && !away;
       const showable = !on && !!a.view && !!panes?.has(a.view) && a.view !== here();
       const narrows = !on && !!a.kind && homeIsHere();
       const act = showable || narrows;
@@ -619,12 +687,14 @@
          tapped from anywhere else, because a narrowing of a list means nothing until the
          list is the one on screen. Empty when the pane is already right. */
       const pane = showable ? a.view : narrows && !home ? route.HOME : '';
-      const tag = on ? 'span' : act ? 'button' : 'a';
+      const tag = on ? 'span' : act || away ? 'button' : 'a';
       /* `data-beads` on the Beads pill when it is going to the ledger: the status has to
          be set as well as the pane switched, which is `beadsGo` and not a bare `go`. */
       const attrs = on
         ? 'aria-current="page"'
-        : act
+        : away
+          ? `type="button" aria-current="page" data-pane="${esc(route.HOME)}"${a.kind ? ` data-kind="${esc(a.kind)}"` : ''}`
+          : act
           ? `type="button"${pane ? ` data-pane="${esc(pane)}"` : ''}${narrows ? ` data-kind="${esc(a.kind)}"` : ''}` +
             (showable && a.side ? ` data-beads="${esc(a.side)}"` : '')
           : `href="${esc(a.href)}"`;
@@ -653,8 +723,8 @@
         badge +
         `</${tag}>`;
     };
-    const row = PILLS.filter((p) => !p.more);
-    const tucked = PILLS.filter((p) => p.more);
+    const row = PILLS.filter((p) => visible(p) && !p.more);
+    const tucked = PILLS.filter((p) => visible(p) && p.more);
     /* The ⋯ pill, last. Lit — the accent fill and `aria-current` — when the view on
        screen is one of the pills behind it, so the row still says where you are when
        where you are is not on it. Always a button, because it always opens the menu:
@@ -665,7 +735,22 @@
         ` aria-expanded="${!menu.hidden}" aria-label="More views"${deep ? ' aria-current="page"' : ''}>` +
         `<span class="viewpill-icon" aria-hidden="true">⋯</span></button>`
       : '';
-    nav.innerHTML = row.map((p) => one(p, false)).join('') + more;
+    /* ＋ and Find (bc-qzng7.4). The row is the app's one bar since phase 4 — at the bottom
+       of a phone, down the left of a wide screen — so the two actions that are not places
+       sit in it: ＋ between Work and Beads where a thumb rests, and Find at the end. ＋ is
+       the page's own create (public/app.js's `#compose`, which decides what it makes for
+       the view on screen), so it is drawn only where there is one. */
+    const plus = canCompose()
+      ? '<button type="button" class="viewpill viewpill-act viewpill-plus" data-act="compose" aria-label="Create">' +
+        '<span class="viewpill-icon" aria-hidden="true">＋</span><span class="viewpill-label">New</span></button>'
+      : '';
+    const find =
+      '<button type="button" class="viewpill viewpill-act viewpill-find" data-act="find" aria-label="Find (⌘K)">' +
+      '<span class="viewpill-icon" aria-hidden="true">🔎</span><span class="viewpill-label">Find</span></button>';
+    const drawn = row.map((p) => one(p, false));
+    const at = row.findIndex((p) => p.id === 'epics');
+    if (plus) drawn.splice(at === -1 ? drawn.length : at + 1, 0, plus);
+    nav.innerHTML = drawn.join('') + more + find;
     /* Two groups: what this app does (the advocates, the releases, the space's settings)
        and the views a repo declared about itself, which `add` flags as `repo`. */
     const ops = tucked.filter((p) => !p.repo);
@@ -711,8 +796,25 @@
     act(btn);
   });
 
+  /** Is there a create on this page right now? The shell's ＋, if its wrapper is showing. */
+  function canCompose() {
+    const wrap = document.querySelector?.('.compose-wrap');
+    return Boolean(wrap && !wrap.hidden && document.getElementById?.('compose'));
+  }
+
+  /** Find, loaded on first use so a page that never opens it pays only for this line. */
+  function openFind() {
+    if (window.beadcause?.find) return window.beadcause.find.open();
+    const tag = document.createElement('script');
+    tag.src = '/find.js';
+    tag.onload = () => window.beadcause?.find?.open();
+    document.head.appendChild(tag);
+  }
+
   /** What a tapped pill asks for, on the row or in the menu. */
   function act(btn) {
+    if (btn.dataset.act === 'compose') return document.getElementById('compose')?.click();
+    if (btn.dataset.act === 'find') return openFind();
     /* The pane first and the narrowing second, and the order is the point: a kind pill
        tapped from another pane carries both, and picking the kind before Home is the pane
        on screen would narrow a list nobody is looking at and then paint over it. */
@@ -787,6 +889,27 @@
     reveal();
   });
 
+  /* ＋ follows the page's own create: public/app.js shows and hides `.compose-wrap` as the
+     view changes, and the bar's ＋ has to come and go with it. */
+  const composeWrap = document.querySelector?.('.compose-wrap');
+  if (composeWrap && typeof MutationObserver === 'function') {
+    let had = canCompose();
+    new MutationObserver(() => {
+      if (canCompose() !== had) {
+        had = canCompose();
+        draw();
+      }
+    }).observe(composeWrap, { attributes: true, attributeFilter: ['hidden'] });
+  }
+  /* ⌘K before find.js is loaded: load it and open. Once loaded, find.js answers ⌘K itself. */
+  addEventListener?.('keydown', (e) => {
+    if (window.beadcause?.find) return;
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && String(e.key).toLowerCase() === 'k') {
+      e.preventDefault();
+      openFind();
+    }
+  });
+
   /**
    * Append a pill for a view a **repo** declared about itself.
    *
@@ -806,6 +929,12 @@
    * Redraws, because the row is already on screen by the time `/api/views` answers. It is
    * the same `draw()` the pane switch calls, so the lit pill and the three shapes are
    * decided exactly as they always are and nothing here is a second opinion about them.
+   *
+   * Added is not the same as drawn. A repo pill is in this list for the life of the page
+   * and appears in the row only while the space picker is showing the repo that declared
+   * it — `visible` above has the argument. So this returns `true` for a pill that is on
+   * nobody's screen this second, which is the honest answer: it was accepted, and where
+   * it is drawn is a question about the picker rather than about the call.
    */
   function add(pill) {
     const id = String(pill?.id || '');
@@ -822,9 +951,16 @@
       // narrowings of Home, and a link to nothing for one that is not. A caller that gives
       // no address gets the one address that is always true.
       href: String(pill?.href || `/${route.hashFor(id) || ''}`),
+      // Which repo declared it. The row does not read a manifest or a workspace list — it
+      // is handed the name and hands it straight back to the space picker (`pickedOn`
+      // above), which is the one place that knows what is selected. A caller that gives
+      // none gets a pill nothing can hide, which is the right default for a pill whose
+      // repo is unknown.
+      workspace: String(pill?.workspace || ''),
       repo: true,
       more: true,
     });
+    watchSpace();
     draw();
     reveal();
     return true;

@@ -854,9 +854,6 @@ await check('every pill the row draws is warmed — and three views are delibera
   const VIEW_OF = {
     home: 'inbox',
     epics: 'inbox',
-    question: 'inbox',
-    session: 'inbox',
-    pr: 'prs',
     // Ledger and All Beads, as one pill since bc-yjekg.3. Its Open side is Home narrowed
     // — the inbox payload, already warm through every pill above — so the entry it is
     // the only way to is the ledger's.
@@ -881,13 +878,22 @@ await check('every pill the row draws is warmed — and three views are delibera
   // arrives at in one tap, so all three are still warmed. These are the *only* views
   // allowed to have no pill; anything else here would be a payload warmed for a page
   // nobody can get to.
-  const reached = new Set(ids.map((p) => VIEW_OF[p]));
-  assert.deepEqual(views.filter((v) => !reached.has(v)), ['endorse', 'admin', 'console']);
+  //
+  // Config joined them in bc-qzng7.1: its pill went, and the pane is the Settings screen
+  // now, reached from the space name rather than from the row. It warms nothing either
+  // way (`paths: []`), so it is an exception that costs the warm nothing.
+  // Work (bc-qzng7.3) reaches three more in one tap: its pipeline strips and Stage filter
+  // draw off `/api/prs`, and its health line's two links are the advocate console and
+  // Releases — panes that lost their own pills to it. So they count as the pill's.
+  const DETAILS = { epics: ['prs', 'advocates', 'releases'] };
+  const reachedOf = (p) => [VIEW_OF[p], ...(DETAILS[p] || [])];
+  const reached = new Set(ids.flatMap(reachedOf));
+  assert.deepEqual(views.filter((v) => !reached.has(v)), ['config', 'endorse', 'admin', 'console']);
 
   // And the pills' own order still follows the row, so the warm fills them in the order a
   // thumb reaches them — read through the map, and with the repeats dropped, because four
   // pills share one entry and a list cannot hold it four times.
-  const wanted = [...new Set(ids.map((p) => VIEW_OF[p]))];
+  const wanted = [...new Set(ids.flatMap(reachedOf))];
   assert.deepEqual(views.filter((v) => reached.has(v)), wanted);
 
   // Every pill before every page that is not one (bc-xxzz). The background warm is

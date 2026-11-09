@@ -72,6 +72,8 @@ const {
   parseOpened,
   inTurn,
   restoreApp,
+  focusMode,
+  parseBundleId,
   ITERM_BUNDLE_ID,
   parseClosedWindows,
   closeEmptyWindows,
@@ -565,8 +567,9 @@ check(() => {
   assert.ok(!/close \((first )?window/.test(code), 'closing the window would end every sibling session in it');
   assert.ok(!/terminate/.test(code), 'terminate leaves an empty frame behind (bc-30ve)');
   assert.ok(!fs.existsSync(path.join(ROOT, 'scripts', 'close-window.applescript')), 'the window closer is gone');
-  const reap = fs.readFileSync(path.join(ROOT, 'lib', 'reap.js'), 'utf8');
-  assert.ok(/'close-tab\.applescript'/.test(reap), 'lib/reap.js still points at a window closer');
+  // The reap's closer is the terminal backend's `close` since bc-obucr.1.
+  const backend = fs.readFileSync(path.join(ROOT, 'lib', 'termbackend-iterm.js'), 'utf8');
+  assert.ok(/'close-tab\.applescript'/.test(backend), 'the iTerm backend still points at a window closer');
 }, 'reaping one session closes only its tab, so the rest of its workspace keeps running');
 
 check(() => {
@@ -579,10 +582,12 @@ check(() => {
 
 /* --------------------------------------------------------- what the caller passes */
 
-const session = fs.readFileSync(path.join(ROOT, 'lib', 'session.js'), 'utf8');
+// The open call moved behind the terminal backend in bc-obucr.1 — same argv, same state
+// keys — so it is read where it now lives.
+const session = fs.readFileSync(path.join(ROOT, 'lib', 'termbackend-iterm.js'), 'utf8');
 
 check(() => {
-  assert.ok(/\[SCRIPT, command, tabTitle, profile, home, takeFocus \? 'take-focus' : 'return-focus', key\]/.test(session),
+  assert.ok(/\[SCRIPT, command, tabTitle, profile, home, focusMode\(takeFocus, prior\), key\]/.test(session),
     'the script is called with all six');
   assert.ok(/inTurn\(key,/.test(session), 'one open at a time per workspace');
   assert.ok(/homeWindowOf\(loadState\(\)\.itermWindows, key\)/.test(session), 'the recorded window is read');
@@ -590,14 +595,34 @@ check(() => {
 }, 'the launcher hands the script the workspace and its recorded window');
 
 check(() => {
-  assert.ok(/takeFocus \? 'take-focus' : 'return-focus'/.test(session));
+  assert.ok(/focusMode\(takeFocus, prior\)/.test(session));
   assert.ok(/if \(prior\) restoreApp\(prior\)/.test(session), 'the cross-app half of handing focus back');
 }, 'and says whether the window may keep the keyboard');
+
+check(() => {
+  assert.equal(focusMode(true, 'com.google.Chrome'), 'take-focus');
+  assert.equal(focusMode(false, ITERM_BUNDLE_ID), 'return-focus', 'in iTerm: the beat and the selects');
+  assert.equal(focusMode(false, null), 'return-focus', 'unknown front app: the cautious path');
+  assert.equal(focusMode(false, 'com.google.Chrome'), 'return-app', 'another app: no beat, restoreApp at once');
+  const script = fs.readFileSync(path.join(ROOT, 'scripts', 'open-session.applescript'), 'utf8');
+  assert.ok(/item 5 of argv is "return-app"/.test(script), 'the script knows the mode');
+  assert.ok(/priorWindowId is not missing value and not otherApp/.test(script), 'and skips the beat for it');
+}, 'a tab opened while Adam is in another app hands the keyboard back without the 0.4s beat (bc-9qnd7)');
+
+check(() => {
+  // Measured on Darwin 27.2: the key is `bundleID`, unquoted. Older macOS quoted
+  // CFBundleIdentifier. Missing the new form left frontmostApp null and focus never returned.
+  assert.equal(parseBundleId('[ NULL ]  ASN:0x0-0x1:  (in front)\n    bundleID="com.google.Chrome"\n'), 'com.google.Chrome');
+  assert.equal(parseBundleId('"CFBundleIdentifier"="com.apple.Safari"'), 'com.apple.Safari');
+  assert.equal(parseBundleId('[ NULL ]'), null);
+  assert.equal(parseBundleId(undefined), null);
+}, 'the front app is read on both lsappinfo formats (bc-9qnd7)');
 
 const config = fs.readFileSync(path.join(ROOT, 'lib', 'config.js'), 'utf8');
 
 check(() => {
-  assert.ok(/cfg\.sessionWindows = \{ \.\.\.defaults\(\)\.sessionWindows/.test(config));
+  // `d` is loadConfig's one `defaults()` call (bc-xl7n.230); either spelling merges them.
+  assert.ok(/cfg\.sessionWindows = \{ \.\.\.(?:defaults\(\)|d)\.sessionWindows/.test(config));
   // The card table is retired, not kept as dead config (bc-2uj4.16.2).
   const block = config.slice(config.indexOf('    sessionWindows: {'), config.indexOf('stealFocus: false,'));
   assert.ok(!/\b(layout|card|jitter):/.test(block), 'the scatter layout left a setting behind');

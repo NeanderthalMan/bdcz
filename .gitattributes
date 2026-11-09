@@ -44,6 +44,12 @@
 # differently into ordinary conflict markers. A clone without the driver installed
 # (CI, GitHub's update-branch) falls back to git's normal text merge, which is a
 # conflict rather than a wrong answer.
+#
+# bc-xl7n.207: "installed per clone" turned out to mean "installed nowhere" — this repo's
+# own clone never had it, and package-lock.json conflicted in 21 merges in the month after
+# this line landed. The daemon now installs it at every startup (lib/jsonmergedriver.js).
+# If the conflict-hotspot sweep names either file again, check `node scripts/jsonmerge.mjs
+# --check` before restructuring anything.
 
 package.json       merge=jsonmerge
 package-lock.json  merge=jsonmerge
