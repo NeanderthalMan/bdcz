@@ -529,6 +529,18 @@ if [ "$PERMS_RC" != 0 ]; then
   warn "Claude Code allow rules for bd were not all written (exit $PERMS_RC) — carrying on."
 fi
 
+# ------------------------------------------------------- Claude Code skills (bc-eszkl)
+
+# /bdcz (file a bead from any session) and /handoff live in skills/ in this checkout.
+# Each is linked into the Claude Code skills folder, so a `git pull` updates them. A
+# skill of your own with the same name is never replaced; it is reported, and
+# `node scripts/claude-skills.mjs --replace` moves it aside. Never fatal.
+SKILLS_RC=0
+( cd "$ROOT" && node scripts/claude-skills.mjs ) || SKILLS_RC=$?
+if [ "$SKILLS_RC" != 0 ]; then
+  warn "not every Claude Code skill was linked (exit $SKILLS_RC) — carrying on."
+fi
+
 # ----------------------------------------------------------------- phone support
 
 # Off unless asked for: without it beadcause answers on 127.0.0.1 alone, which is all a
