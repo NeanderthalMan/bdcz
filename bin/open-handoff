@@ -200,12 +200,19 @@ in_flight() {
 # The claim is bin/claim.js beside this script, by absolute path: the successor runs in
 # another workspace's directory, where nothing of beadcause is on PATH. ~/.claude/open-
 # handoff.sh is a symlink to this file, so resolve it before taking the directory.
+#
+# Resolved to the end, and physically (bc-eszkl). The /handoff skill reaches this file as
+# ~/.claude/skills/handoff/open-handoff, which is two links deep: the skill directory
+# links into skills/handoff/ in this checkout, and open-handoff there links to
+# ../../bin/open-handoff. One hop plus a logical `cd` read that `..` against the path as
+# typed and landed in ~/.claude/bin. `cd -P` lets the kernel walk the links instead.
 SELF="$0"
-if [ -L "$SELF" ]; then
+for _ in 1 2 3 4 5 6 7 8; do
+  [ -L "$SELF" ] || break
   LINK="$(readlink "$SELF")"
   case "$LINK" in /*) SELF="$LINK" ;; *) SELF="$(dirname "$SELF")/$LINK" ;; esac
-fi
-CLAIM_BIN="$(cd "$(dirname "$SELF")" && pwd)/claim.js"
+done
+CLAIM_BIN="$(cd -P "$(dirname "$SELF")" && pwd -P)/claim.js"
 
 PROMPT="Read handoff ${ID}. Run: bd show ${ID} --json | jq -r '.[0].description'
 Then claim it for this session: node ${CLAIM_BIN} ${ID}

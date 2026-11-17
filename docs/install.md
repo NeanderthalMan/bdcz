@@ -27,6 +27,18 @@ Mac only. Turn it on later with `npm run install-service -- --phone`: that insta
 listens on the tailnet address too, and prints the pairing QR. Sign Tailscale in on the Mac
 and the phone as the same user first.
 
+**It links beadcause's Claude Code skills** from `skills/` in the checkout into
+`~/.claude/skills` (and `$CLAUDE_CONFIG_DIR/skills`, when that is a different folder):
+
+- **`/bdcz <anything>`** files a bead in the beadcause tracker from any session in any repo.
+  It is ordinary, ready work, not an agent-filed `unendorsed` one.
+- **`/handoff`** writes the session's handoff bead and opens its successor.
+
+They are links, so a `git pull` updates them. A skill of your own with the same name is
+never replaced; the installer says so, and `node scripts/claude-skills.mjs --replace`
+moves yours into `~/.config/beadcause/replaced-skills/` and links beadcause's.
+`npm run uninstall-service` removes only the links it made. Rules: `lib/claudeskills.js`.
+
 ```bash
 git clone <this repo> beadcause && cd beadcause
 npm run install-service

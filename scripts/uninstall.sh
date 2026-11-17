@@ -21,6 +21,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ( cd "$ROOT" && node scripts/claude-permissions.mjs --uninstall ) || \
   echo " warn could not remove the Claude Code allow rules for bd — carrying on." >&2
 
+# The Claude Code skills install.sh linked from skills/ (bc-eszkl) — only its own links.
+( cd "$ROOT" && node scripts/claude-skills.mjs --uninstall ) || \
+  echo " warn could not remove the Claude Code skill links — carrying on." >&2
+
 # Linux: a systemd user unit (bc-obucr.3), chosen the way install.sh chooses it.
 SERVICE_MANAGER="${BEADCAUSE_SERVICE_MANAGER:-}"
 if [ -z "$SERVICE_MANAGER" ]; then
