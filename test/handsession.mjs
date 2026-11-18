@@ -39,6 +39,7 @@ process.env.BEADCAUSE_CONFIG_DIR = path.join(tmp, 'config');
 fs.mkdirSync(process.env.BEADCAUSE_CONFIG_DIR, { recursive: true });
 
 const { Bd } = await import(LIB('bd.js'));
+process.env.BEADCAUSE_HOST_NAME = 'here';
 const H = await import(LIB('handsession.js'));
 const { openWorkSession } = await import(LIB('session.js'));
 
@@ -197,7 +198,7 @@ async function check(name, fn) {
 console.log('\na bead a hand-opened session is working\n');
 
 await check('the marker is the prefix and a pid, and nothing else is one', () => {
-  assert.equal(H.handLabel(14758), 'worked-by:14758');
+  assert.equal(H.handLabel(14758), 'worked-by:14758@here');
   assert.equal(H.workedBy({ labels: ['agent-filed', 'worked-by:14758'] }), 14758);
   assert.equal(H.workedBy({ labels: ['worked-by:somebody'] }), 0, 'free text holds nothing');
   assert.equal(H.workedBy({ labels: ['worked-by:0'] }), 0);
@@ -330,8 +331,8 @@ await check('mark refuses a pid that is not a live claude, a closed bead, and a 
 await check('mark replaces a marker whose owner has gone', () => {
   reset({ 'zz-g': issue('zz-g', { labels: ['worked-by:9'] }) });
   const out = H.mark(syncBd, 'zz-g', 8, { row: beadOf('zz-g'), ps });
-  assert.equal(out.replaced, 9);
-  assert.deepEqual(beadOf('zz-g').labels, ['worked-by:8']);
+  assert.equal(out.replaced, 'worked-by:9');
+  assert.deepEqual(beadOf('zz-g').labels, ['worked-by:8@here']);
 });
 
 await check('the reconcile ends a quiet window on a marked bead as a stand-down, ahead of the charging arm', () => {

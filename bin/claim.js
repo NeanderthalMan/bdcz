@@ -74,4 +74,4 @@ if (result.refused) {
 console.log(
   result.already ? `${id} is already this session's (${handLabel(me.pid)}) — claimed` : `claimed ${id} for this session (${handLabel(me.pid)})`
 );
-if (result.replaced.length) console.log(`  and took off the stale ${result.replaced.map(handLabel).join(', ')}`);
+if (result.replaced.length) console.log(`  and took off the stale ${result.replaced.join(', ')}`);
