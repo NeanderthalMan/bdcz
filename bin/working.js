@@ -120,6 +120,6 @@ try {
 }
 
 console.log(`marked ${id} ${handLabel(pid)}`);
-if (result.replaced) console.log(`  and took off the stale ${handLabel(result.replaced)}`);
+if (result.replaced) console.log(`  and took off the stale ${result.replaced}`);
 if (result.released) console.log('  and released the claim — the marker is what holds it now');
 for (const n of result.notes) console.log(`  note: ${n}`);
